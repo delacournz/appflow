@@ -2,6 +2,7 @@ import type { PluginCommand } from '../shared/protocol';
 import { downloadAssets, getScreenshot, uploadAssets } from './assets';
 import { componentRefs, getContextForCodeConnect, resolveComponent } from './codeconnect';
 import { generateDiagram, htmlBuild, useFigma } from './create';
+import { adoptBoard, connect, rerouteFlow } from './flow';
 import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
 import { errorText } from './nodes';
@@ -26,7 +27,12 @@ const handlers: Record<string, Handler> = {
     resolve_component: resolveComponent,
     component_refs: componentRefs,
     lint_flow_layout: lintFlowLayout,
+    connect,
+    reroute_flow: rerouteFlow,
+    adopt_board: adoptBoard,
 };
+
+declare const __BUILD__: string;
 
 type UiMessage = { type: 'hello' } | { type: 'command'; id: string; cmd: PluginCommand };
 
@@ -34,14 +40,14 @@ figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
 
 figma.ui.onmessage = async (msg: UiMessage) => {
     if (msg.type === 'hello') {
-        figma.ui.postMessage({ type: 'hello', fileName: figma.root.name, editorType: figma.editorType });
+        figma.ui.postMessage({ type: 'hello', fileName: figma.root.name, editorType: figma.editorType, build: __BUILD__ });
         return;
     }
     if (msg.type !== 'command') return;
     const handler = handlers[msg.cmd.tool];
     let reply: MainReply;
     try {
-        reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}". Rebuild and reopen the plugin.`);
+        reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${__BUILD__}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
     } catch (error) {
         reply = fail(errorText(error));
     }

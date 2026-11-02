@@ -2,6 +2,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 
 import type { JsonObject, JsonValue, PluginReply } from '../shared/protocol';
+import { STALE_FIX, stalePlugin } from './build';
 import type { CodeConnectEntry, CodeConnectStore } from './store';
 
 export type ToolContext = {
@@ -9,6 +10,10 @@ export type ToolContext = {
     plugin(tool: string, args: JsonObject, timeoutMs: number): Promise<PluginReply>;
     store: CodeConnectStore;
     downloadDir: string;
+    /** Hash of the plugin build the server expects (plugin/build.json). */
+    expectedBuild?: string | null;
+    /** Hash the connected plugin reported in its hello. */
+    pluginBuild?(): string | null;
 };
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' };
@@ -108,7 +113,10 @@ export const TOOLS: ToolDef[] = [
                 return asJson({ connected: false, howToConnect: 'Open the file in the Figma desktop app and run Plugins → Development → Local Agent Bridge.' });
             }
             const r = await plugin(ctx, 'figma_status', {});
-            return asJson({ connected: true, ...(r.result as JsonObject) });
+            const expected = ctx.expectedBuild ?? null;
+            const actual = ctx.pluginBuild?.() ?? null;
+            const stale = stalePlugin(expected, actual) ? { stale: true, fix: STALE_FIX, expectedBuild: expected, pluginBuild: actual } : {};
+            return asJson({ connected: true, ...stale, ...(r.result as JsonObject) });
         },
     },
     passthrough('whoami', 'The signed-in Figma user (name, id) and the open file. Plans and seats are not visible to a plugin.', obj({})),
@@ -119,9 +127,18 @@ export const TOOLS: ToolDef[] = [
     ),
     {
         name: 'get_screenshot',
-        description: 'A PNG of a node or the selected layer.',
+        description:
+            'A PNG of a node, the selected layer, several nodes (nodeIds: the union of their bounds) or an explicit region of the current page. Use nodeIds or region to see a flow with its arrows.',
         inputSchema: obj({
             nodeId,
+            nodeIds: { type: 'array', items: { type: 'string' }, description: 'Capture the union of these nodes’ bounds, including anything drawn between them.' },
+            region: {
+                type: 'object',
+                description: 'Absolute canvas rect on the current page.',
+                properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } },
+                required: ['x', 'y', 'width', 'height'],
+                additionalProperties: false,
+            },
             maxDimension: { type: 'number', description: 'Longest side in pixels. Default 1024.' },
             scale: { type: 'number', description: 'Export scale; overrides maxDimension.' },
         }),
@@ -273,6 +290,45 @@ export const TOOLS: ToolDef[] = [
         'lint_flow_layout',
         'Check that flow arrows read left to right. Scans arrow vectors under a node (or the current page) and reports any whose head points left (points-left) or whose path travels left (runs-left), with ids and endpoints. Run it after laying out or rerouting a flow; follow the flow-layout skill to fix issues.',
         obj({ nodeId, tolerance: { type: 'number', description: 'Pixels of leftward movement to ignore. Default 1.' } }),
+    ),
+    passthrough(
+        'connect',
+        'Draw a flow arrow from one screen to another on an adopted board and, with a trigger, point the trigger’s prototype navigate reaction at the target (replacing its current one). Routes orthogonally per the flow-layout skill, creates the vector, start dot and label in the board’s arrows group, and stores the link so reroute_flow can redraw it. Calling it again for the same from/to/trigger updates the arrow. A target to the left is drawn below the rows and returned with backwards: true. Returns { arrowGroupId, points, prototypeUpdated, backwards, updated }.',
+        obj(
+            {
+                from: { type: 'string', description: 'Source screen frame ID.' },
+                to: { type: 'string', description: 'Target screen frame ID.' },
+                trigger: { type: 'string', description: 'The control inside the source screen that causes the move. The arrow starts 10 px right of it.' },
+                label: { type: 'string', description: 'Text on the arrow, such as "Continue".' },
+                prototype: { type: 'boolean', description: 'Also set the trigger’s navigate reaction. Default true.' },
+                boardId: { type: 'string', description: 'Board node ID. Defaults to the source screen’s board.' },
+            },
+            ['from', 'to', 'label'],
+        ),
+    ),
+    passthrough(
+        'reroute_flow',
+        'Redraw flow arrows from the current positions of their screens and triggers, after moving screens. Updates each vector, dot and label in place, assigns lanes per gutter in a stable order, and reports arrows whose screens were deleted and arrows that run backwards. Without boardId it covers every adopted board on the current page.',
+        obj({
+            boardId: { type: 'string', description: 'Board node ID.' },
+            arrowIds: { type: 'array', items: { type: 'string' }, description: 'Only redraw these arrow group IDs (as returned by connect).' },
+        }),
+        120_000,
+    ),
+    passthrough(
+        'adopt_board',
+        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger). Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
+        obj(
+            {
+                boardNodeId: { type: 'string', description: 'The board background rectangle or section.' },
+                colWidth: { type: 'number', description: 'Override the inferred column spacing.' },
+                rowHeight: { type: 'number', description: 'Override the inferred row spacing.' },
+                arrowsGroupIds: { type: 'array', items: { type: 'string' }, description: 'Group(s) holding the arrows. Defaults to the "Flow arrows" group that matches the board name.' },
+                dryRun: { type: 'boolean', description: 'Report what would be adopted without changing the file. Default false.' },
+            },
+            ['boardNodeId'],
+        ),
+        120_000,
     ),
     passthrough(
         'get_context_for_code_connect',

@@ -247,7 +247,7 @@
     if (!msg || !socket || socket.readyState !== WebSocket.OPEN)
       return;
     if (msg.type === "hello") {
-      socket.send(JSON.stringify({ hello: { fileName: msg.fileName, editorType: msg.editorType } }));
+      socket.send(JSON.stringify({ hello: { fileName: msg.fileName, editorType: msg.editorType, build: msg.build } }));
       setState(true, `Connected · ${msg.fileName}`);
       return;
     }

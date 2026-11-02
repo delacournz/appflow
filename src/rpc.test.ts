@@ -217,3 +217,62 @@ describe('tools', () => {
         expect(Object.keys(await c.store.all())).toEqual(['K9']);
     });
 });
+
+describe('screenshot targets and build handshake', () => {
+    test('get_screenshot schema accepts nodeIds and region', async () => {
+        const res = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, ctx({}));
+        const tools = (res?.result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
+        const shot = tools.find((t) => t.name === 'get_screenshot');
+        expect(Object.keys(shot?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining(['nodeId', 'nodeIds', 'region', 'maxDimension', 'scale']));
+    });
+
+    test('get_screenshot forwards nodeIds and region to the plugin', async () => {
+        const c = ctx({ get_screenshot: { ok: true, result: {}, images: ['png'] } });
+        await call('get_screenshot', { nodeIds: ['1:2', '1:3'] }, c);
+        await call('get_screenshot', { region: { x: 0, y: 0, width: 10, height: 10 } }, c);
+        expect(c.calls.map((x) => x.args)).toEqual([{ nodeIds: ['1:2', '1:3'] }, { region: { x: 0, y: 0, width: 10, height: 10 } }]);
+    });
+
+    test('figma_status reports stale when the plugin build differs', async () => {
+        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }), expectedBuild: 'new11111', pluginBuild: () => 'old22222' };
+        expect(json(await call('figma_status', {}, c))).toMatchObject({ connected: true, stale: true, fix: 'Re-run Plugins → Development → Local Agent Bridge', expectedBuild: 'new11111', pluginBuild: 'old22222' });
+    });
+
+    test('figma_status has no stale flag when builds match', async () => {
+        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }), expectedBuild: 'same', pluginBuild: () => 'same' };
+        expect(json(await call('figma_status', {}, c)).stale).toBeUndefined();
+    });
+
+    test('figma_status without an expected build is unchanged', async () => {
+        const r = json(await call('figma_status', {}, ctx({ figma_status: { ok: true, result: { file: 'x' } } })));
+        expect(r.stale).toBeUndefined();
+    });
+});
+
+describe('flow tools', () => {
+    test('connect, reroute_flow and adopt_board are listed with their required args', async () => {
+        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
+        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const by = (n: string) => tools.find((t) => t.name === n);
+        expect(by('connect')?.inputSchema.required).toEqual(['from', 'to', 'label']);
+        expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId']);
+        expect(by('reroute_flow')?.inputSchema.properties).toHaveProperty('arrowIds');
+        expect(by('adopt_board')?.inputSchema.required).toEqual(['boardNodeId']);
+        expect(by('adopt_board')?.inputSchema.properties).toHaveProperty('dryRun');
+    });
+
+    test('they pass their arguments through to the plugin and return the result', async () => {
+        const c = ctx({
+            connect: { ok: true, result: { arrowGroupId: '1:9', backwards: false } },
+            reroute_flow: { ok: true, result: { rerouted: 3 } },
+            adopt_board: { ok: true, result: { arrowsAdopted: 4 } },
+        });
+        const args = { from: '1:1', to: '1:2', trigger: '1:3', label: 'Continue' };
+        expect(json(await call('connect', args, c))).toEqual({ arrowGroupId: '1:9', backwards: false });
+        expect(json(await call('reroute_flow', { boardId: '1:0' }, c))).toEqual({ rerouted: 3 });
+        expect(json(await call('adopt_board', { boardNodeId: '1:0', dryRun: true }, c))).toEqual({ arrowsAdopted: 4 });
+        expect(c.calls.map((x) => x.tool)).toEqual(['connect', 'reroute_flow', 'adopt_board']);
+        expect(c.calls[0]?.args).toEqual(args);
+        expect(c.calls[2]?.args).toEqual({ boardNodeId: '1:0', dryRun: true });
+    });
+});
