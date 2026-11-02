@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "lib": [
+      "ESNext"
+    ],
+    "types": [
+      "bun"
+    ]
+  },
+  "include": [
+    "src",
+    "shared",
+    "scripts"
+  ]
+}
