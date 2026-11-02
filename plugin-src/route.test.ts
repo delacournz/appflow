@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assignLanes, gutterKey, laneOffset, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, fanIndex, gutterKey, laneOffset, routeArrow, type Pt, type Rect, type Route } from './route';
 
 const W = 393;
 const H = 852;
@@ -261,5 +261,48 @@ describe('assignLanes', () => {
             { key: 'a', yMin: 60, yMax: 90 },
         ]);
         expect(lanes).toEqual([0, 1, 0, 0, 2]);
+    });
+});
+
+describe('fan-out from one source', () => {
+    const s = screen(0, 0);
+    const banner: Rect = { x: s.x + 20, y: s.y + 120, width: 353, height: 80 };
+    const route = (t: Rect, index: number, count: number) =>
+        must(routeArrow({ source: s, target: t, trigger: banner, gutter: GUTTER, lane: 0, fan: { index, count } }));
+
+    test('the arrow to the highest target starts on top and takes the rightmost lane', () => {
+        const a = route(screen(1, 0), 0, 3);
+        const b = route(screen(1, 1), 1, 3);
+        const c = route(screen(1, 2), 2, 3);
+        const startY = (r: Route) => (r.points[0] as Pt).y;
+        const laneX = (r: Route) => (r.points[1] as Pt).x;
+        expect(startY(a)).toBe(banner.y + banner.height / 2);
+        expect(startY(b) - startY(a)).toBe(16);
+        expect(startY(c) - startY(b)).toBe(16);
+        expect(laneX(a) - laneX(b)).toBe(24);
+        expect(laneX(b) - laneX(c)).toBe(24);
+        expect(laneX(b)).toBe(s.x + W + GUTTER / 2);
+    });
+
+    test('fan arrows enter each target at its middle', () => {
+        const t = screen(1, 2);
+        expect(route(t, 2, 3).points.at(-1)).toEqual({ x: t.x, y: t.y + H / 2 });
+    });
+
+    test('fanIndex orders arrows sharing a source and gutter by target height', () => {
+        expect(
+            fanIndex([
+                { id: 'low', group: 'g', targetY: 300 },
+                { id: 'top', group: 'g', targetY: 100 },
+                { id: 'other', group: 'h', targetY: 50 },
+                { id: 'mid', group: 'g', targetY: 200 },
+            ]),
+        ).toEqual(
+            new Map([
+                ['top', { index: 0, count: 3 }],
+                ['mid', { index: 1, count: 3 }],
+                ['low', { index: 2, count: 3 }],
+            ]),
+        );
     });
 });

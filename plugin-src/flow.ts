@@ -19,7 +19,7 @@ import {
     type ScreenMeta,
 } from './flowmeta';
 import { fail, ok, str, bool, type Handler } from './types';
-import { assignLanes, type Exit, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
 
 const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
@@ -95,16 +95,28 @@ type Plan = { id: string; route: Route | null; error: string | null };
 function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[]): Plan[] {
     const gutter = gutterOf(meta);
     const first = items.map((it) => routeArrow({ ...it.ends, gutter, lane: 0 }));
+    const fans = fanIndex(
+        items.flatMap((it, i) => {
+            const r = first[i] as ReturnType<typeof routeArrow>;
+            if (!r.ok || (r.kind !== 'trigger' && r.kind !== 'gutter')) return [];
+            const s = it.ends.source;
+            const startY = (r.points[0] as Pt).y;
+            const targetY = it.ends.target.y + it.ends.target.height / 2;
+            return targetY >= startY ? [{ id: it.id, group: `${s.x}:${s.y}:${gutterKey(s, it.ends.target)}`, targetY }] : [];
+        }),
+    );
     const lanes = assignLanes(
         items.map((it, i) => {
             const r = first[i] as ReturnType<typeof routeArrow>;
             const ys = r.ok ? r.points.map((p) => p.y) : [0];
-            return { key: r.ok && r.kind !== 'straight' && r.kind !== 'elbow' ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
+            const shared = r.ok && r.kind !== 'straight' && r.kind !== 'elbow' && !fans.has(it.id);
+            return { key: shared ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
         }),
     );
     return items.map((it, i) => {
         const lane = lanes[i] as number;
-        const r = lane === 0 ? (first[i] as ReturnType<typeof routeArrow>) : routeArrow({ ...it.ends, gutter, lane });
+        const fan = fans.get(it.id);
+        const r = fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? (first[i] as ReturnType<typeof routeArrow>) : routeArrow({ ...it.ends, gutter, lane });
         return r.ok ? { id: it.id, route: r, error: null } : { id: it.id, route: null, error: r.error };
     });
 }

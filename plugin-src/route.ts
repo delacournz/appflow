@@ -18,6 +18,8 @@ export type RouteInput = {
     lane: number;
     /** 'bottom' drops out of the source's bottom edge and turns right, keeping the arrow out of a busy gutter. */
     exit?: Exit;
+    /** Position among arrows leaving one source through one gutter, ordered by target height; see `fanIndex`. */
+    fan?: Fan;
 };
 
 export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean };
@@ -27,6 +29,25 @@ export const ENTRY_OFFSET = 340;
 export const DOT_GAP = 10;
 export const LANE_STEP = 24;
 export const BACKWARDS_DROP = 60;
+export const FAN_STEP = 16;
+
+export type Fan = { index: number; count: number };
+
+/**
+ * Arrows that leave the same source through the same gutter fan out without crossing:
+ * the one to the highest target starts on top and takes the rightmost lane.
+ */
+export function fanIndex(items: { id: string; group: string; targetY: number }[]): Map<string, Fan> {
+    const groups = new Map<string, { id: string; targetY: number }[]>();
+    for (const it of items) groups.set(it.group, [...(groups.get(it.group) ?? []), it]);
+    const out = new Map<string, Fan>();
+    for (const list of groups.values()) {
+        if (list.length < 2) continue;
+        const sorted = [...list].sort((a, b) => a.targetY - b.targetY);
+        sorted.forEach((it, index) => out.set(it.id, { index, count: sorted.length }));
+    }
+    return out;
+}
 const EDGE_MARGIN = 8;
 const ROW_TOLERANCE = 2;
 
@@ -124,7 +145,7 @@ const done = (kind: RouteKind, raw: Pt[], backwards = false): Route => {
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 export function routeArrow(input: RouteInput): Route | RouteError {
-    const { source, target, trigger, gutter, lane, exit = 'side' } = input;
+    const { source, target, trigger, gutter, lane, exit = 'side', fan } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
         case 'overlap':
@@ -140,6 +161,12 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
                 const y = midY(source);
                 return done('straight', [{ x: sx, y }, { x: tx, y }]);
+            }
+            if (fan && fan.count > 1) {
+                const base: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
+                const start: Pt = { x: base.x, y: base.y + fan.index * FAN_STEP };
+                const fanX = sx + Math.min(gutter, tx - sx) / 2 + ((fan.count - 1) / 2 - fan.index) * LANE_STEP;
+                return done(trigger ? 'trigger' : 'gutter', [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
             }
             const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
             const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
