@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { margin: 0; padding: 12px; font: 12px/1.4 Inter, system-ui, sans-serif; color: var(--figma-color-text); background: var(--figma-color-bg); }
+      .row { display: flex; align-items: center; gap: 8px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--figma-color-icon-danger, #f24822); flex: none; }
+      .dot.on { background: var(--figma-color-icon-success, #14ae5c); }
+      .muted { color: var(--figma-color-text-secondary); margin-top: 6px; }
+      input { width: 64px; padding: 2px 4px; color: inherit; background: transparent; border: 1px solid var(--figma-color-border); border-radius: 4px; }
+      #last { margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--figma-color-text-secondary); }
+    </style>
+  </head>
+  <body>
+    <div class="row"><span id="dot" class="dot"></span><strong id="state">Connecting…</strong></div>
+    <div class="row muted">Port <input id="port" value="3055" inputmode="numeric" /> · keep this window open</div>
+    <div id="last">No commands yet</div>
+    <script>
+      const dot = document.getElementById('dot');
+      const state = document.getElementById('state');
+      const last = document.getElementById('last');
+      const portInput = document.getElementById('port');
+      let socket = null;
+      let retry = null;
+      let fileName = '';
+
+      const setState = (on, label) => { dot.classList.toggle('on', on); state.textContent = label; };
+
+      function toBase64(bytes) {
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        return btoa(binary);
+      }
+
+      function connect() {
+        clearTimeout(retry);
+        if (socket) socket.close();
+        const port = Number(portInput.value) || 3055;
+        socket = new WebSocket(`ws://localhost:${port}/plugin`);
+        socket.onopen = () => {
+          setState(true, 'Connected to the local bridge');
+          parent.postMessage({ pluginMessage: { type: 'hello' } }, '*');
+        };
+        socket.onclose = () => {
+          setState(false, 'Waiting for the bridge server…');
+          retry = setTimeout(connect, 2000);
+        };
+        socket.onerror = () => socket.close();
+        socket.onmessage = (event) => {
+          const { id, cmd } = JSON.parse(event.data);
+          last.textContent = `${new Date().toLocaleTimeString()} · ${cmd.type}`;
+          parent.postMessage({ pluginMessage: { type: 'command', id, cmd } }, '*');
+        };
+      }
+
+      window.onmessage = (event) => {
+        const msg = event.data.pluginMessage;
+        if (!msg || !socket || socket.readyState !== WebSocket.OPEN) return;
+        if (msg.type === 'hello') {
+          fileName = msg.fileName;
+          socket.send(JSON.stringify({ hello: { fileName } }));
+          setState(true, `Connected · ${fileName}`);
+          return;
+        }
+        if (msg.type === 'reply') {
+          const reply = msg.reply;
+          if (msg.bytes) reply.image = toBase64(new Uint8Array(msg.bytes));
+          socket.send(JSON.stringify({ id: msg.id, reply }));
+        }
+      };
+
+      portInput.addEventListener('change', connect);
+      connect();
+    </script>
+  </body>
+</html>
