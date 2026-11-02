@@ -17,7 +17,8 @@ A flow board should read like a sentence: start at the top left, follow the main
 6. **Never route an arrow through a screen or its label.** Vertical arrows into a screen enter its top edge on the right side (about 340 px into a 393 px frame), clear of the label. Horizontal arrows enter the left edge.
 7. **Arrows don't cross.** If two must, reorder their start points so they don't. When they can't be separated, cross once, at right angles.
 8. **Labels sit on top of lines,** centred on a straight segment, and above every vector in z-order.
-9. **One arrowhead per destination per source.** Don't merge two sources into one line. Draw each with its own arrowhead and label.
+9. **Start an arrow at the control that triggers it.** When a button, row, tab or link causes the move, put the start dot just outside that control's edge (about 10 px, so it doesn't blend into the fill) and route from there: across to the gutter, then up or down, then into the target. Only an automatic transition (a timer, a webhook, a redirect) starts from the screen's edge. Keep arrow groups above the screens in layer order so start dots stay visible.
+10. **One arrowhead per destination per source.** Don't merge two sources into one line. Draw each with its own arrowhead and label.
 
 ## Grid
 
