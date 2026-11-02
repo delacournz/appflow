@@ -1,4 +1,4 @@
-# figma-local-bridge
+# appflow
 
 A local MCP server plus a Figma development plugin. It exposes the Figma MCP server's tools, with the same names, against the file open in the Figma desktop app. No Figma MCP plan or Dev Mode seat needed.
 
@@ -21,13 +21,13 @@ Most tools take an optional `nodeId` (`193:443` or `193-443`). Without one they 
 | `get_figjam` | XML of stickies, shapes, connectors and sections, plus a screenshot. |
 | `search_design_system` | Local components, sets, variables and styles, plus variables from enabled libraries. |
 | `get_libraries` | Enabled libraries and the remote components in use. |
-| `download_assets` | Exports nodes and image fills to files under `~/.figma-local-bridge/downloads` or `outDir`. |
+| `download_assets` | Exports nodes and image fills to files under `~/.appflow/downloads` or `outDir`. |
 | `upload_assets` | Places local PNG, JPG, GIF, WebP or SVG files. SVGs become vectors. |
 | `use_figma` | Runs Plugin API JavaScript. It returns the returned value and `console.log` lines. |
 | `html_to_figma` | Renders HTML in the plugin window and rebuilds it as frames, text, SVG and images. |
 | `generate_diagram` | Mermaid flowcharts: shapes and connectors in FigJam, frames and arrows in design files. |
 | `get_context_for_code_connect` | Properties, variants, nested instances and text layers of a component. |
-| `get_code_connect_suggestions` / `get_code_connect_map` / `add_code_connect_map` / `send_code_connect_mappings` | Code Connect mappings, stored locally in `~/.figma-local-bridge/code-connect.json`. They are not synced with Figma's Code Connect. |
+| `get_code_connect_suggestions` / `get_code_connect_map` / `add_code_connect_map` / `send_code_connect_mappings` | Code Connect mappings, stored locally in `~/.appflow/code-connect.json`. They are not synced with Figma's Code Connect. |
 
 Prompt: `create_design_system_rules` (arguments `clientLanguages` and `clientFrameworks`).
 
@@ -47,14 +47,14 @@ Code runs with `documentAccess: "dynamic-page"`, so use the async APIs: `getNode
 
 1. Run `bun install && bun run build`.
 2. Register the server with Claude Code:
-   `claude mcp add figma-bridge -s user -- bun run ~/Documents/Projects/figma-local-bridge/src/server.ts`
+   `claude mcp add appflow -s user -- bun run ~/Documents/Projects/appflow/src/server.ts`
 3. In the Figma desktop app, go to Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
-4. Open the file, then run Plugins → Development → **Local Agent Bridge**. Leave the window open. A green dot means it is connected.
+4. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
 
 Environment:
 
-- `FIGMA_BRIDGE_PORT` (default 3055): to change it, also change the port in the plugin window and in `devAllowedDomains`.
-- `FIGMA_BRIDGE_HOME` (default `~/.figma-local-bridge`): where downloads and the Code Connect store go.
+- `APPFLOW_PORT` (default 3055): to change it, also change the port in the plugin window and in `devAllowedDomains`.
+- `APPFLOW_HOME` (default `~/.appflow`): where downloads and the Code Connect store go.
 
 ## Security
 

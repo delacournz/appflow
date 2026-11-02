@@ -1,6 +1,6 @@
 /**
- * figma-local-bridge: an MCP server over stdio that forwards tool calls to the
- * "Local Agent Bridge" Figma plugin over a WebSocket on 127.0.0.1.
+ * appflow: an MCP server over stdio that forwards tool calls to the
+ * "AppFlow" Figma plugin over a WebSocket on 127.0.0.1.
  *
  * stdout carries only JSON-RPC. Everything else is logged to stderr.
  */
@@ -14,9 +14,9 @@ import { handleRequest, type RpcRequest } from './rpc';
 import { CodeConnectStore } from './store';
 import type { ToolContext } from './tools';
 
-const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? 3055);
-const HOME = process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.figma-local-bridge');
-const log = (...parts: unknown[]) => console.error('[figma-local-bridge]', ...parts);
+const PORT = Number(process.env.APPFLOW_PORT ?? process.env.FIGMA_BRIDGE_PORT ?? 3055);
+const HOME = process.env.APPFLOW_HOME ?? process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.appflow');
+const log = (...parts: unknown[]) => console.error('[appflow]', ...parts);
 
 type Pending = { resolve: (reply: PluginReply) => void; timer: ReturnType<typeof setTimeout> };
 
@@ -60,7 +60,7 @@ try {
         port: PORT,
         fetch(req, server) {
             if (new URL(req.url).pathname === '/plugin' && server.upgrade(req)) return undefined;
-            return new Response('figma-local-bridge', { status: 200 });
+            return new Response('appflow', { status: 200 });
         },
         websocket: {
             maxPayloadLength: 256 * 1024 * 1024,

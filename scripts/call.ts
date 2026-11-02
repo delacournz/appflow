@@ -1,7 +1,7 @@
 /**
  * One-shot CLI: hosts the plugin socket, waits for the plugin to connect, runs one tool and prints the result.
  * Usage: bun run scripts/call.ts <tool> [json-args | @file.json]
- * Images are written to $FIGMA_BRIDGE_HOME/cli/ and their paths printed.
+ * Images are written to $APPFLOW_HOME/cli/ and their paths printed.
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -17,8 +17,8 @@ if (!tool) {
     process.exit(2);
 }
 const args = (raw ? JSON.parse(raw.startsWith('@') ? await readFile(raw.slice(1), 'utf8') : raw) : {}) as JsonObject;
-const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? 3055);
-const HOME = process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.figma-local-bridge');
+const PORT = Number(process.env.APPFLOW_PORT ?? process.env.FIGMA_BRIDGE_PORT ?? 3055);
+const HOME = process.env.APPFLOW_HOME ?? process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.appflow');
 
 const pending = new Map<string, (r: PluginReply) => void>();
 let socket: import('bun').ServerWebSocket<undefined> | null = null;
@@ -28,7 +28,7 @@ const connected = new Promise<void>((resolve) => (onConnect = resolve));
 const server = Bun.serve({
     hostname: '127.0.0.1',
     port: PORT,
-    fetch: (req, s) => (s.upgrade(req) ? undefined : new Response('figma-local-bridge cli')),
+    fetch: (req, s) => (s.upgrade(req) ? undefined : new Response('appflow cli')),
     websocket: {
         maxPayloadLength: 256 * 1024 * 1024,
         open(ws) {

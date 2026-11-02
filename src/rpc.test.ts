@@ -14,7 +14,7 @@ type ToolResult = { content: Content[]; isError?: boolean };
 
 let dir: string;
 beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'figma-bridge-'));
+    dir = await mkdtemp(join(tmpdir(), 'appflow-'));
 });
 afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -44,7 +44,7 @@ const json = (r: ToolResult, i = 0) => JSON.parse(r.content[i]?.text ?? 'null');
 describe('protocol', () => {
     test('initialize echoes the version and declares tools and prompts', async () => {
         const res = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, ctx({}));
-        expect(res).toMatchObject({ id: 1, result: { protocolVersion: '2025-06-18', capabilities: { tools: {}, prompts: {} }, serverInfo: { name: 'figma-local-bridge' } } });
+        expect(res).toMatchObject({ id: 1, result: { protocolVersion: '2025-06-18', capabilities: { tools: {}, prompts: {} }, serverInfo: { name: 'appflow' } } });
     });
 
     test('notifications get no response; unknown methods are method-not-found', async () => {
@@ -92,7 +92,7 @@ describe('protocol', () => {
 
         const list = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'resources/list' }, ctx({}));
         const uri = (list?.result as { resources: { uri: string }[] }).resources[0]?.uri ?? '';
-        expect(uri).toBe('skill://figma-bridge/flow-layout/SKILL.md');
+        expect(uri).toBe('skill://appflow/flow-layout/SKILL.md');
         const read = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri } }, ctx({}));
         const text = (read?.result as { contents: { text: string; mimeType: string }[] }).contents[0];
         expect(text?.mimeType).toBe('text/markdown');
@@ -122,7 +122,7 @@ describe('tools', () => {
     test('fail clearly when the plugin is not open', async () => {
         const r = await call('use_figma', { code: 'x' }, ctx({}, false));
         expect(r.isError).toBe(true);
-        expect(r.content[0]?.text).toContain('Local Agent Bridge');
+        expect(r.content[0]?.text).toContain('AppFlow');
     });
 
     test('figma_status explains how to connect instead of failing', async () => {
@@ -235,7 +235,7 @@ describe('screenshot targets and build handshake', () => {
 
     test('figma_status reports stale when the plugin build differs', async () => {
         const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }), expectedBuild: 'new11111', pluginBuild: () => 'old22222' };
-        expect(json(await call('figma_status', {}, c))).toMatchObject({ connected: true, stale: true, fix: 'Re-run Plugins → Development → Local Agent Bridge', expectedBuild: 'new11111', pluginBuild: 'old22222' });
+        expect(json(await call('figma_status', {}, c))).toMatchObject({ connected: true, stale: true, fix: 'Re-run Plugins → Development → AppFlow', expectedBuild: 'new11111', pluginBuild: 'old22222' });
     });
 
     test('figma_status has no stale flag when builds match', async () => {

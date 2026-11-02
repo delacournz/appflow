@@ -59,7 +59,7 @@ figma.ui.onmessage = async (msg: UiMessage) => {
     const handler = handlers[msg.cmd.tool];
     let reply: MainReply;
     try {
-        reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${__BUILD__}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
+        reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${__BUILD__}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
         reply = fail(errorText(error));
     }

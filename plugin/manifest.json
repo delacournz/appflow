@@ -1,5 +1,5 @@
 {
-  "name": "Local Agent Bridge",
+  "name": "AppFlow",
   "id": "local-agent-bridge",
   "api": "1.0.0",
   "main": "code.js",
@@ -17,7 +17,7 @@
       "ws://localhost:3055",
       "http://localhost:3055"
     ],
-    "reasoning": "Talks to the figma-local-bridge MCP server on this machine only."
+    "reasoning": "Talks to the appflow MCP server on this machine only."
   },
   "permissions": [
     "currentuser",

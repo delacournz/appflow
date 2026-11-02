@@ -105,12 +105,12 @@ const mappingSchema: JsonObject = {
 export const TOOLS: ToolDef[] = [
     {
         name: 'figma_status',
-        description: 'Whether the Local Agent Bridge plugin is connected, plus the open file, pages and selection. Call this first.',
+        description: 'Whether the AppFlow plugin is connected, plus the open file, pages and selection. Call this first.',
         inputSchema: obj({}),
         offline: true,
         async run(_args, ctx) {
             if (!ctx.connected()) {
-                return asJson({ connected: false, howToConnect: 'Open the file in the Figma desktop app and run Plugins → Development → Local Agent Bridge.' });
+                return asJson({ connected: false, howToConnect: 'Open the file in the Figma desktop app and run Plugins → Development → AppFlow.' });
             }
             const r = await plugin(ctx, 'figma_status', {});
             const expected = ctx.expectedBuild ?? null;
@@ -505,7 +505,7 @@ export async function runTool(name: string, args: JsonObject, ctx: ToolContext):
     const tool = TOOLS.find((t) => t.name === name);
     if (!tool) return text(`Unknown tool: ${name}. Cloud-only Figma tools (shaders, generative plugins, Weave, image generation, new files) are not available locally.`, true);
     if (!tool.offline && !ctx.connected()) {
-        return text('The Figma plugin is not connected. In the Figma desktop app, open the file and run Plugins → Development → Local Agent Bridge, then try again.', true);
+        return text('The Figma plugin is not connected. In the Figma desktop app, open the file and run Plugins → Development → AppFlow, then try again.', true);
     }
     try {
         return await tool.run(args, ctx);

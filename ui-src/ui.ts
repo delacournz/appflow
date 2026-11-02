@@ -72,12 +72,12 @@ function connect() {
     const ws = new WebSocket(`ws://localhost:${port}/plugin`);
     socket = ws;
     ws.onopen = () => {
-        setState(true, 'Connected to the local bridge');
+        setState(true, 'Connected to AppFlow');
         toMain({ type: 'hello' });
     };
     ws.onclose = () => {
         if (socket !== ws) return;
-        setState(false, 'Waiting for the bridge server…');
+        setState(false, 'Waiting for the AppFlow server…');
         retry = setTimeout(connect, 2000);
     };
     ws.onerror = () => ws.close();

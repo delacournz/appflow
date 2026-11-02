@@ -6,19 +6,19 @@ import { runTool, TOOLS, type ToolContext } from './tools';
 export type RpcRequest = { jsonrpc: '2.0'; id?: string | number; method: string; params?: Record<string, unknown> };
 export type RpcResponse = { jsonrpc: '2.0'; id: string | number; result?: unknown; error?: { code: number; message: string } };
 
-const SERVER_INFO = { name: 'figma-local-bridge', version: '0.2.0' };
+const SERVER_INFO = { name: 'appflow', version: '0.2.0' };
 
 const INSTRUCTIONS = [
-    'Local Figma tools with the same names as the Figma MCP server, run through the "Local Agent Bridge" plugin in the Figma desktop app.',
+    'Local Figma tools with the same names as the Figma MCP server, run through the "AppFlow" plugin in the Figma desktop app.',
     'Call figma_status first. Most tools default to the current selection when nodeId is omitted.',
     'use_figma runs Plugin API code with documentAccess "dynamic-page": use async APIs (getNodeByIdAsync, setCurrentPageAsync, setReactionsAsync). Colours are 0-1. Load fonts before editing text.',
-    'Screen flows read left to right: the main path goes right, branches go straight down, overlays and entry points straight up; arrows never point or run left; move the target screen rather than bending an arrow back. Read skill://figma-bridge/flow-layout/SKILL.md before laying out a flow. On a flow board use the board tools, not hand-drawn vectors: adopt_board or create_board, describe_board, move_screen / insert_columns / insert_rows / compact_board, duplicate_screen for state copies, connect (from the triggering control; it also sets the prototype) and reroute_flow. Finish with lint_flow_layout and describe_board.',
+    'Screen flows read left to right: the main path goes right, branches go straight down, overlays and entry points straight up; arrows never point or run left; move the target screen rather than bending an arrow back. Read skill://appflow/flow-layout/SKILL.md before laying out a flow. On a flow board use the board tools, not hand-drawn vectors: adopt_board or create_board, describe_board, move_screen / insert_columns / insert_rows / compact_board, duplicate_screen for state copies, connect (from the triggering control; it also sets the prototype) and reroute_flow. Finish with lint_flow_layout and describe_board.',
     'Code Connect mappings are stored locally. Cloud-only tools (shaders, generative plugins, Weave, generate_image, create_new_file, generate_figma_design, send_code_to_figma, get_motion_context) are not available.',
 ].join(' ');
 
 const SKILLS = [
     {
-        uri: 'skill://figma-bridge/flow-layout/SKILL.md',
+        uri: 'skill://appflow/flow-layout/SKILL.md',
         name: 'flow-layout',
         description: 'Lay out screen flows left to right with the board tools (move_screen, duplicate_screen, connect, reroute_flow); check with lint_flow_layout and describe_board.',
         mimeType: 'text/markdown',

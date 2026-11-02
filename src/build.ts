@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-export const STALE_FIX = 'Re-run Plugins → Development → Local Agent Bridge';
+export const STALE_FIX = 'Re-run Plugins → Development → AppFlow';
 
 /** True when the plugin in Figma was built from different code than the server expects. */
 export function stalePlugin(expected: string | null, actual: string | null): boolean {
