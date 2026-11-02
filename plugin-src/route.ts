@@ -141,7 +141,8 @@ export function routeArrow(input: RouteInput): Route | RouteError {
                 const y = midY(source);
                 return done('straight', [{ x: sx, y }, { x: tx, y }]);
             }
-            const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
+            const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
+            const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
             const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
             const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
             return done(trigger ? 'trigger' : 'gutter', [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);

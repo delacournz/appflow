@@ -188,6 +188,14 @@ describe('routeArrow', () => {
         expect(r.kind).toBe('straight');
     });
 
+    test('lanes shift an edge start toward the target so it does not share a line with a neighbour', () => {
+        const s = screen(0, 0);
+        const start = (t: Rect, lane: number) => must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane })).points[0] as Pt;
+        expect(start(screen(1, 1), 0)).toEqual({ x: s.x + W, y: s.y + H / 2 });
+        expect(start(screen(1, 1), 1)).toEqual({ x: s.x + W, y: s.y + H / 2 + 24 });
+        expect(start(screen(1, -1), 1)).toEqual({ x: s.x + W, y: s.y + H / 2 - 24 });
+    });
+
     test('lanes give arrows sharing a target their own arrowhead without crossing', () => {
         const s = screen(0, 0);
         const t = screen(1, 1);
