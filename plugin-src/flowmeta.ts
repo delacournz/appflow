@@ -23,7 +23,17 @@ export type BoardMeta = {
     arrowStyle: { strokeVariableId: string | null; color: Rgb; weight: number; cornerRadius: number };
 };
 
-export type ScreenMeta = { v: 1; kind: 'screen'; boardId: string; col: number; row: number; labelId: string | null; routeId: string | null };
+export type ScreenMeta = {
+    v: 1;
+    kind: 'screen';
+    boardId: string;
+    col: number;
+    row: number;
+    labelId: string | null;
+    routeId: string | null;
+    /** The `Screen · {name}` group holding the label, route and frame. Absent or null on ungrouped screens. */
+    groupId?: string | null;
+};
 
 export type ArrowMeta = {
     v: 1;
@@ -70,6 +80,7 @@ export function parseScreenMeta(raw: string): ScreenMeta | null {
     const o = parse(raw);
     if (!o || o.v !== 1 || o.kind !== 'screen') return null;
     if (!isStr(o.boardId) || !isNum(o.col) || !isNum(o.row) || !strOrNull(o.labelId) || !strOrNull(o.routeId)) return null;
+    if (o.groupId !== undefined && !strOrNull(o.groupId)) return null;
     return o as unknown as ScreenMeta;
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { screenNames } from './screen-group';
 import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName, type TreeNode } from './duplicate-plan';
 
 const board = { originX: 100, originY: 200, colWidth: 500, rowHeight: 1000, screenW: 390, screenH: 844 };
@@ -76,5 +77,14 @@ describe('findDescendant', () => {
     test('depth-first by predicate', () => {
         const t = n('r', [n('a', [n('ListGroup.ItemTitle')]), n('ListGroup.ItemTitle')]);
         expect(findDescendant(t, (x) => x.name.endsWith('ItemTitle'))).toBe((t.children as TreeNode[])[0]?.children?.[0] ?? null);
+    });
+});
+
+describe('screen layer names', () => {
+    test('match the label and route naming used when cloning', () => {
+        const n = screenNames('Expired');
+        expect(n.frame).toBe(frameName('Expired'));
+        expect(n.label).toBe(labelName('Expired'));
+        expect(n.route).toBe(routeName('Expired'));
     });
 });

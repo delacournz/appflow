@@ -76,4 +76,9 @@ describe('renderBoard', () => {
         const out = renderBoard({ ...base, screens: [], arrows: [] });
         expect(out).toMatchObject({ cols: 0, rows: 0, grid: '', arrows: [], issues: [] });
     });
+
+    test('a grouped screen at absolute coordinates reports no issues', () => {
+        const out = renderBoard({ ...base, screens: [at('a', 'Welcome', 0, 0, { labelX: 100 }), at('b', 'Verify your ID', 1, 0, { labelX: 500 })], arrows: [] });
+        expect(out.issues).toEqual([]);
+    });
 });

@@ -959,7 +959,7 @@ ${logs.join(`
   }
   function assignScreenTexts(screen, texts) {
     const find = (prefix, offset) => texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && Math.abs(t.rect.y - (screen.y - offset)) <= 14)?.id ?? null;
-    return { labelId: find("Label ·", 72), routeId: find("Route ·", 40) };
+    return { labelId: find("Label ·", 76), routeId: find("Route ·", 44) };
   }
 
   // plugin-src/flowlint.ts
@@ -1079,6 +1079,8 @@ ${logs.join(`
       return null;
     if (!isStr(o.boardId) || !isNum(o.col) || !isNum(o.row) || !strOrNull(o.labelId) || !strOrNull(o.routeId))
       return null;
+    if (o.groupId !== undefined && !strOrNull(o.groupId))
+      return null;
     return o;
   }
   function parseArrowMeta(raw) {
@@ -1116,6 +1118,36 @@ ${logs.join(`
       r.actions = r.actions.map((a, i) => i === first ? { ...a, destinationId: to } : a);
     }
     return { reactions: out, replaced: true };
+  }
+
+  // plugin-src/screen-group.ts
+  var PREFIX = "Screen · ";
+  var screenGroupName = (name) => `${PREFIX}${name}`;
+  var isScreenGroupName = (name) => name.startsWith(PREFIX);
+  function planGrouping(c) {
+    const memberIds = [c.frameId, ...c.routeId ? [c.routeId] : [], ...c.labelId ? [c.labelId] : []];
+    const members = new Set(memberIds);
+    const { parent } = c;
+    if (parent.type === "GROUP" && isScreenGroupName(parent.name)) {
+      const inside = new Set(parent.childIds);
+      if (parent.childIds.every((id) => members.has(id)) && memberIds.every((id) => inside.has(id)))
+        return { kind: "already", groupId: parent.id };
+      return { kind: "conflict", reason: `${parent.name} (${parent.id}) does not hold exactly this screen's frame, label and route.` };
+    }
+    const at = parent.childIds.indexOf(c.frameId);
+    const index = parent.childIds.slice(0, Math.max(0, at)).filter((id) => !members.has(id)).length;
+    return { kind: "group", name: screenGroupName(c.frameName), memberIds, index };
+  }
+  var upgradeScreenMeta = (meta, groupId) => ({ ...meta, groupId });
+  function shiftTargets(s) {
+    const grouped = !!s.groupId && s.frameParentId === s.groupId;
+    if (!grouped)
+      return [s.frameId, ...s.labelId ? [s.labelId] : [], ...s.routeId ? [s.routeId] : []];
+    const loose = [
+      ...s.labelId && s.labelParentId !== s.groupId ? [s.labelId] : [],
+      ...s.routeId && s.routeParentId !== s.groupId ? [s.routeId] : []
+    ];
+    return [s.groupId, ...loose];
   }
 
   // plugin-src/route.ts
@@ -1471,13 +1503,47 @@ ${logs.join(`
     centre(parts.dot, route.dot);
     centre(parts.label, route.labelAnchor);
   }
+  function collectScreens(children, depth = 0) {
+    const out = [];
+    for (const c of children) {
+      if (c.type === "FRAME")
+        out.push({ frame: c, group: null });
+      else if (c.type === "GROUP" && isScreenGroupName(c.name)) {
+        for (const k of c.children)
+          if (k.type === "FRAME")
+            out.push({ frame: k, group: c });
+      } else if (c.type === "SECTION" && depth < 2)
+        out.push(...collectScreens(c.children, depth + 1));
+    }
+    return out;
+  }
+  function collectTexts(children, depth = 0) {
+    const out = [];
+    for (const c of children) {
+      if (c.type === "TEXT")
+        out.push(c);
+      else if (c.type === "GROUP" && isScreenGroupName(c.name))
+        out.push(...c.children.filter((k) => k.type === "TEXT"));
+      else if (c.type === "SECTION" && depth < 2)
+        out.push(...collectTexts(c.children, depth + 1));
+    }
+    return out;
+  }
+  var groupIdOf = (n) => n.group?.id ?? null;
+  function holdsScreen(node, boardId, depth = 0) {
+    if (node.type === "FRAME")
+      return readMeta(node, SCREEN_KEY, parseScreenMeta)?.boardId === boardId;
+    if ((node.type === "GROUP" || node.type === "SECTION") && depth < 3)
+      return node.children.some((k) => holdsScreen(k, boardId, depth + 1));
+    return false;
+  }
   function raiseArrows(board) {
     const parent = board.arrows.parent;
     if (!parent || !("children" in parent))
       return;
     const kids = parent.children;
     const at = kids.indexOf(board.arrows);
-    const screenAbove = kids.some((k, i) => i > at && k.type === "FRAME" && readMeta(k, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id);
+    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
     if (screenAbove)
       parent.insertChild(kids.length - 1, board.arrows);
   }
@@ -1682,18 +1748,22 @@ ${logs.join(`
     }
     const arrowsGroup = groups[0];
     const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id));
-    const frames = siblings.filter((c) => c.type === "FRAME" && inside({ x: rectOf(c).x, y: rectOf(c).y }, bounds, 1) && rectOf(c).x + c.width <= bounds.x + bounds.width + 1 && rectOf(c).y + c.height <= bounds.y + bounds.height + 1);
+    const found = collectScreens(siblings).filter((c) => {
+      const r = rectOf(c.frame);
+      return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
+    });
+    const frames = found.map((c) => c.frame);
     const w = modeOf(frames.map((f) => f.width), 1);
     const h = modeOf(frames.map((f) => f.height), 1);
-    const screens = frames.filter((f) => w !== null && h !== null && Math.abs(f.width - w) <= 1 && Math.abs(f.height - h) <= 1);
-    const ignoredFrames = frames.filter((f) => !screens.includes(f)).map((f) => ({ id: f.id, name: f.name }));
+    const screens = found.filter((c) => w !== null && h !== null && Math.abs(c.frame.width - w) <= 1 && Math.abs(c.frame.height - h) <= 1);
+    const ignoredFrames = found.filter((c) => !screens.includes(c)).map((c) => ({ id: c.frame.id, name: c.frame.name }));
     if (!screens.length)
       return fail("No screen frames found inside the board bounds.");
-    const screenRects = screens.map((s) => ({ id: s.id, node: s, rect: rectOf(s) }));
+    const screenRects = screens.map((s) => ({ id: s.frame.id, node: s.frame, rect: rectOf(s.frame), groupId: groupIdOf(s) }));
     const grid = inferGrid(screenRects.map((s) => s.rect));
     const colWidth = typeof args.colWidth === "number" ? args.colWidth : grid.colWidth;
     const rowHeight = typeof args.rowHeight === "number" ? args.rowHeight : grid.rowHeight;
-    const texts = siblings.filter((c) => c.type === "TEXT").map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const texts = collectTexts(siblings).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const style = readStyle(groups);
     const boardMeta = {
       v: 1,
@@ -1704,7 +1774,7 @@ ${logs.join(`
       rowHeight,
       screenW: grid.screenW,
       screenH: grid.screenH,
-      labelOffset: 72,
+      labelOffset: 80,
       margin: Math.round(grid.originX - bounds.x),
       headingId: null,
       arrowsGroupId: arrowsGroup.id,
@@ -1782,8 +1852,8 @@ ${logs.join(`
       boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
       for (const s of screenRects) {
         const cell = cellOfRect(s.rect, boardMeta);
-        const found = assignScreenTexts(s.rect, texts);
-        const meta = { v: 1, kind: "screen", boardId: boardNode.id, col: cell.col, row: cell.row, ...found };
+        const assigned = assignScreenTexts(s.rect, texts);
+        const meta = { v: 1, kind: "screen", boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
         s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
       }
       for (const p of planned) {
@@ -1862,7 +1932,7 @@ ${logs.join(`
     "flex-wrap": { wrap: "flex-wrap" },
     overflow: { hidden: "overflow-hidden" }
   };
-  var PREFIX = {
+  var PREFIX2 = {
     gap: "gap",
     width: "w",
     height: "h",
@@ -1891,7 +1961,7 @@ ${logs.join(`
       const named = NAMED[prop]?.[value];
       if (named)
         return named;
-      const prefix = PREFIX[prop];
+      const prefix = PREFIX2[prop];
       if (prefix)
         return `${prefix}-[${arbitrary(value)}]`;
       return `[${prop}:${arbitrary(value)}]`;
@@ -2359,7 +2429,7 @@ ${body}
     if (!parent || !("children" in parent))
       return [];
     const out = [];
-    for (const c of parent.children) {
+    for (const { frame: c } of collectScreens(parent.children)) {
       const meta = readMeta(c, SCREEN_KEY, parseScreenMeta);
       if (!meta || meta.boardId !== board.node.id)
         continue;
@@ -2557,8 +2627,10 @@ ${body}
     if (!board)
       return fail(`${meta.boardId} has no flowbridge board data.`);
     const target = cellRect(board, col, row);
-    const siblings = src.parent && "children" in src.parent ? src.parent.children : [];
-    const frames = siblings.filter((c) => c.type === "FRAME" && c.id !== boardNode.id);
+    const grouped = src.parent?.type === "GROUP" && isScreenGroupName(src.parent.name) ? src.parent : null;
+    const container = grouped ? grouped.parent : src.parent;
+    const siblings = container && "children" in container ? container.children : [];
+    const frames = collectScreens(siblings).map((c) => c.frame).filter((f) => f.id !== boardNode.id);
     const clash = overlapsAny(target, frames.map(rectOf2));
     if (clash !== -1) {
       const other = frames[clash];
@@ -2567,14 +2639,49 @@ ${body}
     const origin = rectOf2(src);
     const dx = target.x - origin.x;
     const dy = target.y - origin.y;
-    const copy = src.clone();
-    copy.x = src.x + dx;
-    copy.y = src.y + dy;
+    const [srcLabel, srcRoute] = await Promise.all([meta.labelId ? sceneById2(meta.labelId) : null, meta.routeId ? sceneById2(meta.routeId) : null]);
+    let copy;
+    let label;
+    let routeText;
+    let groupCopy = null;
+    if (grouped && container && "children" in container) {
+      groupCopy = grouped.clone();
+      if (groupCopy.parent?.id !== container.id)
+        container.insertChild(container.children.indexOf(grouped) + 1, groupCopy);
+      groupCopy.x = grouped.x + dx;
+      groupCopy.y = grouped.y + dy;
+      groupCopy.name = screenGroupName(name);
+      const twin = (n) => {
+        const at = n && n.parent?.id === grouped.id ? grouped.children.indexOf(n) : -1;
+        return at === -1 || !groupCopy ? null : groupCopy.children[at] ?? null;
+      };
+      const frameTwin = twin(src);
+      if (!frameTwin || frameTwin.type !== "FRAME")
+        throw new Error(`Could not find the copied frame inside the cloned group of ${src.name}.`);
+      copy = frameTwin;
+      const labelTwin = twin(srcLabel);
+      const routeTwin = twin(srcRoute);
+      label = labelTwin?.type === "TEXT" ? labelTwin : await cloneText(meta.labelId, dx, dy, labelName(name), name);
+      routeText = routeTwin?.type === "TEXT" ? routeTwin : await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+      if (labelTwin?.type === "TEXT") {
+        labelTwin.name = labelName(name);
+        await setText(labelTwin, name);
+      }
+      if (routeTwin?.type === "TEXT") {
+        routeTwin.name = routeName(name);
+        if (route !== undefined)
+          await setText(routeTwin, route);
+      }
+    } else {
+      copy = src.clone();
+      copy.x = src.x + dx;
+      copy.y = src.y + dy;
+      label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+      routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+    }
     copy.name = frameName(name);
-    clearFlowData(copy);
-    const label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
-    const routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
-    const fresh = { v: 1, kind: "screen", boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null };
+    clearFlowData(groupCopy ?? copy);
+    const fresh = { v: 1, kind: "screen", boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, groupId: groupCopy?.id ?? null };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
     const bounds = rectOf2(boardNode);
@@ -2586,7 +2693,78 @@ ${body}
       boardNode.y += grown.y - bounds.y;
       boardNode.resize(grown.width, grown.height);
     }
-    return ok({ id: copy.id, name: copy.name, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+    return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+  };
+
+  // plugin-src/group-screens.ts
+  async function groupBoard(board, dryRun, missingLabel) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const out = [];
+    for (const { frame } of collectScreens(parent.children)) {
+      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+      if (!meta || meta.boardId !== board.node.id)
+        continue;
+      const [label, route] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+      if (!label)
+        missingLabel.push(frame.id);
+      const holder = frame.parent;
+      if (!holder || !("children" in holder)) {
+        out.push({ frameId: frame.id, name: frame.name, status: "skipped", groupId: null, reason: `${frame.name} sits in a ${frame.parent?.type ?? "missing"} parent that cannot hold a group.` });
+        continue;
+      }
+      const plan = planGrouping({
+        frameId: frame.id,
+        frameName: frame.name,
+        labelId: label?.id ?? null,
+        routeId: route?.id ?? null,
+        parent: { id: holder.id, type: holder.type, name: "name" in holder ? holder.name : "", childIds: holder.children.map((k) => k.id) }
+      });
+      if (plan.kind === "conflict") {
+        out.push({ frameId: frame.id, name: frame.name, status: "skipped", groupId: null, reason: plan.reason });
+        continue;
+      }
+      if (plan.kind === "already") {
+        if (!dryRun && meta.groupId !== plan.groupId)
+          frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, plan.groupId)));
+        out.push({ frameId: frame.id, name: frame.name, status: "already", groupId: plan.groupId });
+        continue;
+      }
+      if (dryRun) {
+        out.push({ frameId: frame.id, name: frame.name, status: "grouped", groupId: null });
+        continue;
+      }
+      const nodes = plan.memberIds.map((id) => [frame, label, route].find((n) => n?.id === id)).filter((n) => !!n);
+      const group = figma.group(nodes, holder);
+      group.name = plan.name;
+      for (const n of nodes)
+        group.appendChild(n);
+      holder.insertChild(plan.index, group);
+      frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, group.id)));
+      out.push({ frameId: frame.id, name: frame.name, status: "grouped", groupId: group.id });
+    }
+    if (!dryRun)
+      raiseArrows(board);
+    return out;
+  }
+  var groupScreens = async (args) => {
+    const dryRun = bool(args, "dryRun", false);
+    const boards = await boardsFor(args);
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    const missingLabel = [];
+    const details = [];
+    for (const b of boards)
+      details.push(...await groupBoard(b, dryRun, missingLabel));
+    return ok({
+      dryRun,
+      boards: boards.map((b) => b.node.id),
+      grouped: details.filter((d) => d.status === "grouped").length,
+      skipped: details.filter((d) => d.status !== "grouped").length,
+      missingLabel,
+      details
+    });
   };
 
   // plugin-src/grid.ts
@@ -2661,24 +2839,30 @@ ${body}
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
       return { screens: [], stale: [] };
-    const texts = parent.children.filter((c) => c.type === "TEXT").map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const screens = [];
     const stale = [];
-    for (const c of parent.children) {
-      if (c.type !== "FRAME")
-        continue;
+    for (const entry of collectScreens(parent.children)) {
+      const c = entry.frame;
       const stored = readMeta(c, SCREEN_KEY, parseScreenMeta);
       if (!stored || stored.boardId !== board.node.id)
         continue;
+      const groupId = groupIdOf(entry);
       const label = stored.labelId ? await sceneById(stored.labelId) : null;
       const rect = rectOf(c);
       const reason = staleReason(board.meta, stored, rect, label ? rectOf(label) : null, stored.labelId !== null);
       if (!reason) {
-        screens.push({ node: c, meta: stored });
+        if ((stored.groupId ?? null) === groupId) {
+          screens.push({ node: c, meta: stored });
+        } else {
+          const meta = { ...stored, groupId };
+          writeScreen(c, meta);
+          screens.push({ node: c, meta });
+        }
         continue;
       }
       const cell = cellOf(rect, board.meta);
-      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts) };
+      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId };
       writeScreen(c, meta);
       stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
       screens.push({ node: c, meta });
@@ -2703,9 +2887,17 @@ ${body}
       const dx = want.x - have.x;
       const dy = want.y - have.y;
       const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
-      shiftNode(s.node, dx, dy);
-      shiftNode(label, dx, dy);
-      shiftNode(route, dx, dy);
+      const targets = shiftTargets({
+        frameId: s.node.id,
+        groupId: s.meta.groupId,
+        frameParentId: s.node.parent?.id ?? null,
+        labelId: label?.id ?? null,
+        labelParentId: label?.parent?.id ?? null,
+        routeId: route?.id ?? null,
+        routeParentId: route?.parent?.id ?? null
+      });
+      for (const id of targets)
+        shiftNode(await sceneById(id), dx, dy);
       s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
       writeScreen(s.node, s.meta);
       out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
@@ -2824,7 +3016,7 @@ ${body}
     const page = figma.currentPage;
     const styleBoard = await findStyleBoard();
     const margin = styleBoard?.meta.margin ?? 80;
-    const labelOffset = styleBoard?.meta.labelOffset ?? 72;
+    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
     const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
     const rects = page.children.map(rectOf);
     const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
@@ -2911,12 +3103,13 @@ ${body}
     insert_columns: insertColumns,
     insert_rows: insertRows,
     compact_board: compactBoard,
-    duplicate_screen: duplicateScreen
+    duplicate_screen: duplicateScreen,
+    group_screens: groupScreens
   };
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9c6d30ad" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "45e66a70" });
       return;
     }
     if (msg.type !== "command")
@@ -2924,7 +3117,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9c6d30ad"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"45e66a70"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

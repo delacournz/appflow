@@ -120,4 +120,8 @@ describe('staleReason', () => {
         expect(staleReason(meta, { col: 2, row: 1 }, frame, null, false)).toBeNull();
         expect(staleReason(meta, { col: 0, row: 0 }, frame, null, false)).toBe('cell-mismatch');
     });
+    test('grouped screens use absolute coordinates: group-relative values would read as stale', () => {
+        expect(staleReason(meta, { col: 2, row: 1 }, frame, { x: 1500, y: 1240 }, true)).toBeNull();
+        expect(staleReason(meta, { col: 2, row: 1 }, { x: 0, y: 0 }, { x: 0, y: -72 }, true)).toBe('cell-mismatch');
+    });
 });

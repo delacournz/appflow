@@ -97,9 +97,9 @@ export function longestSegmentMid(points: readonly Pt[]): Pt {
     return at;
 }
 
-/** A screen's label and route texts, found by position above it (label at y-72, route at y-40) rather than by name. */
+/** A screen's label and route texts, found by position above it (label at y-80, route at y-48; older boards y-72/y-40) rather than by name. */
 export function assignScreenTexts(screen: Rect, texts: readonly { id: string; name: string; rect: Rect }[]): { labelId: string | null; routeId: string | null } {
     const find = (prefix: string, offset: number) =>
         texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && Math.abs(t.rect.y - (screen.y - offset)) <= 14)?.id ?? null;
-    return { labelId: find('Label ·', 72), routeId: find('Route ·', 40) };
+    return { labelId: find('Label ·', 76), routeId: find('Route ·', 44) };
 }

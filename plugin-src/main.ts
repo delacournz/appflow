@@ -7,6 +7,7 @@ import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
 import { describeBoard } from './describe';
 import { duplicateScreen } from './duplicate';
+import { groupScreens } from './group-screens';
 import { errorText } from './nodes';
 import { compactBoard, createBoard, insertColumns, insertRows, moveScreen } from './gridtools';
 import { fail, type Handler, type MainReply } from './types';
@@ -40,6 +41,7 @@ const handlers: Record<string, Handler> = {
     insert_rows: insertRows,
     compact_board: compactBoard,
     duplicate_screen: duplicateScreen,
+    group_screens: groupScreens,
 };
 
 declare const __BUILD__: string;

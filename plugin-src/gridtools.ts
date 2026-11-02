@@ -1,8 +1,9 @@
 import type { JsonObject } from '../shared/protocol';
 import { assignScreenTexts } from './adopt';
-import { loadBoard, readMeta, rectOf, rerouteBoards, sceneById, type Board } from './flow';
+import { collectScreens, collectTexts, groupIdOf, loadBoard, readMeta, rectOf, rerouteBoards, sceneById, type Board } from './flow';
 import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type BoardMeta, type ScreenMeta } from './flowmeta';
 import { boardBounds, cellOf, cellRect, compactPlan, planMove, shiftPlan, staleReason, type GridMeta, type Move } from './grid';
+import { shiftTargets } from './screen-group';
 import { fail, num, ok, str, bool, type Handler, type MainReply } from './types';
 
 type Screen = { node: FrameNode; meta: ScreenMeta };
@@ -21,22 +22,29 @@ const writeScreen = (node: SceneNode, meta: ScreenMeta): void => node.setSharedP
 async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: StaleFix[] }> {
     const parent = board.node.parent;
     if (!parent || !('children' in parent)) return { screens: [], stale: [] };
-    const texts = parent.children.filter((c): c is TextNode => c.type === 'TEXT').map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const screens: Screen[] = [];
     const stale: StaleFix[] = [];
-    for (const c of parent.children) {
-        if (c.type !== 'FRAME') continue;
+    for (const entry of collectScreens(parent.children)) {
+        const c = entry.frame;
         const stored = readMeta(c, SCREEN_KEY, parseScreenMeta);
         if (!stored || stored.boardId !== board.node.id) continue;
+        const groupId = groupIdOf(entry);
         const label = stored.labelId ? await sceneById(stored.labelId) : null;
         const rect = rectOf(c);
         const reason = staleReason(board.meta, stored, rect, label ? rectOf(label) : null, stored.labelId !== null);
         if (!reason) {
-            screens.push({ node: c, meta: stored });
+            if ((stored.groupId ?? null) === groupId) {
+                screens.push({ node: c, meta: stored });
+            } else {
+                const meta: ScreenMeta = { ...stored, groupId };
+                writeScreen(c, meta);
+                screens.push({ node: c, meta });
+            }
             continue;
         }
         const cell = cellOf(rect, board.meta);
-        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts) };
+        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId };
         writeScreen(c, meta);
         stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
         screens.push({ node: c, meta });
@@ -62,9 +70,16 @@ async function applyMoves(board: Board, screens: Screen[], moves: Move[]): Promi
         const dx = want.x - have.x;
         const dy = want.y - have.y;
         const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
-        shiftNode(s.node, dx, dy);
-        shiftNode(label, dx, dy);
-        shiftNode(route, dx, dy);
+        const targets = shiftTargets({
+            frameId: s.node.id,
+            groupId: s.meta.groupId,
+            frameParentId: s.node.parent?.id ?? null,
+            labelId: label?.id ?? null,
+            labelParentId: label?.parent?.id ?? null,
+            routeId: route?.id ?? null,
+            routeParentId: route?.parent?.id ?? null,
+        });
+        for (const id of targets) shiftNode(await sceneById(id), dx, dy);
         s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
         writeScreen(s.node, s.meta);
         out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
@@ -180,7 +195,7 @@ export const createBoard: Handler = async (args) => {
     const page = figma.currentPage;
     const styleBoard = await findStyleBoard();
     const margin = styleBoard?.meta.margin ?? 80;
-    const labelOffset = styleBoard?.meta.labelOffset ?? 72;
+    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
     const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
 
     const rects = page.children.map(rectOf);

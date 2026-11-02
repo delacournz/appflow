@@ -18,6 +18,7 @@ import {
     type ReactionLike,
     type ScreenMeta,
 } from './flowmeta';
+import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
 import { assignLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
 
@@ -242,13 +243,49 @@ async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: 
     centre(parts.label, route.labelAnchor);
 }
 
-/** Keeps the arrows group above every screen of the board, so start dots stay visible. */
+export type ScreenNode = { frame: FrameNode; group: GroupNode | null };
+
+/**
+ * Screen frame candidates under a container: frames directly in it, frames one level inside a `Screen · …` group,
+ * and the same inside sections. Callers still check each frame's meta or size.
+ */
+export function collectScreens(children: readonly SceneNode[], depth = 0): ScreenNode[] {
+    const out: ScreenNode[] = [];
+    for (const c of children) {
+        if (c.type === 'FRAME') out.push({ frame: c, group: null });
+        else if (c.type === 'GROUP' && isScreenGroupName(c.name)) {
+            for (const k of c.children) if (k.type === 'FRAME') out.push({ frame: k, group: c });
+        } else if (c.type === 'SECTION' && depth < 2) out.push(...collectScreens(c.children, depth + 1));
+    }
+    return out;
+}
+
+/** Text layers a screen's label and route can be, at the top level, inside `Screen · …` groups and inside sections. */
+export function collectTexts(children: readonly SceneNode[], depth = 0): TextNode[] {
+    const out: TextNode[] = [];
+    for (const c of children) {
+        if (c.type === 'TEXT') out.push(c);
+        else if (c.type === 'GROUP' && isScreenGroupName(c.name)) out.push(...c.children.filter((k): k is TextNode => k.type === 'TEXT'));
+        else if (c.type === 'SECTION' && depth < 2) out.push(...collectTexts(c.children, depth + 1));
+    }
+    return out;
+}
+
+export const groupIdOf = (n: ScreenNode): string | null => n.group?.id ?? null;
+
+function holdsScreen(node: SceneNode, boardId: string, depth = 0): boolean {
+    if (node.type === 'FRAME') return readMeta(node, SCREEN_KEY, parseScreenMeta)?.boardId === boardId;
+    if ((node.type === 'GROUP' || node.type === 'SECTION') && depth < 3) return node.children.some((k) => holdsScreen(k, boardId, depth + 1));
+    return false;
+}
+
+/** Keeps the arrows group above every screen of the board (frames and `Screen · …` groups), so start dots stay visible. */
 export function raiseArrows(board: Board): void {
     const parent = board.arrows.parent;
     if (!parent || !('children' in parent)) return;
     const kids = parent.children;
     const at = kids.indexOf(board.arrows as SceneNode);
-    const screenAbove = kids.some((k, i) => i > at && k.type === 'FRAME' && readMeta(k, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id);
+    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
     if (screenAbove) parent.insertChild(kids.length - 1, board.arrows as SceneNode);
 }
 
@@ -348,7 +385,7 @@ export const connect: Handler = async (args) => {
     });
 };
 
-async function boardsFor(args: JsonObject): Promise<Board[]> {
+export async function boardsFor(args: JsonObject): Promise<Board[]> {
     const id = str(args, 'boardId');
     if (id) return [await loadBoard(id)];
     const boards: Board[] = [];
@@ -451,19 +488,23 @@ export const adoptBoard: Handler = async (args) => {
     const arrowsGroup = groups[0] as SceneNode & ChildrenMixin;
 
     const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id));
-    const frames = siblings.filter((c): c is FrameNode => c.type === 'FRAME' && inside({ x: rectOf(c).x, y: rectOf(c).y }, bounds, 1) && rectOf(c).x + c.width <= bounds.x + bounds.width + 1 && rectOf(c).y + c.height <= bounds.y + bounds.height + 1);
+    const found = collectScreens(siblings).filter((c) => {
+        const r = rectOf(c.frame);
+        return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
+    });
+    const frames = found.map((c) => c.frame);
     const w = modeOf(frames.map((f) => f.width), 1);
     const h = modeOf(frames.map((f) => f.height), 1);
-    const screens = frames.filter((f) => w !== null && h !== null && Math.abs(f.width - w) <= 1 && Math.abs(f.height - h) <= 1);
-    const ignoredFrames = frames.filter((f) => !screens.includes(f)).map((f) => ({ id: f.id, name: f.name }));
+    const screens = found.filter((c) => w !== null && h !== null && Math.abs(c.frame.width - w) <= 1 && Math.abs(c.frame.height - h) <= 1);
+    const ignoredFrames = found.filter((c) => !screens.includes(c)).map((c) => ({ id: c.frame.id, name: c.frame.name }));
     if (!screens.length) return fail('No screen frames found inside the board bounds.');
-    const screenRects = screens.map((s) => ({ id: s.id, node: s, rect: rectOf(s) }));
+    const screenRects = screens.map((s) => ({ id: s.frame.id, node: s.frame, rect: rectOf(s.frame), groupId: groupIdOf(s) }));
 
     const grid = inferGrid(screenRects.map((s) => s.rect));
     const colWidth = typeof args.colWidth === 'number' ? args.colWidth : grid.colWidth;
     const rowHeight = typeof args.rowHeight === 'number' ? args.rowHeight : grid.rowHeight;
 
-    const texts = siblings.filter((c): c is TextNode => c.type === 'TEXT').map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const texts = collectTexts(siblings).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const style = readStyle(groups);
     const boardMeta: BoardMeta = {
         v: 1,
@@ -474,7 +515,7 @@ export const adoptBoard: Handler = async (args) => {
         rowHeight,
         screenW: grid.screenW,
         screenH: grid.screenH,
-        labelOffset: 72,
+        labelOffset: 80,
         margin: Math.round(grid.originX - bounds.x),
         headingId: null,
         arrowsGroupId: arrowsGroup.id,
@@ -561,8 +602,8 @@ export const adoptBoard: Handler = async (args) => {
         boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
         for (const s of screenRects) {
             const cell = cellOfRect(s.rect, boardMeta);
-            const found = assignScreenTexts(s.rect, texts);
-            const meta: ScreenMeta = { v: 1, kind: 'screen', boardId: boardNode.id, col: cell.col, row: cell.row, ...found };
+            const assigned = assignScreenTexts(s.rect, texts);
+            const meta: ScreenMeta = { v: 1, kind: 'screen', boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
             s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
         }
         for (const p of planned) {

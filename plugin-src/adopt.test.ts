@@ -102,4 +102,11 @@ describe('assignScreenTexts', () => {
     test('returns nulls when nothing sits above', () => {
         expect(assignScreenTexts(cell(0, 0), texts)).toEqual({ labelId: null, routeId: null });
     });
+    test('accepts the 80/48 offsets that clear the frame title', () => {
+        const nudged = [
+            { id: 'l2', name: 'Label · A', rect: { x: s.x, y: s.y - 80, width: 160, height: 28 } },
+            { id: 'r2', name: 'Route · A', rect: { x: s.x, y: s.y - 48, width: 260, height: 20 } },
+        ];
+        expect(assignScreenTexts(s, nudged)).toEqual({ labelId: 'l2', routeId: 'r2' });
+    });
 });

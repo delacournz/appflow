@@ -1,4 +1,6 @@
 import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName } from './duplicate-plan';
+import { collectScreens } from './flow';
+import { isScreenGroupName, screenGroupName } from './screen-group';
 import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { Rect } from './rect';
 import { fail, ok, str, type Handler } from './types';
@@ -116,8 +118,10 @@ export const duplicateScreen: Handler = async (args) => {
     if (!board) return fail(`${meta.boardId} has no flowbridge board data.`);
 
     const target = cellRect(board, col, row);
-    const siblings = src.parent && 'children' in src.parent ? src.parent.children : [];
-    const frames = siblings.filter((c) => c.type === 'FRAME' && c.id !== boardNode.id);
+    const grouped = src.parent?.type === 'GROUP' && isScreenGroupName(src.parent.name) ? src.parent : null;
+    const container = grouped ? grouped.parent : src.parent;
+    const siblings = container && 'children' in container ? container.children : [];
+    const frames = collectScreens(siblings).map((c) => c.frame).filter((f) => f.id !== boardNode.id);
     const clash = overlapsAny(target, frames.map(rectOf));
     if (clash !== -1) {
         const other = frames[clash] as SceneNode;
@@ -127,16 +131,48 @@ export const duplicateScreen: Handler = async (args) => {
     const origin = rectOf(src);
     const dx = target.x - origin.x;
     const dy = target.y - origin.y;
-    const copy = src.clone();
-    copy.x = src.x + dx;
-    copy.y = src.y + dy;
+    const [srcLabel, srcRoute] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+
+    let copy: FrameNode;
+    let label: TextNode | null;
+    let routeText: TextNode | null;
+    let groupCopy: GroupNode | null = null;
+    if (grouped && container && 'children' in container) {
+        groupCopy = grouped.clone();
+        if (groupCopy.parent?.id !== container.id) container.insertChild(container.children.indexOf(grouped) + 1, groupCopy);
+        groupCopy.x = grouped.x + dx;
+        groupCopy.y = grouped.y + dy;
+        groupCopy.name = screenGroupName(name);
+        const twin = (n: SceneNode | null): SceneNode | null => {
+            const at = n && n.parent?.id === grouped.id ? grouped.children.indexOf(n as SceneNode) : -1;
+            return at === -1 || !groupCopy ? null : (groupCopy.children[at] ?? null);
+        };
+        const frameTwin = twin(src);
+        if (!frameTwin || frameTwin.type !== 'FRAME') throw new Error(`Could not find the copied frame inside the cloned group of ${src.name}.`);
+        copy = frameTwin;
+        const labelTwin = twin(srcLabel);
+        const routeTwin = twin(srcRoute);
+        label = labelTwin?.type === 'TEXT' ? labelTwin : await cloneText(meta.labelId, dx, dy, labelName(name), name);
+        routeText = routeTwin?.type === 'TEXT' ? routeTwin : await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+        if (labelTwin?.type === 'TEXT') {
+            labelTwin.name = labelName(name);
+            await setText(labelTwin, name);
+        }
+        if (routeTwin?.type === 'TEXT') {
+            routeTwin.name = routeName(name);
+            if (route !== undefined) await setText(routeTwin, route);
+        }
+    } else {
+        copy = src.clone();
+        copy.x = src.x + dx;
+        copy.y = src.y + dy;
+        label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+        routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+    }
     copy.name = frameName(name);
-    clearFlowData(copy);
+    clearFlowData(groupCopy ?? copy);
 
-    const label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
-    const routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
-
-    const fresh: ScreenMeta = { v: 1, kind: 'screen', boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null };
+    const fresh: ScreenMeta = { v: 1, kind: 'screen', boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, groupId: groupCopy?.id ?? null };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
 
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
@@ -150,5 +186,5 @@ export const duplicateScreen: Handler = async (args) => {
         boardNode.resize(grown.width, grown.height);
     }
 
-    return ok({ id: copy.id, name: copy.name, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+    return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
 };

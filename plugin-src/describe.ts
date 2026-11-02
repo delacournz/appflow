@@ -1,6 +1,6 @@
 import type { JsonObject } from '../shared/protocol';
 import { renderBoard, type BoardArrow, type BoardDescription, type BoardScreen } from './board-text';
-import { loadBoard, readMeta, rectOf, sceneById, type Board } from './flow';
+import { collectScreens, loadBoard, readMeta, rectOf, sceneById, type Board } from './flow';
 import { ARROW_KEY, BOARD_KEY, SCREEN_KEY, parseArrowMeta, parseBoardMeta, parseScreenMeta } from './flowmeta';
 import { fail, num, ok, str, type Handler } from './types';
 
@@ -10,7 +10,7 @@ async function screensOf(board: Board): Promise<BoardScreen[]> {
     const parent = board.node.parent;
     if (!parent || !('children' in parent)) return [];
     const out: BoardScreen[] = [];
-    for (const c of parent.children) {
+    for (const { frame: c } of collectScreens(parent.children)) {
         const meta = readMeta(c, SCREEN_KEY, parseScreenMeta);
         if (!meta || meta.boardId !== board.node.id) continue;
         const label = meta.labelId ? await sceneById(meta.labelId) : null;

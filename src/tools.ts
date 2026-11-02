@@ -341,7 +341,7 @@ export const TOOLS: ToolDef[] = [
     ),
     passthrough(
         'duplicate_screen',
-        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text, names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
+        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a \"Screen · …\" group, clones the whole group as a sibling of the source group), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
         obj(
             {
                 id: { type: 'string', description: 'The screen frame to duplicate.' },
@@ -363,6 +363,15 @@ export const TOOLS: ToolDef[] = [
             },
             ['id', 'col', 'row', 'name'],
         ),
+    ),
+    passthrough(
+        'group_screens',
+        'Group each adopted screen\'s label text, route text and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
+        obj({
+            boardId: { type: 'string', description: 'Board node ID. Default: every adopted board on the current page.' },
+            dryRun: { type: 'boolean', description: 'Report what would be grouped without changing the file. Default false.' },
+        }),
+        120_000,
     ),
     passthrough(
         'create_board',

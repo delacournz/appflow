@@ -11,7 +11,7 @@ A flow board should read like a sentence: start at the top left, follow the main
 
 Use the tools in this order. Don't draw arrows or move screens with `use_figma` on a managed board. The tools keep the screens, labels, arrows and prototype in step.
 
-1. **Get a board.** On an existing hand-built board, run `adopt_board` with `dryRun: true`, check the unmatched list, then run it for real. For a new flow, use `create_board`.
+1. **Get a board.** On an existing hand-built board, run `adopt_board` with `dryRun: true`, check the unmatched list, then run it for real. For a new flow, use `create_board`. On an older adopted board, run `group_screens` once.
 2. **Read it.** `describe_board` prints the grid as text, with one cell per screen, and lists every arrow with its trigger.
 3. **Propose before you build.** Write the target layout as an ASCII grid in the same format and confirm it with the user before you move anything. Example:
 
@@ -39,13 +39,17 @@ Use the tools in this order. Don't draw arrows or move screens with `use_figma` 
 Each node carries shared plugin data in the `flowbridge` namespace:
 
 - **`board`** on the board background rectangle holds the grid (origin, column width, row height, screen size), the arrows group and the arrow style.
-- **`screen`** on each screen frame holds `boardId`, `col`, `row`, `labelId` and `routeId`.
+- **`screen`** on each screen frame holds `boardId`, `col`, `row`, `labelId`, `routeId` and `groupId` (the `Screen · {name}` group, or null).
 - **`arrow`** on each `Flow · A → B · label` group holds `from`, `to`, `trigger`, `label`, `mode` (`trigger` or `auto`), `exit`, and the vector, dot and label ids.
 
-The screen anatomy:
-- a 393×852 frame
-- a label text 72 px above it
-- a route text (the code path) 40 px above it
+The screen anatomy is one layer, a `Screen · {name}` group, holding:
+- the frame (393×852)
+- the label text, `Label · {name}`, 80 px above the frame
+- the route text, `Route · {name}` (the code path), 48 px above the frame, clear of the frame title Figma draws just above a frame
+
+Label and route sit above the frame in z-order. Always use absolute positions: the frame is inside a group, so `x` and `y` are relative to the group's parent. The tools handle this. Move or copy the group, never its parts. Prototype reactions are unchanged: a frame in a group is still a top-level frame for prototyping.
+
+Boards made before screen groups have the three layers loose on the page. Run `group_screens` once on them (try `dryRun: true` first). It is idempotent and reports screens with no label in `missingLabel`.
 
 Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows group always sits above the screens.
 
