@@ -16,62 +16,255 @@
     <div class="row"><span id="dot" class="dot"></span><strong id="state">Connecting…</strong></div>
     <div class="row muted">Port <input id="port" value="3055" inputmode="numeric" /> · keep this window open</div>
     <div id="last">No commands yet</div>
-    <script>
-      const dot = document.getElementById('dot');
-      const state = document.getElementById('state');
-      const last = document.getElementById('last');
-      const portInput = document.getElementById('port');
-      let socket = null;
-      let retry = null;
-      let fileName = '';
-
-      const setState = (on, label) => { dot.classList.toggle('on', on); state.textContent = label; };
-
-      function toBase64(bytes) {
-        let binary = '';
-        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-        return btoa(binary);
+    <script>(() => {
+  // ui-src/measure.ts
+  var color = (value) => {
+    const m = /^rgba?\(([^)]+)\)$/.exec(value.trim());
+    if (!m)
+      return null;
+    const parts = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+    const [r = 0, g = 0, b = 0, a = 1] = parts;
+    if (a === 0)
+      return null;
+    return { r: r / 255, g: g / 255, b: b / 255, a };
+  };
+  var px = (v) => parseFloat(v) || 0;
+  function shadowOf(value) {
+    if (!value || value === "none" || value.includes("inset"))
+      return null;
+    const c = /rgba?\([^)]+\)/.exec(value);
+    const nums = value.replace(/rgba?\([^)]+\)/, "").trim().split(/\s+/).map(px);
+    const col = c ? color(c[0]) : null;
+    if (!col)
+      return null;
+    return { x: nums[0] ?? 0, y: nums[1] ?? 0, blur: nums[2] ?? 0, spread: nums[3] ?? 0, color: col };
+  }
+  function label(el) {
+    const id = el.id ? `#${el.id}` : "";
+    const cls = el.classList.length ? `.${[...el.classList].slice(0, 2).join(".")}` : "";
+    return `${el.tagName.toLowerCase()}${id}${cls}`;
+  }
+  var ALIGN = { center: "CENTER", right: "RIGHT", end: "RIGHT", justify: "JUSTIFIED" };
+  function textLayer(node, cs, origin) {
+    let text = node.textContent ?? "";
+    if (!/\S/.test(text))
+      return null;
+    if (!cs.whiteSpace.startsWith("pre"))
+      text = text.replace(/\s+/g, " ").trim();
+    if (cs.textTransform === "uppercase")
+      text = text.toUpperCase();
+    else if (cs.textTransform === "lowercase")
+      text = text.toLowerCase();
+    const range = node.ownerDocument.createRange();
+    range.selectNodeContents(node);
+    const r = range.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0)
+      return null;
+    const c = color(cs.color) ?? { r: 0, g: 0, b: 0, a: 1 };
+    return {
+      kind: "text",
+      name: text.slice(0, 40),
+      x: r.left - origin.left,
+      y: r.top - origin.top,
+      w: r.width,
+      h: r.height,
+      text,
+      font: {
+        family: cs.fontFamily,
+        weight: parseInt(cs.fontWeight, 10) || 400,
+        italic: cs.fontStyle === "italic",
+        size: px(cs.fontSize),
+        lineHeight: cs.lineHeight === "normal" ? null : px(cs.lineHeight),
+        letterSpacing: cs.letterSpacing === "normal" ? 0 : px(cs.letterSpacing)
+      },
+      color: { ...c, a: c.a * px(cs.opacity || "1") },
+      align: ALIGN[cs.textAlign] ?? "LEFT",
+      decoration: cs.textDecorationLine.includes("underline") ? "UNDERLINE" : cs.textDecorationLine.includes("line-through") ? "STRIKETHROUGH" : "NONE"
+    };
+  }
+  async function imageBytes(img) {
+    try {
+      if (!img.complete)
+        await new Promise((r) => img.addEventListener("load", r, { once: true }));
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext("2d")?.drawImage(img, 0, 0);
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+      return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    } catch {
+      return null;
+    }
+  }
+  async function walkEl(el, origin, budget) {
+    if (budget.left-- <= 0)
+      return [];
+    const win = el.ownerDocument.defaultView;
+    const cs = win.getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || px(cs.opacity) === 0)
+      return [];
+    const r = el.getBoundingClientRect();
+    const tag = el.tagName.toLowerCase();
+    const base = { name: label(el), x: r.left - origin.left, y: r.top - origin.top, w: r.width, h: r.height };
+    if (tag === "svg")
+      return [{ kind: "svg", ...base, svg: el.outerHTML }];
+    if (tag === "img")
+      return [{ kind: "image", ...base, bytes: await imageBytes(el) }];
+    if (tag === "script" || tag === "style" || tag === "head" || tag === "template")
+      return [];
+    const bg = color(cs.backgroundColor);
+    const bw = px(cs.borderTopWidth);
+    const border = bw > 0 && cs.borderTopStyle !== "none" ? { width: bw, color: color(cs.borderTopColor) ?? { r: 0, g: 0, b: 0, a: 1 } } : null;
+    const shadow = shadowOf(cs.boxShadow);
+    const clip = cs.overflow === "hidden" || cs.overflow === "clip";
+    const opacity = px(cs.opacity || "1");
+    const radius = [px(cs.borderTopLeftRadius), px(cs.borderTopRightRadius), px(cs.borderBottomRightRadius), px(cs.borderBottomLeftRadius)];
+    const draws = Boolean(bg || border || shadow || clip || opacity < 1);
+    const childOrigin = draws ? r : origin;
+    const children = [];
+    for (const child of el.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const t = textLayer(child, cs, childOrigin);
+        if (t)
+          children.push(t);
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        children.push(...await walkEl(child, childOrigin, budget));
       }
-
-      function connect() {
-        clearTimeout(retry);
-        if (socket) socket.close();
-        const port = Number(portInput.value) || 3055;
-        socket = new WebSocket(`ws://localhost:${port}/plugin`);
-        socket.onopen = () => {
-          setState(true, 'Connected to the local bridge');
-          parent.postMessage({ pluginMessage: { type: 'hello' } }, '*');
-        };
-        socket.onclose = () => {
-          setState(false, 'Waiting for the bridge server…');
-          retry = setTimeout(connect, 2000);
-        };
-        socket.onerror = () => socket.close();
-        socket.onmessage = (event) => {
-          const { id, cmd } = JSON.parse(event.data);
-          last.textContent = `${new Date().toLocaleTimeString()} · ${cmd.type}`;
-          parent.postMessage({ pluginMessage: { type: 'command', id, cmd } }, '*');
-        };
-      }
-
-      window.onmessage = (event) => {
-        const msg = event.data.pluginMessage;
-        if (!msg || !socket || socket.readyState !== WebSocket.OPEN) return;
-        if (msg.type === 'hello') {
-          fileName = msg.fileName;
-          socket.send(JSON.stringify({ hello: { fileName } }));
-          setState(true, `Connected · ${fileName}`);
-          return;
-        }
-        if (msg.type === 'reply') {
-          const reply = msg.reply;
-          if (msg.bytes) reply.image = toBase64(new Uint8Array(msg.bytes));
-          socket.send(JSON.stringify({ id: msg.id, reply }));
-        }
+    }
+    if (!draws)
+      return children;
+    return [{ kind: "box", ...base, bg, radius, border, shadow, opacity, clip, children }];
+  }
+  async function measureHtml(html, width, height, maxLayers = 3000) {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-same-origin");
+    frame.style.cssText = `position:fixed;left:-100000px;top:0;width:${width}px;height:${height ?? 800}px;border:0;visibility:hidden`;
+    document.body.appendChild(frame);
+    try {
+      await new Promise((resolve) => {
+        frame.onload = () => resolve();
+        frame.srcdoc = html;
+      });
+      const doc = frame.contentDocument;
+      await doc.fonts.ready;
+      await Promise.all([...doc.images].map((img) => img.complete ? null : new Promise((r) => img.addEventListener("load", r, { once: true }))));
+      const fullHeight = height ?? Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
+      frame.style.height = `${fullHeight}px`;
+      const win = frame.contentWindow;
+      const rootBg = color(win.getComputedStyle(doc.body).backgroundColor) ?? color(win.getComputedStyle(doc.documentElement).backgroundColor) ?? { r: 1, g: 1, b: 1, a: 1 };
+      const origin = new DOMRect(0, 0, width, fullHeight);
+      const children = await walkEl(doc.body, origin, { left: maxLayers });
+      return {
+        kind: "box",
+        name: doc.title || "HTML",
+        x: 0,
+        y: 0,
+        w: width,
+        h: fullHeight,
+        bg: rootBg,
+        radius: [0, 0, 0, 0],
+        border: null,
+        shadow: null,
+        opacity: 1,
+        clip: true,
+        children
       };
+    } finally {
+      frame.remove();
+    }
+  }
 
-      portInput.addEventListener('change', connect);
-      connect();
-    </script>
+  // ui-src/ui.ts
+  var $ = (id) => document.getElementById(id);
+  var dot = $("dot");
+  var state = $("state");
+  var last = $("last");
+  var portInput = $("port");
+  var socket = null;
+  var retry;
+  var setState = (on, text) => {
+    dot.classList.toggle("on", on);
+    state.textContent = text;
+  };
+  function toBase64(bytes) {
+    let binary = "";
+    for (let i = 0;i < bytes.length; i += 32768)
+      binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    return btoa(binary);
+  }
+  function fromBase64(base64) {
+    const binary = atob(base64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0;i < binary.length; i++)
+      out[i] = binary.charCodeAt(i);
+    return out;
+  }
+  var send = (id, reply) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ id, reply }));
+  var toMain = (message) => parent.postMessage({ pluginMessage: message }, "*");
+  async function onCommand({ id, cmd }) {
+    last.textContent = `${new Date().toLocaleTimeString()} · ${cmd.tool}`;
+    let args = cmd.args ?? {};
+    try {
+      if (cmd.tool === "html_to_figma") {
+        const html = typeof args.html === "string" ? args.html : "";
+        const width = typeof args.width === "number" ? args.width : 1440;
+        const height = typeof args.height === "number" ? args.height : null;
+        const tree = await measureHtml(html, width, height);
+        const { html: _html, ...rest } = args;
+        toMain({ type: "command", id, cmd: { tool: "html_build", args: { ...rest, tree } } });
+        return;
+      }
+      if (Array.isArray(args.files)) {
+        const files = args.files.map((f) => f.base64 ? { name: f.name, mime: f.mime, bytes: fromBase64(f.base64) } : f);
+        args = { ...args, files };
+      }
+      toMain({ type: "command", id, cmd: { tool: cmd.tool, args } });
+    } catch (error) {
+      send(id, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  function connect() {
+    clearTimeout(retry);
+    socket?.close();
+    const port = Number(portInput.value) || 3055;
+    const ws = new WebSocket(`ws://localhost:${port}/plugin`);
+    socket = ws;
+    ws.onopen = () => {
+      setState(true, "Connected to the local bridge");
+      toMain({ type: "hello" });
+    };
+    ws.onclose = () => {
+      if (socket !== ws)
+        return;
+      setState(false, "Waiting for the bridge server…");
+      retry = setTimeout(connect, 2000);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (event) => void onCommand(JSON.parse(String(event.data)));
+  }
+  window.onmessage = (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg || !socket || socket.readyState !== WebSocket.OPEN)
+      return;
+    if (msg.type === "hello") {
+      socket.send(JSON.stringify({ hello: { fileName: msg.fileName, editorType: msg.editorType } }));
+      setState(true, `Connected · ${msg.fileName}`);
+      return;
+    }
+    const r = msg.reply;
+    if (!r.ok)
+      return void send(msg.id, r);
+    send(msg.id, {
+      ok: true,
+      result: r.result,
+      ...r.logs ? { logs: r.logs } : {},
+      ...r.images ? { images: r.images.map(toBase64) } : {},
+      ...r.files ? { files: r.files.map((f) => ({ name: f.name, mime: f.mime, base64: toBase64(f.bytes) })) } : {}
+    });
+  };
+  portInput.addEventListener("change", connect);
+  connect();
+})();
+</script>
   </body>
 </html>

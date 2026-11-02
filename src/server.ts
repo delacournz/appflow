@@ -5,19 +5,24 @@
  * stdout carries only JSON-RPC. Everything else is logged to stderr.
  */
 import type { ServerWebSocket } from 'bun';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-import { type Bridge, type BridgeCommand, type BridgeReply, handleRequest, type RpcRequest } from './rpc';
+import type { ClientMessage, JsonObject, PluginReply, ServerMessage } from '../shared/protocol';
+import { handleRequest, type RpcRequest } from './rpc';
+import { CodeConnectStore } from './store';
+import type { ToolContext } from './tools';
 
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? 3055);
+const HOME = process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.figma-local-bridge');
 const log = (...parts: unknown[]) => console.error('[figma-local-bridge]', ...parts);
 
-type Pending = { resolve: (reply: BridgeReply) => void; timer: ReturnType<typeof setTimeout> };
-type PluginMessage = { id: string; reply: BridgeReply } | { hello: { fileName: string } };
+type Pending = { resolve: (reply: PluginReply) => void; timer: ReturnType<typeof setTimeout> };
 
 let plugin: ServerWebSocket<undefined> | null = null;
 const pending = new Map<string, Pending>();
 
-function settle(id: string, reply: BridgeReply) {
+function settle(id: string, reply: PluginReply) {
     const entry = pending.get(id);
     if (!entry) return;
     clearTimeout(entry.timer);
@@ -25,20 +30,20 @@ function settle(id: string, reply: BridgeReply) {
     entry.resolve(reply);
 }
 
-const bridge: Bridge = {
-    isConnected: () => plugin !== null,
-    send: (cmd: BridgeCommand, timeoutMs: number) =>
-        new Promise<BridgeReply>((resolve) => {
+const ctx: ToolContext = {
+    connected: () => plugin !== null,
+    plugin: (tool: string, args: JsonObject, timeoutMs: number) =>
+        new Promise<PluginReply>((resolve) => {
             const socket = plugin;
             if (!socket) return resolve({ ok: false, error: 'The Figma plugin disconnected.' });
             const id = crypto.randomUUID();
-            const timer = setTimeout(
-                () => settle(id, { ok: false, error: `Timed out after ${timeoutMs} ms. The code may still be running in Figma.` }),
-                timeoutMs,
-            );
+            const timer = setTimeout(() => settle(id, { ok: false, error: `Timed out after ${timeoutMs} ms. The work may still be running in Figma.` }), timeoutMs);
             pending.set(id, { resolve, timer });
-            socket.send(JSON.stringify({ id, cmd }));
+            const msg: ServerMessage = { id, cmd: { tool, args } };
+            socket.send(JSON.stringify(msg));
         }),
+    store: new CodeConnectStore(join(HOME, 'code-connect.json')),
+    downloadDir: join(HOME, 'downloads'),
 };
 
 try {
@@ -50,19 +55,20 @@ try {
             return new Response('figma-local-bridge', { status: 200 });
         },
         websocket: {
+            maxPayloadLength: 256 * 1024 * 1024,
             open(ws) {
                 if (plugin && plugin !== ws) plugin.close(1000, 'Replaced by a newer plugin window');
                 plugin = ws;
                 log('plugin connected');
             },
-            message(ws, raw) {
-                let msg: PluginMessage;
+            message(_ws, raw) {
+                let msg: ClientMessage;
                 try {
-                    msg = JSON.parse(String(raw)) as PluginMessage;
+                    msg = JSON.parse(String(raw)) as ClientMessage;
                 } catch {
                     return;
                 }
-                if ('hello' in msg) log('file:', msg.hello.fileName);
+                if ('hello' in msg) log('file:', msg.hello.fileName, `(${msg.hello.editorType})`);
                 else settle(msg.id, msg.reply);
             },
             close(ws) {
@@ -89,10 +95,11 @@ async function onLine(line: string) {
         write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
         return;
     }
-    const res = await handleRequest(req, bridge);
+    const res = await handleRequest(req, ctx);
     if (res) write(res);
 }
 
+const inFlight = new Set<Promise<void>>();
 let buffer = '';
 const decoder = new TextDecoder();
 for await (const chunk of Bun.stdin.stream()) {
@@ -101,8 +108,10 @@ for await (const chunk of Bun.stdin.stream()) {
     while (newline !== -1) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        void onLine(line);
+        const job = onLine(line).finally(() => inFlight.delete(job));
+        inFlight.add(job);
         newline = buffer.indexOf('\n');
     }
 }
+await Promise.allSettled([...inFlight]);
 process.exit(0);

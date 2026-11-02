@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { margin: 0; padding: 12px; font: 12px/1.4 Inter, system-ui, sans-serif; color: var(--figma-color-text); background: var(--figma-color-bg); }
+      .row { display: flex; align-items: center; gap: 8px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--figma-color-icon-danger, #f24822); flex: none; }
+      .dot.on { background: var(--figma-color-icon-success, #14ae5c); }
+      .muted { color: var(--figma-color-text-secondary); margin-top: 6px; }
+      input { width: 64px; padding: 2px 4px; color: inherit; background: transparent; border: 1px solid var(--figma-color-border); border-radius: 4px; }
+      #last { margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--figma-color-text-secondary); }
+    </style>
+  </head>
+  <body>
+    <div class="row"><span id="dot" class="dot"></span><strong id="state">Connecting…</strong></div>
+    <div class="row muted">Port <input id="port" value="3055" inputmode="numeric" /> · keep this window open</div>
+    <div id="last">No commands yet</div>
+    <script>/*UI_BUNDLE*/</script>
+  </body>
+</html>
