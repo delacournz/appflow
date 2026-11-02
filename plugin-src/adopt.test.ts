@@ -110,3 +110,17 @@ describe('assignScreenTexts', () => {
         expect(assignScreenTexts(s, nudged)).toEqual({ labelId: 'l2', routeId: 'r2' });
     });
 });
+
+describe('assignScreenTexts offsets', () => {
+    const s = { x: 1000, y: 500, width: 393, height: 852 };
+    const text = (id: string, name: string, dy: number) => ({ id, name, rect: { x: s.x, y: s.y - dy, width: 100, height: 20 } });
+    test('current anatomy: label -80, route -48', () => {
+        expect(assignScreenTexts(s, [text('l', 'Label · A', 80), text('r', 'Route · A', 48)])).toEqual({ labelId: 'l', routeId: 'r' });
+    });
+    test('legacy anatomy: label -72, route -40', () => {
+        expect(assignScreenTexts(s, [text('l', 'Label · A', 72), text('r', 'Route · A', 40)])).toEqual({ labelId: 'l', routeId: 'r' });
+    });
+    test('rejects a text far from either offset', () => {
+        expect(assignScreenTexts(s, [text('l', 'Label · A', 60), text('r', 'Route · A', 20)])).toEqual({ labelId: null, routeId: null });
+    });
+});

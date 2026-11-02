@@ -97,9 +97,15 @@ export function longestSegmentMid(points: readonly Pt[]): Pt {
     return at;
 }
 
-/** A screen's label and route texts, found by position above it (label at y-80, route at y-48; older boards y-72/y-40) rather than by name. */
+export const LABEL_OFFSETS = [80, 72] as const;
+export const ROUTE_OFFSETS = [48, 40] as const;
+
+/**
+ * A screen's label and route texts, found by position above it rather than by name. The current anatomy is label at
+ * y-80 and route at y-48; boards made with y-72 and y-40 still match.
+ */
 export function assignScreenTexts(screen: Rect, texts: readonly { id: string; name: string; rect: Rect }[]): { labelId: string | null; routeId: string | null } {
-    const find = (prefix: string, offset: number) =>
-        texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && Math.abs(t.rect.y - (screen.y - offset)) <= 14)?.id ?? null;
-    return { labelId: find('Label ·', 76), routeId: find('Route ·', 44) };
+    const find = (prefix: string, offsets: readonly number[]) =>
+        texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && offsets.some((o) => Math.abs(t.rect.y - (screen.y - o)) <= 4))?.id ?? null;
+    return { labelId: find('Label ·', LABEL_OFFSETS), routeId: find('Route ·', ROUTE_OFFSETS) };
 }

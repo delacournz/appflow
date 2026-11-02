@@ -957,9 +957,11 @@ ${logs.join(`
     });
     return at;
   }
+  var LABEL_OFFSETS = [80, 72];
+  var ROUTE_OFFSETS = [48, 40];
   function assignScreenTexts(screen, texts) {
-    const find = (prefix, offset) => texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && Math.abs(t.rect.y - (screen.y - offset)) <= 14)?.id ?? null;
-    return { labelId: find("Label ·", 76), routeId: find("Route ·", 44) };
+    const find = (prefix, offsets) => texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && offsets.some((o) => Math.abs(t.rect.y - (screen.y - o)) <= 4))?.id ?? null;
+    return { labelId: find("Label ·", LABEL_OFFSETS), routeId: find("Route ·", ROUTE_OFFSETS) };
   }
 
   // plugin-src/flowlint.ts
@@ -3109,7 +3111,7 @@ ${body}
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "45e66a70" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "24eb82d6" });
       return;
     }
     if (msg.type !== "command")
@@ -3117,7 +3119,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"45e66a70"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"24eb82d6"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
