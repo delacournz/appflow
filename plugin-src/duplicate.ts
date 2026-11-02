@@ -1,0 +1,154 @@
+import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName } from './duplicate-plan';
+import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
+import type { Rect } from './rect';
+import { fail, ok, str, type Handler } from './types';
+
+const norm = (id: string) => id.replace('-', ':');
+
+async function sceneById(id: string): Promise<SceneNode | null> {
+    const n = await figma.getNodeByIdAsync(norm(id));
+    return n && 'visible' in n && !n.removed ? (n as SceneNode) : null;
+}
+
+function rectOf(n: SceneNode): Rect {
+    const t = n.absoluteTransform;
+    return { x: t[0][2], y: t[1][2], width: 'width' in n ? n.width : 0, height: 'height' in n ? n.height : 0 };
+}
+
+type FigTree = { name: string; node: SceneNode; children?: FigTree[] };
+
+function toTree(node: SceneNode): FigTree {
+    if (!('children' in node)) return { name: node.name, node };
+    return { name: node.name, node, children: node.children.map(toTree) };
+}
+
+async function loadFontsOf(text: TextNode): Promise<void> {
+    if (text.characters.length === 0) {
+        if (text.fontName !== figma.mixed) await figma.loadFontAsync(text.fontName);
+        return;
+    }
+    for (const f of text.getRangeAllFontNames(0, text.characters.length)) await figma.loadFontAsync(f);
+}
+
+async function setText(text: TextNode, value: string): Promise<void> {
+    await loadFontsOf(text);
+    text.characters = value;
+}
+
+function clearFlowData(root: SceneNode): void {
+    const nodes: SceneNode[] = 'findAll' in root ? [root, ...root.findAll()] : [root];
+    for (const n of nodes) {
+        if (n.getSharedPluginData(FLOW_NAMESPACE, ARROW_KEY)) n.setSharedPluginData(FLOW_NAMESPACE, ARROW_KEY, '');
+        if (n.getSharedPluginData(FLOW_NAMESPACE, BOARD_KEY)) n.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, '');
+    }
+}
+
+/** Clones a text node sitting next to the screen and moves it by the same offset as the screen. */
+async function cloneText(id: string | null, dx: number, dy: number, name: string, value: string | null): Promise<TextNode | null> {
+    if (!id) return null;
+    const src = await sceneById(id);
+    if (!src || src.type !== 'TEXT') return null;
+    const copy = src.clone();
+    copy.x = src.x + dx;
+    copy.y = src.y + dy;
+    copy.name = name;
+    if (value !== null) await setText(copy, value);
+    return copy;
+}
+
+async function componentFor(id: string): Promise<ComponentNode> {
+    const n = await figma.getNodeByIdAsync(norm(id));
+    if (!n) throw new Error(`No node ${id}.`);
+    if (n.type === 'COMPONENT') return n;
+    if (n.type === 'COMPONENT_SET') return n.defaultVariant;
+    throw new Error(`${id} is a ${n.type}, not a COMPONENT or COMPONENT_SET.`);
+}
+
+type Banner = { title: string; description: string; iconComponentId: string | undefined };
+
+function parseBanner(raw: unknown): Banner | null | 'invalid' {
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw !== 'object' || Array.isArray(raw)) return 'invalid';
+    const o = raw as Record<string, unknown>;
+    if (typeof o.title !== 'string' || typeof o.description !== 'string') return 'invalid';
+    return { title: o.title, description: o.description, iconComponentId: typeof o.iconComponentId === 'string' && o.iconComponentId ? o.iconComponentId : undefined };
+}
+
+async function updateBanner(copy: SceneNode, banner: Banner): Promise<boolean> {
+    const hit = pickBanner(toTree(copy));
+    if (!hit) return false;
+    const row = hit.node;
+    if (!('findAll' in row)) return false;
+    const tree = toTree(row);
+    const title = findDescendant(tree, (n) => n.node.type === 'TEXT' && n.name.endsWith('ItemTitle'));
+    const description = findDescendant(tree, (n) => n.node.type === 'TEXT' && n.name.endsWith('ItemDescription'));
+    if (title && title.node.type === 'TEXT') await setText(title.node, banner.title);
+    if (description && description.node.type === 'TEXT') await setText(description.node, banner.description);
+    if (banner.iconComponentId) {
+        const component = await componentFor(banner.iconComponentId);
+        const icon = row.findOne((n) => n.type === 'INSTANCE');
+        if (!icon || icon.type !== 'INSTANCE') throw new Error('The banner row has no icon instance to swap.');
+        icon.swapComponent(component);
+    }
+    row.name = bannerName(banner.title);
+    return true;
+}
+
+export const duplicateScreen: Handler = async (args) => {
+    const id = str(args, 'id');
+    const name = str(args, 'name');
+    const col = args.col;
+    const row = args.row;
+    if (!id || !name) return fail('duplicate_screen needs id and name.');
+    if (typeof col !== 'number' || !Number.isInteger(col) || typeof row !== 'number' || !Number.isInteger(row)) return fail('duplicate_screen needs integer col and row.');
+    const route = str(args, 'route');
+    const banner = parseBanner(args.banner);
+    if (banner === 'invalid') return fail('banner needs a title and a description.');
+
+    const src = await sceneById(id);
+    if (!src) return fail(`No node ${id}.`);
+    if (src.type !== 'FRAME') return fail(`${src.name} (${src.id}) is a ${src.type}, not a screen frame.`);
+    const meta: ScreenMeta | null = parseScreenMeta(src.getSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY));
+    if (!meta) return fail(`${src.name} (${src.id}) is not on an adopted board. Run adopt_board first.`);
+    const boardNode = await sceneById(meta.boardId);
+    if (!boardNode) return fail(`The board ${meta.boardId} is gone.`);
+    const board = parseBoardMeta(boardNode.getSharedPluginData(FLOW_NAMESPACE, BOARD_KEY));
+    if (!board) return fail(`${meta.boardId} has no flowbridge board data.`);
+
+    const target = cellRect(board, col, row);
+    const siblings = src.parent && 'children' in src.parent ? src.parent.children : [];
+    const frames = siblings.filter((c) => c.type === 'FRAME' && c.id !== boardNode.id);
+    const clash = overlapsAny(target, frames.map(rectOf));
+    if (clash !== -1) {
+        const other = frames[clash] as SceneNode;
+        return fail(`Cell (${col}, ${row}) is occupied by ${other.name} (${other.id}).`);
+    }
+
+    const origin = rectOf(src);
+    const dx = target.x - origin.x;
+    const dy = target.y - origin.y;
+    const copy = src.clone();
+    copy.x = src.x + dx;
+    copy.y = src.y + dy;
+    copy.name = frameName(name);
+    clearFlowData(copy);
+
+    const label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+    const routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+
+    const fresh: ScreenMeta = { v: 1, kind: 'screen', boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null };
+    copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
+
+    const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
+
+    const bounds = rectOf(boardNode);
+    const grown = growBounds(bounds, [target, ...[label, routeText].flatMap((t) => (t ? [rectOf(t)] : []))], board.margin);
+    if (grown.x !== bounds.x || grown.y !== bounds.y || grown.width !== bounds.width || grown.height !== bounds.height) {
+        if (!('resize' in boardNode)) return fail(`The board ${boardNode.name} cannot be resized.`);
+        boardNode.x += grown.x - bounds.x;
+        boardNode.y += grown.y - bounds.y;
+        boardNode.resize(grown.width, grown.height);
+    }
+
+    return ok({ id: copy.id, name: copy.name, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+};

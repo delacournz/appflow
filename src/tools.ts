@@ -332,6 +332,103 @@ export const TOOLS: ToolDef[] = [
         120_000,
     ),
     passthrough(
+        'describe_board',
+        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, arrows, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale label meta, two screens in one cell, arrows with missing endpoints and arrows pointing left. Without boardId it covers every adopted board on the current page.',
+        obj({
+            boardId: { type: 'string', description: 'Board node ID. Default: every adopted board on the current page.' },
+            width: { type: 'number', description: 'Characters per grid cell before a screen name is truncated. Default 16.' },
+        }),
+    ),
+    passthrough(
+        'duplicate_screen',
+        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text, names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
+        obj(
+            {
+                id: { type: 'string', description: 'The screen frame to duplicate.' },
+                col: { type: 'integer', description: 'Target board column (0-based).' },
+                row: { type: 'integer', description: 'Target board row (0-based).' },
+                name: { type: 'string', description: 'Name for the new screen and its label text.' },
+                route: { type: 'string', description: 'Route text for the copy. Defaults to the original route text.' },
+                banner: {
+                    type: 'object',
+                    description: 'Retarget the banner row in the copy.',
+                    properties: {
+                        title: { type: 'string' },
+                        description: { type: 'string' },
+                        iconComponentId: { type: 'string', description: 'COMPONENT or COMPONENT_SET to swap the prefix icon instance to.' },
+                    },
+                    required: ['title', 'description'],
+                    additionalProperties: false,
+                },
+            },
+            ['id', 'col', 'row', 'name'],
+        ),
+    ),
+    passthrough(
+        'create_board',
+        'Create an empty flow board: a heading "Board · {name}", a background rectangle sized for cols x rows screens, and an empty "Flow arrows · {name}" frame kept above the screens, with flowbridge board data written. Copies the heading and background styles and arrow style from an existing adopted board on the page. Without x and y it is placed clear of everything on the page. Returns { boardId, headingId, arrowsGroupId, bounds, grid, styledFrom }.',
+        obj(
+            {
+                name: { type: 'string', description: 'Board name, used in the heading and layer names.' },
+                x: { type: 'number', description: 'Left edge of the board background. Default: right of all page content.' },
+                y: { type: 'number', description: 'Top edge of the board background. Default: top of the page content.' },
+                colWidth: { type: 'number', description: 'Column spacing in px (screen width + gutter). Default 700.' },
+                rowHeight: { type: 'number', description: 'Row spacing in px. Default 1112.' },
+                screenW: { type: 'number', description: 'Screen frame width. Default 393.' },
+                screenH: { type: 'number', description: 'Screen frame height. Default 852.' },
+                cols: { type: 'number', description: 'Columns the background is sized for. Default 4.' },
+                rows: { type: 'number', description: 'Rows the background is sized for. Default 2.' },
+            },
+            ['name'],
+        ),
+    ),
+    passthrough(
+        'move_screen',
+        'Move an adopted screen to a grid cell, taking its label and route texts with it, and update its stored cell. Refuses an occupied cell unless swap is true (the two screens then trade cells). Grows the board background when the cell is outside it, then reroutes the board’s arrows. Screens whose stored data was copied by duplicating a frame in Figma are repaired from their position and reported in stale. Returns { boardId, moved: [{id, name, from, to}], stale, board, reroute }.',
+        obj(
+            {
+                id: { type: 'string', description: 'Screen frame ID.' },
+                col: { type: 'number', description: 'Target column, 0-based.' },
+                row: { type: 'number', description: 'Target row, 0-based.' },
+                swap: { type: 'boolean', description: 'Trade places with a screen already in the cell. Default false.' },
+            },
+            ['id', 'col', 'row'],
+        ),
+        120_000,
+    ),
+    passthrough(
+        'insert_columns',
+        'Make room for new columns: every screen with a column greater than `after` (and its label and route texts) moves `count` columns right, the board grows, and arrows are rerouted. Use after: -1 to insert before the first column. Returns { boardId, moved, stale, board, reroute }.',
+        obj(
+            {
+                boardId: { type: 'string', description: 'Board node ID.' },
+                after: { type: 'number', description: 'Insert after this column (0-based). -1 inserts before the first.' },
+                count: { type: 'number', description: 'Columns to insert. Default 1.' },
+            },
+            ['boardId', 'after'],
+        ),
+        120_000,
+    ),
+    passthrough(
+        'insert_rows',
+        'Make room for new rows: every screen with a row greater than `after` (and its label and route texts) moves `count` rows down, the board grows, and arrows are rerouted. Use after: -1 to insert before the first row. Returns { boardId, moved, stale, board, reroute }.',
+        obj(
+            {
+                boardId: { type: 'string', description: 'Board node ID.' },
+                after: { type: 'number', description: 'Insert after this row (0-based). -1 inserts before the first.' },
+                count: { type: 'number', description: 'Rows to insert. Default 1.' },
+            },
+            ['boardId', 'after'],
+        ),
+        120_000,
+    ),
+    passthrough(
+        'compact_board',
+        'Close empty columns and rows between screens (the first used column and row keep their index), shrink the board background to fit, and reroute arrows. Returns { boardId, moved, stale, board, reroute }.',
+        obj({ boardId: { type: 'string', description: 'Board node ID.' } }, ['boardId']),
+        120_000,
+    ),
+    passthrough(
         'get_context_for_code_connect',
         'Component details for writing a Code Connect mapping: properties with variant options, variants, nested instances and text layers.',
         obj({ nodeId }),

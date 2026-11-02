@@ -25,10 +25,10 @@ const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
 
 type Style = BoardMeta['arrowStyle'];
-type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin };
+export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin };
 type ArrowEntry = { group: GroupNode; meta: ArrowMeta };
 
-async function sceneById(id: string): Promise<SceneNode | null> {
+export async function sceneById(id: string): Promise<SceneNode | null> {
     const n = await figma.getNodeByIdAsync(norm(id));
     return n && 'visible' in n && !n.removed ? (n as SceneNode) : null;
 }
@@ -38,7 +38,7 @@ function firstOf<T extends SceneNode>(root: ChildrenMixin, test: (n: SceneNode) 
     return root.findOne((n) => test(n)) as T | null;
 }
 
-function rectOf(n: SceneNode): Rect {
+export function rectOf(n: SceneNode): Rect {
     const t = n.absoluteTransform;
     const w = 'width' in n ? n.width : 0;
     const h = 'height' in n ? n.height : 0;
@@ -54,11 +54,11 @@ function toLocal(parent: BaseNode, p: Pt): Pt {
     return { x: p.x - t[0][2], y: p.y - t[1][2] };
 }
 
-function readMeta<T>(node: BaseNode, key: string, parse: (raw: string) => T | null): T | null {
+export function readMeta<T>(node: BaseNode, key: string, parse: (raw: string) => T | null): T | null {
     return parse(node.getSharedPluginData(FLOW_NAMESPACE, key));
 }
 
-async function loadBoard(boardId: string): Promise<Board> {
+export async function loadBoard(boardId: string): Promise<Board> {
     const node = await sceneById(boardId);
     if (!node) throw new Error(`No board ${boardId}.`);
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
@@ -243,7 +243,7 @@ async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: 
 }
 
 /** Keeps the arrows group above every screen of the board, so start dots stay visible. */
-function raiseArrows(board: Board): void {
+export function raiseArrows(board: Board): void {
     const parent = board.arrows.parent;
     if (!parent || !('children' in parent)) return;
     const kids = parent.children;
@@ -358,10 +358,8 @@ async function boardsFor(args: JsonObject): Promise<Board[]> {
     return boards;
 }
 
-export const rerouteFlow: Handler = async (args) => {
-    const only = Array.isArray(args.arrowIds) ? new Set(args.arrowIds.filter((x): x is string => typeof x === 'string').map(norm)) : null;
-    const boards = await boardsFor(args);
-    if (!boards.length) return fail('No adopted boards on this page. Run adopt_board first, or pass boardId.');
+/** Redraws the arrows of the given boards from the current screen and trigger positions. Shared by reroute_flow and the grid tools. */
+export async function rerouteBoards(boards: Board[], only: Set<string> | null = null): Promise<JsonObject> {
     const rerouted: string[] = [];
     const backwards: JsonObject[] = [];
     const deleted: JsonObject[] = [];
@@ -393,7 +391,14 @@ export const rerouteFlow: Handler = async (args) => {
         }
         raiseArrows(board);
     }
-    return ok({ boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings });
+    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings };
+}
+
+export const rerouteFlow: Handler = async (args) => {
+    const only = Array.isArray(args.arrowIds) ? new Set(args.arrowIds.filter((x): x is string => typeof x === 'string').map(norm)) : null;
+    const boards = await boardsFor(args);
+    if (!boards.length) return fail('No adopted boards on this page. Run adopt_board first, or pass boardId.');
+    return ok(await rerouteBoards(boards, only));
 };
 
 type Reason = 'no-arrowhead' | 'tail-outside-board' | 'no-source-screen' | 'no-target-screen' | 'no-start-dot' | 'no-label';
@@ -410,7 +415,7 @@ function hasNavigate(n: SceneNode): string | null | undefined {
     return undefined;
 }
 
-async function pageOf(node: BaseNode): Promise<void> {
+export async function pageOf(node: BaseNode): Promise<void> {
     let p: BaseNode | null = node;
     while (p && p.type !== 'PAGE') p = p.parent;
     if (p && p.type === 'PAGE' && figma.currentPage.id !== p.id) await figma.setCurrentPageAsync(p);

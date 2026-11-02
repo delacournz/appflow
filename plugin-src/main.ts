@@ -5,7 +5,10 @@ import { generateDiagram, htmlBuild, useFigma } from './create';
 import { adoptBoard, connect, rerouteFlow } from './flow';
 import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
+import { describeBoard } from './describe';
+import { duplicateScreen } from './duplicate';
 import { errorText } from './nodes';
+import { compactBoard, createBoard, insertColumns, insertRows, moveScreen } from './gridtools';
 import { fail, type Handler, type MainReply } from './types';
 
 const handlers: Record<string, Handler> = {
@@ -30,6 +33,13 @@ const handlers: Record<string, Handler> = {
     connect,
     reroute_flow: rerouteFlow,
     adopt_board: adoptBoard,
+    describe_board: describeBoard,
+    create_board: createBoard,
+    move_screen: moveScreen,
+    insert_columns: insertColumns,
+    insert_rows: insertRows,
+    compact_board: compactBoard,
+    duplicate_screen: duplicateScreen,
 };
 
 declare const __BUILD__: string;

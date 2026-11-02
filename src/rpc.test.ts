@@ -249,6 +249,51 @@ describe('screenshot targets and build handshake', () => {
     });
 });
 
+describe('duplicate_screen', () => {
+    test('is listed with its required args and forwards to the plugin', async () => {
+        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
+        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const t = tools.find((x) => x.name === 'duplicate_screen');
+        expect(t?.inputSchema.required).toEqual(['id', 'col', 'row', 'name']);
+        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'banner']);
+        const c = ctx({ duplicate_screen: { ok: true, result: { id: '9:9', bannerUpdated: true } } });
+        expect(json(await call('duplicate_screen', { id: '1:1', col: 2, row: 0, name: 'X' }, c))).toEqual({ id: '9:9', bannerUpdated: true });
+        expect(c.calls.map((x) => x.tool)).toEqual(['duplicate_screen']);
+    });
+});
+
+describe('board grid tools', () => {
+    test('are listed with their required args', async () => {
+        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
+        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const by = (n: string) => tools.find((t) => t.name === n);
+        expect(by('create_board')?.inputSchema.required).toEqual(['name']);
+        expect(Object.keys(by('create_board')?.inputSchema.properties ?? {})).toEqual(['name', 'x', 'y', 'colWidth', 'rowHeight', 'screenW', 'screenH', 'cols', 'rows']);
+        expect(by('move_screen')?.inputSchema.required).toEqual(['id', 'col', 'row']);
+        expect(by('move_screen')?.inputSchema.properties).toHaveProperty('swap');
+        expect(by('insert_columns')?.inputSchema.required).toEqual(['boardId', 'after']);
+        expect(by('insert_rows')?.inputSchema.required).toEqual(['boardId', 'after']);
+        expect(by('compact_board')?.inputSchema.required).toEqual(['boardId']);
+    });
+
+    test('pass arguments through to the plugin', async () => {
+        const c = ctx({
+            create_board: { ok: true, result: { boardId: '5:1' } },
+            move_screen: { ok: true, result: { moved: [] } },
+            insert_columns: { ok: true, result: { moved: [] } },
+            insert_rows: { ok: true, result: { moved: [] } },
+            compact_board: { ok: true, result: { moved: [] } },
+        });
+        expect(json(await call('create_board', { name: 'KYC' }, c))).toEqual({ boardId: '5:1' });
+        await call('move_screen', { id: '1:1', col: 2, row: 0, swap: true }, c);
+        await call('insert_columns', { boardId: '5:1', after: 0, count: 2 }, c);
+        await call('insert_rows', { boardId: '5:1', after: -1 }, c);
+        await call('compact_board', { boardId: '5:1' }, c);
+        expect(c.calls.map((x) => x.tool)).toEqual(['create_board', 'move_screen', 'insert_columns', 'insert_rows', 'compact_board']);
+        expect(c.calls[1]?.args).toEqual({ id: '1:1', col: 2, row: 0, swap: true });
+    });
+});
+
 describe('flow tools', () => {
     test('connect, reroute_flow and adopt_board are listed with their required args', async () => {
         const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
@@ -259,6 +304,14 @@ describe('flow tools', () => {
         expect(by('reroute_flow')?.inputSchema.properties).toHaveProperty('arrowIds');
         expect(by('adopt_board')?.inputSchema.required).toEqual(['boardNodeId']);
         expect(by('adopt_board')?.inputSchema.properties).toHaveProperty('dryRun');
+    });
+
+    test('describe_board is listed with optional boardId and width', async () => {
+        const res = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'tools/list' }, ctx({}));
+        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const t = tools.find((x) => x.name === 'describe_board');
+        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['boardId', 'width']);
+        expect(t?.inputSchema.required ?? []).toEqual([]);
     });
 
     test('they pass their arguments through to the plugin and return the result', async () => {

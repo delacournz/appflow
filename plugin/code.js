@@ -1123,6 +1123,20 @@ ${logs.join(`
   var DOT_GAP = 10;
   var LANE_STEP = 24;
   var BACKWARDS_DROP = 60;
+  var FAN_STEP = 16;
+  function fanIndex(items) {
+    const groups = new Map;
+    for (const it of items)
+      groups.set(it.group, [...groups.get(it.group) ?? [], it]);
+    const out = new Map;
+    for (const list of groups.values()) {
+      if (list.length < 2)
+        continue;
+      const sorted = [...list].sort((a, b) => a.targetY - b.targetY);
+      sorted.forEach((it, index) => out.set(it.id, { index, count: sorted.length }));
+    }
+    return out;
+  }
   var EDGE_MARGIN = 8;
   var ROW_TOLERANCE = 2;
   var laneOffset = (lane) => lane <= 0 ? 0 : (lane % 2 === 1 ? 1 : -1) * Math.ceil(lane / 2) * LANE_STEP;
@@ -1214,7 +1228,7 @@ ${logs.join(`
   };
   var clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
   function routeArrow(input) {
-    const { source, target, trigger, gutter, lane, exit = "side" } = input;
+    const { source, target, trigger, gutter, lane, exit = "side", fan } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
       case "overlap":
@@ -1231,7 +1245,14 @@ ${logs.join(`
           const y = midY(source);
           return done("straight", [{ x: sx, y }, { x: tx, y }]);
         }
-        const start = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
+        if (fan && fan.count > 1) {
+          const base = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
+          const start = { x: base.x, y: base.y + fan.index * FAN_STEP };
+          const fanX = sx + Math.min(gutter, tx - sx) / 2 + ((fan.count - 1) / 2 - fan.index) * LANE_STEP;
+          return done(trigger ? "trigger" : "gutter", [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
+        }
+        const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
+        const start = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
         const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
         const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
         return done(trigger ? "trigger" : "gutter", [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
@@ -1315,14 +1336,25 @@ ${logs.join(`
   function planRoutes(meta, items) {
     const gutter = gutterOf(meta);
     const first = items.map((it) => routeArrow({ ...it.ends, gutter, lane: 0 }));
+    const fans = fanIndex(items.flatMap((it, i) => {
+      const r = first[i];
+      if (!r.ok || r.kind !== "trigger" && r.kind !== "gutter")
+        return [];
+      const s = it.ends.source;
+      const startY = r.points[0].y;
+      const targetY = it.ends.target.y + it.ends.target.height / 2;
+      return targetY >= startY ? [{ id: it.id, group: `${s.x}:${s.y}:${gutterKey(s, it.ends.target)}`, targetY }] : [];
+    }));
     const lanes = assignLanes(items.map((it, i) => {
       const r = first[i];
       const ys = r.ok ? r.points.map((p) => p.y) : [0];
-      return { key: r.ok && r.kind !== "straight" && r.kind !== "elbow" ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
+      const shared = r.ok && r.kind !== "straight" && r.kind !== "elbow" && !fans.has(it.id);
+      return { key: shared ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
     }));
     return items.map((it, i) => {
       const lane = lanes[i];
-      const r = lane === 0 ? first[i] : routeArrow({ ...it.ends, gutter, lane });
+      const fan = fans.get(it.id);
+      const r = fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? first[i] : routeArrow({ ...it.ends, gutter, lane });
       return r.ok ? { id: it.id, route: r, error: null } : { id: it.id, route: null, error: r.error };
     });
   }
@@ -1553,11 +1585,7 @@ ${logs.join(`
     }
     return boards;
   }
-  var rerouteFlow = async (args) => {
-    const only = Array.isArray(args.arrowIds) ? new Set(args.arrowIds.filter((x) => typeof x === "string").map(norm)) : null;
-    const boards = await boardsFor(args);
-    if (!boards.length)
-      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+  async function rerouteBoards(boards, only = null) {
     const rerouted = [];
     const backwards = [];
     const deleted = [];
@@ -1593,7 +1621,14 @@ ${logs.join(`
       }
       raiseArrows(board);
     }
-    return ok({ boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings });
+    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings };
+  }
+  var rerouteFlow = async (args) => {
+    const only = Array.isArray(args.arrowIds) ? new Set(args.arrowIds.filter((x) => typeof x === "string").map(norm)) : null;
+    const boards = await boardsFor(args);
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    return ok(await rerouteBoards(boards, only));
   };
   var inside = (p, r, pad = 0) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
   function hasNavigate(n) {
@@ -2247,6 +2282,606 @@ ${body}
     });
   };
 
+  // plugin-src/board-text.ts
+  var LABEL_TOLERANCE = 1;
+  var cell = (col, row) => `(c${col},r${row})`;
+  function fit(text, width) {
+    const w = Math.max(1, Math.floor(width));
+    return text.length <= w ? text.padEnd(w) : `${text.slice(0, Math.max(0, w - 1))}…`.padEnd(w);
+  }
+  function renderGrid(screens, cols, rows, width) {
+    if (!cols || !rows)
+      return "";
+    const byCell = new Map;
+    for (const s of screens) {
+      const key = `${s.col},${s.row}`;
+      if (!byCell.has(key))
+        byCell.set(key, s);
+    }
+    const w = Math.max(2, Math.floor(width));
+    const head = `r${rows - 1}`.length + 2;
+    const line = (label, cells) => `${label.padStart(head - 1).padEnd(head)}| ${cells.join(" | ")}`.trimEnd();
+    const header = line("", Array.from({ length: cols }, (_, c) => fit(`c${c}`, w)));
+    const rule = `${"-".repeat(head)}+${Array.from({ length: cols }, () => "-".repeat(w + 2)).join("+")}`;
+    const body = Array.from({ length: rows }, (_, r) => line(`r${r}`, Array.from({ length: cols }, (_, c) => fit(byCell.get(`${c},${r}`)?.name ?? "", w))));
+    return [header, rule, ...body].join(`
+`);
+  }
+  function renderBoard(input, width = 16) {
+    const { screens, arrows, meta } = input;
+    const byId = new Map(screens.map((s) => [s.id, s]));
+    const cols = screens.length ? Math.max(...screens.map((s) => s.col)) + 1 : 0;
+    const rows = screens.length ? Math.max(...screens.map((s) => s.row)) + 1 : 0;
+    const issues = [];
+    for (const s of screens) {
+      const actual = cellOfRect(s, meta);
+      if (actual.col !== s.col || actual.row !== s.row)
+        issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+      if (s.labelX !== null && Math.abs(s.labelX - s.x) > LABEL_TOLERANCE)
+        issues.push(`${s.name}: label is at x=${s.labelX} but the frame is at x=${s.x}`);
+    }
+    const cellKeys = new Map;
+    for (const s of screens)
+      cellKeys.set(`${s.col},${s.row}`, [...cellKeys.get(`${s.col},${s.row}`) ?? [], s]);
+    for (const group of cellKeys.values()) {
+      const first = group[0];
+      if (group.length > 1 && first)
+        issues.push(`Cell ${cell(first.col, first.row)} holds ${group.length} screens: ${group.map((g) => g.name).join(", ")}`);
+    }
+    const order = (a, b) => {
+      const fa = byId.get(a.from);
+      const fb = byId.get(b.from);
+      const ta = byId.get(a.to);
+      const tb = byId.get(b.to);
+      return (fa?.col ?? 1e9) - (fb?.col ?? 1e9) || (fa?.row ?? 1e9) - (fb?.row ?? 1e9) || (ta?.col ?? 1e9) - (tb?.col ?? 1e9) || (ta?.row ?? 1e9) - (tb?.row ?? 1e9) || a.label.localeCompare(b.label);
+    };
+    const lines = [];
+    const point = (id, s) => s ? `${s.name} ${cell(s.col, s.row)}` : `${id} (missing)`;
+    for (const a of [...arrows].sort(order)) {
+      const from = byId.get(a.from);
+      const to = byId.get(a.to);
+      const tail = `${a.mode === "trigger" ? `[trigger: ${a.triggerName ?? "?"}]` : "[auto]"}${a.exit === "bottom" ? " [bottom exit]" : ""}`;
+      lines.push(`${point(a.from, from)} --${a.label}--> ${point(a.to, to)} ${tail}`);
+      if (!from)
+        issues.push(`Arrow "${a.label}": source ${a.from} is missing`);
+      if (!to)
+        issues.push(`Arrow "${a.label}": target ${a.to} is missing`);
+      if (from && to && to.col < from.col)
+        issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
+    }
+    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), arrows: lines, issues };
+  }
+
+  // plugin-src/describe.ts
+  var DEFAULT_WIDTH = 16;
+  async function screensOf(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const out = [];
+    for (const c of parent.children) {
+      const meta = readMeta(c, SCREEN_KEY, parseScreenMeta);
+      if (!meta || meta.boardId !== board.node.id)
+        continue;
+      const label = meta.labelId ? await sceneById(meta.labelId) : null;
+      const r = rectOf(c);
+      out.push({ id: c.id, name: c.name, col: meta.col, row: meta.row, x: r.x, y: r.y, labelX: label ? rectOf(label).x : null });
+    }
+    return out;
+  }
+  async function arrowsOf(board) {
+    const out = [];
+    for (const g of board.arrows.children) {
+      if (g.type !== "GROUP")
+        continue;
+      const meta = readMeta(g, ARROW_KEY, parseArrowMeta);
+      if (!meta || meta.boardId !== board.node.id)
+        continue;
+      const trigger = meta.trigger ? await sceneById(meta.trigger) : null;
+      out.push({ from: meta.from, to: meta.to, label: meta.label, mode: meta.mode, triggerName: trigger?.name ?? null, exit: meta.exit });
+    }
+    return out;
+  }
+  async function describeOne(board, width) {
+    const [screens, arrows] = await Promise.all([screensOf(board), arrowsOf(board)]);
+    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows }, width);
+  }
+  var describeBoard = async (args) => {
+    const width = num(args, "width") ?? DEFAULT_WIDTH;
+    const id = str(args, "boardId");
+    const boards = [];
+    if (id) {
+      boards.push(await loadBoard(id));
+    } else {
+      for (const n of figma.currentPage.children) {
+        if (readMeta(n, BOARD_KEY, parseBoardMeta))
+          boards.push(await loadBoard(n.id));
+      }
+    }
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    const described = await Promise.all(boards.map((b) => describeOne(b, width)));
+    return ok({ boards: described });
+  };
+
+  // plugin-src/duplicate-plan.ts
+  function cellRect(board, col, row) {
+    return { x: board.originX + col * board.colWidth, y: board.originY + row * board.rowHeight, width: board.screenW, height: board.screenH };
+  }
+  function overlapsAny(target, others) {
+    return others.findIndex((o) => target.x < o.x + o.width && o.x < target.x + target.width && target.y < o.y + o.height && o.y < target.y + target.height);
+  }
+  function growBounds(bounds, rects, margin) {
+    const padded = rects.map((r) => ({ x: r.x - margin, y: r.y - margin, width: r.width + margin * 2, height: r.height + margin * 2 }));
+    return unionRect([bounds, ...padded]) ?? bounds;
+  }
+  var frameName = (name) => name;
+  var labelName = (name) => `Label · ${name}`;
+  var routeName = (name) => `Route · ${name}`;
+  var bannerName = (title) => `ListGroup.Item · ${title}`;
+  function findDescendant(root, test) {
+    for (const c of root.children ?? []) {
+      if (test(c))
+        return c;
+      const deeper = findDescendant(c, test);
+      if (deeper)
+        return deeper;
+    }
+    return null;
+  }
+  function pickBanner(root) {
+    const isFrame = (n) => n.children !== undefined;
+    return findDescendant(root, (n) => isFrame(n) && n.name === "KycEntryRow") ?? findDescendant(root, (n) => isFrame(n) && n.name.startsWith("ListGroup.Item"));
+  }
+
+  // plugin-src/duplicate.ts
+  var norm2 = (id) => id.replace("-", ":");
+  async function sceneById2(id) {
+    const n = await figma.getNodeByIdAsync(norm2(id));
+    return n && "visible" in n && !n.removed ? n : null;
+  }
+  function rectOf2(n) {
+    const t = n.absoluteTransform;
+    return { x: t[0][2], y: t[1][2], width: "width" in n ? n.width : 0, height: "height" in n ? n.height : 0 };
+  }
+  function toTree(node) {
+    if (!("children" in node))
+      return { name: node.name, node };
+    return { name: node.name, node, children: node.children.map(toTree) };
+  }
+  async function loadFontsOf(text) {
+    if (text.characters.length === 0) {
+      if (text.fontName !== figma.mixed)
+        await figma.loadFontAsync(text.fontName);
+      return;
+    }
+    for (const f of text.getRangeAllFontNames(0, text.characters.length))
+      await figma.loadFontAsync(f);
+  }
+  async function setText(text, value) {
+    await loadFontsOf(text);
+    text.characters = value;
+  }
+  function clearFlowData(root) {
+    const nodes = "findAll" in root ? [root, ...root.findAll()] : [root];
+    for (const n of nodes) {
+      if (n.getSharedPluginData(FLOW_NAMESPACE, ARROW_KEY))
+        n.setSharedPluginData(FLOW_NAMESPACE, ARROW_KEY, "");
+      if (n.getSharedPluginData(FLOW_NAMESPACE, BOARD_KEY))
+        n.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
+    }
+  }
+  async function cloneText(id, dx, dy, name, value) {
+    if (!id)
+      return null;
+    const src = await sceneById2(id);
+    if (!src || src.type !== "TEXT")
+      return null;
+    const copy = src.clone();
+    copy.x = src.x + dx;
+    copy.y = src.y + dy;
+    copy.name = name;
+    if (value !== null)
+      await setText(copy, value);
+    return copy;
+  }
+  async function componentFor(id) {
+    const n = await figma.getNodeByIdAsync(norm2(id));
+    if (!n)
+      throw new Error(`No node ${id}.`);
+    if (n.type === "COMPONENT")
+      return n;
+    if (n.type === "COMPONENT_SET")
+      return n.defaultVariant;
+    throw new Error(`${id} is a ${n.type}, not a COMPONENT or COMPONENT_SET.`);
+  }
+  function parseBanner(raw) {
+    if (raw === undefined || raw === null)
+      return null;
+    if (typeof raw !== "object" || Array.isArray(raw))
+      return "invalid";
+    const o = raw;
+    if (typeof o.title !== "string" || typeof o.description !== "string")
+      return "invalid";
+    return { title: o.title, description: o.description, iconComponentId: typeof o.iconComponentId === "string" && o.iconComponentId ? o.iconComponentId : undefined };
+  }
+  async function updateBanner(copy, banner) {
+    const hit = pickBanner(toTree(copy));
+    if (!hit)
+      return false;
+    const row = hit.node;
+    if (!("findAll" in row))
+      return false;
+    const tree = toTree(row);
+    const title = findDescendant(tree, (n) => n.node.type === "TEXT" && n.name.endsWith("ItemTitle"));
+    const description = findDescendant(tree, (n) => n.node.type === "TEXT" && n.name.endsWith("ItemDescription"));
+    if (title && title.node.type === "TEXT")
+      await setText(title.node, banner.title);
+    if (description && description.node.type === "TEXT")
+      await setText(description.node, banner.description);
+    if (banner.iconComponentId) {
+      const component = await componentFor(banner.iconComponentId);
+      const icon = row.findOne((n) => n.type === "INSTANCE");
+      if (!icon || icon.type !== "INSTANCE")
+        throw new Error("The banner row has no icon instance to swap.");
+      icon.swapComponent(component);
+    }
+    row.name = bannerName(banner.title);
+    return true;
+  }
+  var duplicateScreen = async (args) => {
+    const id = str(args, "id");
+    const name = str(args, "name");
+    const col = args.col;
+    const row = args.row;
+    if (!id || !name)
+      return fail("duplicate_screen needs id and name.");
+    if (typeof col !== "number" || !Number.isInteger(col) || typeof row !== "number" || !Number.isInteger(row))
+      return fail("duplicate_screen needs integer col and row.");
+    const route = str(args, "route");
+    const banner = parseBanner(args.banner);
+    if (banner === "invalid")
+      return fail("banner needs a title and a description.");
+    const src = await sceneById2(id);
+    if (!src)
+      return fail(`No node ${id}.`);
+    if (src.type !== "FRAME")
+      return fail(`${src.name} (${src.id}) is a ${src.type}, not a screen frame.`);
+    const meta = parseScreenMeta(src.getSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY));
+    if (!meta)
+      return fail(`${src.name} (${src.id}) is not on an adopted board. Run adopt_board first.`);
+    const boardNode = await sceneById2(meta.boardId);
+    if (!boardNode)
+      return fail(`The board ${meta.boardId} is gone.`);
+    const board = parseBoardMeta(boardNode.getSharedPluginData(FLOW_NAMESPACE, BOARD_KEY));
+    if (!board)
+      return fail(`${meta.boardId} has no flowbridge board data.`);
+    const target = cellRect(board, col, row);
+    const siblings = src.parent && "children" in src.parent ? src.parent.children : [];
+    const frames = siblings.filter((c) => c.type === "FRAME" && c.id !== boardNode.id);
+    const clash = overlapsAny(target, frames.map(rectOf2));
+    if (clash !== -1) {
+      const other = frames[clash];
+      return fail(`Cell (${col}, ${row}) is occupied by ${other.name} (${other.id}).`);
+    }
+    const origin = rectOf2(src);
+    const dx = target.x - origin.x;
+    const dy = target.y - origin.y;
+    const copy = src.clone();
+    copy.x = src.x + dx;
+    copy.y = src.y + dy;
+    copy.name = frameName(name);
+    clearFlowData(copy);
+    const label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+    const routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+    const fresh = { v: 1, kind: "screen", boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null };
+    copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
+    const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
+    const bounds = rectOf2(boardNode);
+    const grown = growBounds(bounds, [target, ...[label, routeText].flatMap((t) => t ? [rectOf2(t)] : [])], board.margin);
+    if (grown.x !== bounds.x || grown.y !== bounds.y || grown.width !== bounds.width || grown.height !== bounds.height) {
+      if (!("resize" in boardNode))
+        return fail(`The board ${boardNode.name} cannot be resized.`);
+      boardNode.x += grown.x - bounds.x;
+      boardNode.y += grown.y - bounds.y;
+      boardNode.resize(grown.width, grown.height);
+    }
+    return ok({ id: copy.id, name: copy.name, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+  };
+
+  // plugin-src/grid.ts
+  function cellRect2(meta, col, row) {
+    return { x: meta.originX + col * meta.colWidth, y: meta.originY + row * meta.rowHeight, width: meta.screenW, height: meta.screenH };
+  }
+  function cellOf(rect, meta) {
+    return cellOfRect(rect, meta);
+  }
+  function shiftPlan(screens, axis, after, count) {
+    return screens.filter((s) => s[axis] > after).map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: axis === "col" ? { col: s.col + count, row: s.row } : { col: s.col, row: s.row + count } }));
+  }
+  function compactPlan(screens) {
+    const rank = (values) => {
+      const sorted = [...new Set(values)].sort((a, b) => a - b);
+      const first = sorted[0] ?? 0;
+      return new Map(sorted.map((v, i) => [v, first + i]));
+    };
+    const cols = rank(screens.map((s) => s.col));
+    const rows = rank(screens.map((s) => s.row));
+    const out = [];
+    for (const s of screens) {
+      const to = { col: cols.get(s.col) ?? s.col, row: rows.get(s.row) ?? s.row };
+      if (to.col !== s.col || to.row !== s.row)
+        out.push({ id: s.id, from: { col: s.col, row: s.row }, to });
+    }
+    return out;
+  }
+  function planMove(screens, id, col, row, swap) {
+    const me = screens.find((s) => s.id === id);
+    if (!me)
+      return { ok: false, error: `${id} is not a screen on this board.` };
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0)
+      return { ok: false, error: "col and row must be whole numbers, 0 or more." };
+    if (me.col === col && me.row === row)
+      return { ok: true, moves: [] };
+    const occupant = screens.find((s) => s.id !== id && s.col === col && s.row === row);
+    const mine = { id, from: { col: me.col, row: me.row }, to: { col, row } };
+    if (!occupant)
+      return { ok: true, moves: [mine] };
+    if (!swap)
+      return { ok: false, error: `Cell (${col},${row}) is occupied by ${occupant.id}. Pass swap: true to trade places.` };
+    return { ok: true, moves: [mine, { id: occupant.id, from: { col, row }, to: { col: me.col, row: me.row } }] };
+  }
+  function boardBounds(meta, screens) {
+    const maxCol = Math.max(0, ...screens.map((s) => s.col));
+    const maxRow = Math.max(0, ...screens.map((s) => s.row));
+    return {
+      x: meta.originX - meta.margin,
+      y: meta.originY - meta.labelOffset - meta.margin,
+      width: maxCol * meta.colWidth + meta.screenW + 2 * meta.margin,
+      height: maxRow * meta.rowHeight + meta.labelOffset + meta.screenH + 2 * meta.margin
+    };
+  }
+  var LABEL_TOLERANCE2 = 2;
+  function staleReason(meta, stored, frame, label, hasLabelId) {
+    if (hasLabelId) {
+      if (!label)
+        return "label-missing";
+      if (Math.abs(label.x - frame.x) > LABEL_TOLERANCE2)
+        return "label-misplaced";
+    }
+    const at = cellOf(frame, meta);
+    return at.col !== stored.col || at.row !== stored.row ? "cell-mismatch" : null;
+  }
+
+  // plugin-src/gridtools.ts
+  var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
+  var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
+  var writeScreen = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+  async function loadScreens(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return { screens: [], stale: [] };
+    const texts = parent.children.filter((c) => c.type === "TEXT").map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const screens = [];
+    const stale = [];
+    for (const c of parent.children) {
+      if (c.type !== "FRAME")
+        continue;
+      const stored = readMeta(c, SCREEN_KEY, parseScreenMeta);
+      if (!stored || stored.boardId !== board.node.id)
+        continue;
+      const label = stored.labelId ? await sceneById(stored.labelId) : null;
+      const rect = rectOf(c);
+      const reason = staleReason(board.meta, stored, rect, label ? rectOf(label) : null, stored.labelId !== null);
+      if (!reason) {
+        screens.push({ node: c, meta: stored });
+        continue;
+      }
+      const cell = cellOf(rect, board.meta);
+      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts) };
+      writeScreen(c, meta);
+      stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
+      screens.push({ node: c, meta });
+    }
+    return { screens, stale };
+  }
+  var cellsOf = (screens) => screens.map((s) => ({ id: s.node.id, col: s.meta.col, row: s.meta.row }));
+  function shiftNode(node, dx, dy) {
+    if (!node || !("x" in node))
+      return;
+    node.x += dx;
+    node.y += dy;
+  }
+  async function applyMoves(board, screens, moves) {
+    const out = [];
+    for (const m of moves) {
+      const s = screens.find((x) => x.node.id === m.id);
+      if (!s)
+        continue;
+      const want = cellRect2(board.meta, m.to.col, m.to.row);
+      const have = rectOf(s.node);
+      const dx = want.x - have.x;
+      const dy = want.y - have.y;
+      const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
+      shiftNode(s.node, dx, dy);
+      shiftNode(label, dx, dy);
+      shiftNode(route, dx, dy);
+      s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
+      writeScreen(s.node, s.meta);
+      out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
+    }
+    return out;
+  }
+  function resizeBoard(board, screens, shrink) {
+    const bg = board.node;
+    const rect = rectOf(bg);
+    if (!("resize" in bg))
+      return { width: rect.width, height: rect.height };
+    const b = boardBounds(board.meta, screens.map((s) => s.meta));
+    const needW = b.x + b.width - rect.x;
+    const needH = b.y + b.height - rect.y;
+    const width = Math.max(1, shrink ? needW : Math.max(rect.width, needW));
+    const height = Math.max(1, shrink ? needH : Math.max(rect.height, needH));
+    if (Math.abs(width - rect.width) > 0.5 || Math.abs(height - rect.height) > 0.5)
+      bg.resize(width, height);
+    return { width, height };
+  }
+  async function finish(board, screens, stale, moves, shrink) {
+    const moved = await applyMoves(board, screens, moves);
+    const size = resizeBoard(board, screens, shrink);
+    const reroute = await rerouteBoards([board]);
+    return ok({ boardId: board.node.id, moved, stale: stale.map((s) => ({ ...s, fixedTo: { ...s.fixedTo } })), board: size, reroute });
+  }
+  var wholeNumber = (v, fallback, min) => {
+    const n = v ?? fallback;
+    return Number.isInteger(n) && n >= min ? n : null;
+  };
+  var moveScreen = async (args) => {
+    const id = str(args, "id");
+    const col = num(args, "col");
+    const row = num(args, "row");
+    if (!id || col === undefined || row === undefined)
+      return fail("move_screen needs id, col and row.");
+    const node = await sceneById(id);
+    if (!node)
+      return fail(`No node ${id}.`);
+    const stored = readMeta(node, SCREEN_KEY, parseScreenMeta);
+    if (!stored)
+      return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
+    const board = await loadBoard(stored.boardId);
+    const { screens, stale } = await loadScreens(board);
+    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, "swap", false));
+    if (!plan.ok)
+      return fail(plan.error);
+    return finish(board, screens, stale, plan.moves, false);
+  };
+  async function insertAlong(args, axis) {
+    const tool = axis === "col" ? "insert_columns" : "insert_rows";
+    const boardId = str(args, "boardId");
+    const after = num(args, "after");
+    if (!boardId || after === undefined)
+      return fail(`${tool} needs boardId and after.`);
+    const count = wholeNumber(num(args, "count"), 1, 1);
+    if (count === null || count > 50)
+      return fail("count must be a whole number from 1 to 50.");
+    if (!Number.isInteger(after) || after < -1)
+      return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false);
+  }
+  var insertColumns = (args) => insertAlong(args, "col");
+  var insertRows = (args) => insertAlong(args, "row");
+  var compactBoard = async (args) => {
+    const boardId = str(args, "boardId");
+    if (!boardId)
+      return fail("compact_board needs boardId.");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    return finish(board, screens, stale, compactPlan(cellsOf(screens)), true);
+  };
+  async function fontFor(text) {
+    const current = text.fontName;
+    const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
+    for (const font of candidates) {
+      try {
+        await figma.loadFontAsync(font);
+        return font;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("Could not load a font for the board heading.");
+  }
+  async function findStyleBoard() {
+    for (const n of figma.currentPage.children) {
+      if (!readMeta(n, BOARD_KEY, parseBoardMeta))
+        continue;
+      try {
+        return await loadBoard(n.id);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+  var createBoard = async (args) => {
+    const name = str(args, "name");
+    if (!name)
+      return fail("create_board needs name.");
+    const colWidth = num(args, "colWidth") ?? 700;
+    const rowHeight = num(args, "rowHeight") ?? 1112;
+    const screenW = num(args, "screenW") ?? 393;
+    const screenH = num(args, "screenH") ?? 852;
+    const cols = wholeNumber(num(args, "cols"), 4, 1);
+    const rows = wholeNumber(num(args, "rows"), 2, 1);
+    if (cols === null || rows === null || cols > 50 || rows > 50)
+      return fail("cols and rows must be whole numbers from 1 to 50.");
+    if (![colWidth, rowHeight, screenW, screenH].every((n) => n > 0))
+      return fail("colWidth, rowHeight, screenW and screenH must be positive.");
+    if (colWidth < screenW || rowHeight < screenH)
+      return fail("colWidth and rowHeight must be at least the screen size, or the screens overlap.");
+    const page = figma.currentPage;
+    const styleBoard = await findStyleBoard();
+    const margin = styleBoard?.meta.margin ?? 80;
+    const labelOffset = styleBoard?.meta.labelOffset ?? 72;
+    const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
+    const rects = page.children.map(rectOf);
+    const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
+    const y = num(args, "y") ?? (rects.length ? Math.min(...rects.map((r) => r.y)) : 0);
+    const grid = { originX: x + margin, originY: y + margin + labelOffset, colWidth, rowHeight, screenW, screenH, labelOffset, margin };
+    const bounds = boardBounds(grid, [{ col: cols - 1, row: rows - 1 }]);
+    const styleBg = styleBoard?.node;
+    let bg;
+    if (styleBg?.type === "RECTANGLE") {
+      bg = styleBg.clone();
+      bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
+    } else {
+      bg = figma.createRectangle();
+      const fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
+      bg.fills = fills;
+      if (styleBg && "cornerRadius" in styleBg && typeof styleBg.cornerRadius === "number")
+        bg.cornerRadius = styleBg.cornerRadius;
+    }
+    page.appendChild(bg);
+    bg.name = `Board background · ${name}`;
+    bg.x = bounds.x;
+    bg.y = bounds.y;
+    bg.resize(bounds.width, bounds.height);
+    const headingNode = styleBoard?.meta.headingId ? await sceneById(styleBoard.meta.headingId) : null;
+    const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
+    const heading = headingStyle ? headingStyle.clone() : figma.createText();
+    page.appendChild(heading);
+    await figma.loadFontAsync(await fontFor(heading));
+    heading.fontName = await fontFor(heading);
+    if (!headingStyle) {
+      heading.fontSize = 48;
+      heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
+    }
+    heading.characters = `Board · ${name}`;
+    heading.name = `Board · ${name}`;
+    heading.x = bounds.x;
+    heading.y = bounds.y - heading.height - 24;
+    const arrows = figma.createFrame();
+    page.appendChild(arrows);
+    arrows.name = `Flow arrows · ${name}`;
+    arrows.fills = [];
+    arrows.clipsContent = false;
+    arrows.resize(1, 1);
+    arrows.x = bounds.x;
+    arrows.y = bounds.y;
+    const meta = { v: 1, kind: "board", ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
+    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    return ok({
+      boardId: bg.id,
+      headingId: heading.id,
+      arrowsGroupId: arrows.id,
+      bounds,
+      grid: { originX: grid.originX, originY: grid.originY, colWidth, rowHeight, screenW, screenH, cols, rows },
+      styledFrom: styleBoard ? styleBoard.node.id : null
+    });
+  };
+
   // plugin-src/main.ts
   var handlers = {
     figma_status: status,
@@ -2269,12 +2904,19 @@ ${body}
     lint_flow_layout: lintFlowLayout,
     connect,
     reroute_flow: rerouteFlow,
-    adopt_board: adoptBoard
+    adopt_board: adoptBoard,
+    describe_board: describeBoard,
+    create_board: createBoard,
+    move_screen: moveScreen,
+    insert_columns: insertColumns,
+    insert_rows: insertRows,
+    compact_board: compactBoard,
+    duplicate_screen: duplicateScreen
   };
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "1d1df808" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9c6d30ad" });
       return;
     }
     if (msg.type !== "command")
@@ -2282,7 +2924,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"1d1df808"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9c6d30ad"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
