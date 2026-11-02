@@ -1,5 +1,6 @@
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { freeSpot, isScene, requireNode, walk } from './nodes';
+import { parseRegion, type Rect, unionRect } from './rect';
 import { type ByteFile, fail, type Handler, num, ok, str } from './types';
 
 type Exportable = SceneNode & ExportMixin;
@@ -13,11 +14,47 @@ export async function exportPng(node: SceneNode, maxDimension: number, scale?: n
     return node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: Math.max(0.01, s) } });
 }
 
+/** Exports `rect` of the current page by way of a temporary slice, always removed afterwards. */
+async function exportRegion(rect: Rect, maxDimension: number, scale?: number): Promise<Uint8Array> {
+    const slice = figma.createSlice();
+    try {
+        figma.currentPage.appendChild(slice);
+        slice.x = rect.x;
+        slice.y = rect.y;
+        slice.resize(Math.max(0.01, rect.width), Math.max(0.01, rect.height));
+        return await exportPng(slice, maxDimension, scale);
+    } finally {
+        slice.remove();
+    }
+}
+
 export const getScreenshot: Handler = async (args) => {
-    const node = await requireNode(str(args, 'nodeId'));
-    if (!isScene(node)) return fail('Pick a layer, not a page.');
     const scale = num(args, 'scale');
     const maxDimension = num(args, 'maxDimension') ?? 1024;
+    const ids = Array.isArray(args.nodeIds) ? args.nodeIds.filter((v): v is string => typeof v === 'string') : [];
+    const regionArg = args.region;
+    if (regionArg !== undefined) {
+        const rect = parseRegion(regionArg);
+        if (!rect) return fail('region needs numeric x, y and a positive width and height.');
+        const bytes = await exportRegion(rect, maxDimension, scale);
+        return ok({ region: rect }, { images: [bytes] });
+    }
+    if (ids.length) {
+        const rects: Rect[] = [];
+        for (const id of ids) {
+            const node = await requireNode(id);
+            if (!isScene(node)) return fail(`${id} is a page, not a layer.`);
+            const box = node.absoluteBoundingBox;
+            if (!box) return fail(`${node.name} (${id}) has no bounds to capture.`);
+            rects.push(box);
+        }
+        const union = unionRect(rects);
+        if (!union) return fail('nodeIds was empty.');
+        const bytes = await exportRegion(union, maxDimension, scale);
+        return ok({ nodeIds: ids, region: union }, { images: [bytes] });
+    }
+    const node = await requireNode(str(args, 'nodeId'));
+    if (!isScene(node)) return fail('Pick a layer, not a page.');
     const bytes = await exportPng(node, maxDimension, scale);
     return ok({ nodeId: node.id, name: node.name, width: Math.round(node.width), height: Math.round(node.height) }, { images: [bytes] });
 };

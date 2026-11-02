@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { ClientMessage, JsonObject, PluginReply, ServerMessage } from '../shared/protocol';
+import { readExpectedBuild, stalePlugin, STALE_FIX } from './build';
 import { handleRequest, type RpcRequest } from './rpc';
 import { CodeConnectStore } from './store';
 import type { ToolContext } from './tools';
@@ -20,6 +21,8 @@ const log = (...parts: unknown[]) => console.error('[figma-local-bridge]', ...pa
 type Pending = { resolve: (reply: PluginReply) => void; timer: ReturnType<typeof setTimeout> };
 
 let plugin: ServerWebSocket<undefined> | null = null;
+let pluginBuild: string | null = null;
+const expectedBuild = await readExpectedBuild(new URL('../plugin/build.json', import.meta.url).pathname);
 const pending = new Map<string, Pending>();
 
 function settle(id: string, reply: PluginReply) {
@@ -44,6 +47,8 @@ const ctx: ToolContext = {
         }),
     store: new CodeConnectStore(join(HOME, 'code-connect.json')),
     downloadDir: join(HOME, 'downloads'),
+    expectedBuild,
+    pluginBuild: () => pluginBuild,
 };
 
 try {
@@ -59,6 +64,7 @@ try {
             open(ws) {
                 if (plugin && plugin !== ws) plugin.close(1000, 'Replaced by a newer plugin window');
                 plugin = ws;
+                pluginBuild = null;
                 log('plugin connected');
             },
             message(_ws, raw) {
@@ -68,7 +74,11 @@ try {
                 } catch {
                     return;
                 }
-                if ('hello' in msg) log('file:', msg.hello.fileName, `(${msg.hello.editorType})`);
+                if ('hello' in msg) {
+                    pluginBuild = msg.hello.build ?? null;
+                    log('file:', msg.hello.fileName, `(${msg.hello.editorType})`, 'build:', pluginBuild ?? 'unknown');
+                    if (stalePlugin(expectedBuild, pluginBuild)) log(`plugin build ${pluginBuild ?? 'unknown'} differs from expected ${expectedBuild}. ${STALE_FIX}`);
+                }
                 else settle(msg.id, msg.reply);
             },
             close(ws) {

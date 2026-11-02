@@ -22,4 +22,4 @@ export type PluginReply =
 export type ServerMessage = { id: string; cmd: PluginCommand };
 
 /** plugin → server */
-export type ClientMessage = { id: string; reply: PluginReply } | { hello: { fileName: string; editorType: string } };
+export type ClientMessage = { id: string; reply: PluginReply } | { hello: { fileName: string; editorType: string; build?: string } };
