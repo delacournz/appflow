@@ -3,7 +3,10 @@
 export type Pt = { x: number; y: number };
 export type Rect = { x: number; y: number; width: number; height: number };
 
-export type RouteKind = 'straight' | 'trigger' | 'gutter' | 'below' | 'above' | 'backwards';
+export type RouteKind = 'straight' | 'trigger' | 'gutter' | 'below' | 'above' | 'backwards' | 'elbow';
+
+/** Where an arrow leaves a source whose target is right of it: the side (through the gutter) or the bottom edge. */
+export type Exit = 'side' | 'bottom';
 
 export type RouteInput = {
     source: Rect;
@@ -13,6 +16,8 @@ export type RouteInput = {
     gutter: number;
     /** 0 for the first arrow through a gutter; see `assignLanes`. */
     lane: number;
+    /** 'bottom' drops out of the source's bottom edge and turns right, keeping the arrow out of a busy gutter. */
+    exit?: Exit;
 };
 
 export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean };
@@ -113,13 +118,13 @@ function labelAnchorOf(points: Pt[], vertical: boolean): Pt {
 
 const done = (kind: RouteKind, raw: Pt[], backwards = false): Route => {
     const points = dedupe(raw);
-    return { ok: true, kind, points, dot: points[0] as Pt, labelAnchor: labelAnchorOf(points, kind === 'below' || kind === 'above'), backwards };
+    return { ok: true, kind, points, dot: points[0] as Pt, labelAnchor: labelAnchorOf(points, kind === 'below' || kind === 'above' || kind === 'elbow'), backwards };
 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 export function routeArrow(input: RouteInput): Route | RouteError {
-    const { source, target, trigger, gutter, lane } = input;
+    const { source, target, trigger, gutter, lane, exit = 'side' } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
         case 'overlap':
@@ -128,6 +133,10 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             const tx = target.x;
             const ty = midY(target);
             const sx = right(source);
+            if (exit === 'bottom' && target.y >= bottom(source)) {
+                const x = clamp(source.x + ENTRY_OFFSET + off, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
+                return done('elbow', [{ x, y: bottom(source) }, { x, y: ty + off }, { x: tx, y: ty + off }]);
+            }
             if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
                 const y = midY(source);
                 return done('straight', [{ x: sx, y }, { x: tx, y }]);

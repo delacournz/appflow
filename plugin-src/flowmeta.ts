@@ -34,6 +34,7 @@ export type ArrowMeta = {
     trigger: string | null;
     label: string;
     mode: 'trigger' | 'auto';
+    exit?: 'side' | 'bottom';
     vectorId: string;
     dotId: string;
     labelId: string;

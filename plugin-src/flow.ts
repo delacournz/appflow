@@ -19,7 +19,7 @@ import {
     type ScreenMeta,
 } from './flowmeta';
 import { fail, ok, str, bool, type Handler } from './types';
-import { assignLanes, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, type Exit, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
 
 const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
@@ -80,13 +80,13 @@ function listArrows(board: Board): ArrowEntry[] {
 
 const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
 
-type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean };
+type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 
 async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
     const [from, to] = await Promise.all([sceneById(meta.from), sceneById(meta.to)]);
     if (!from || !to) return null;
     const trig = meta.trigger ? await sceneById(meta.trigger) : null;
-    return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig };
+    return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig, exit: meta.exit ?? 'side' };
 }
 
 type Plan = { id: string; route: Route | null; error: string | null };
@@ -99,7 +99,7 @@ function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[]): 
         items.map((it, i) => {
             const r = first[i] as ReturnType<typeof routeArrow>;
             const ys = r.ok ? r.points.map((p) => p.y) : [0];
-            return { key: r.ok && r.kind !== 'straight' ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
+            return { key: r.ok && r.kind !== 'straight' && r.kind !== 'elbow' ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
         }),
     );
     return items.map((it, i) => {
@@ -260,6 +260,7 @@ export const connect: Handler = async (args) => {
     if (!fromId || !toId || !label) return fail('connect needs from, to and label.');
     const triggerId = str(args, 'trigger') ?? null;
     const prototype = bool(args, 'prototype', true);
+    const exit: Exit = str(args, 'exit') === 'bottom' ? 'bottom' : 'side';
     const [from, to] = await Promise.all([sceneById(fromId), sceneById(toId)]);
     if (!from) return fail(`No node ${fromId}.`);
     if (!to) return fail(`No node ${toId}.`);
@@ -272,7 +273,7 @@ export const connect: Handler = async (args) => {
 
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
-    const ends: Endpoints = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false };
+    const ends: Endpoints = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false, exit };
 
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => (o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []));
     const plans = planRoutes(board.meta, [...others, { id: 'new', ends }]);
@@ -303,6 +304,7 @@ export const connect: Handler = async (args) => {
         trigger: trigger?.id ?? null,
         label,
         mode: trigger ? 'trigger' : 'auto',
+        ...(exit === 'bottom' ? { exit } : {}),
         vectorId: parts.vector.id,
         dotId: parts.dot.id,
         labelId: parts.label.id,

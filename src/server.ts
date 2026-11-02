@@ -22,7 +22,8 @@ type Pending = { resolve: (reply: PluginReply) => void; timer: ReturnType<typeof
 
 let plugin: ServerWebSocket<undefined> | null = null;
 let pluginBuild: string | null = null;
-const expectedBuild = await readExpectedBuild(new URL('../plugin/build.json', import.meta.url).pathname);
+const BUILD_JSON = new URL('../plugin/build.json', import.meta.url).pathname;
+let expectedBuild = await readExpectedBuild(BUILD_JSON);
 const pending = new Map<string, Pending>();
 
 function settle(id: string, reply: PluginReply) {
@@ -47,7 +48,9 @@ const ctx: ToolContext = {
         }),
     store: new CodeConnectStore(join(HOME, 'code-connect.json')),
     downloadDir: join(HOME, 'downloads'),
-    expectedBuild,
+    get expectedBuild() {
+        return expectedBuild;
+    },
     pluginBuild: () => pluginBuild,
 };
 
@@ -67,7 +70,7 @@ try {
                 pluginBuild = null;
                 log('plugin connected');
             },
-            message(_ws, raw) {
+            async message(_ws, raw) {
                 let msg: ClientMessage;
                 try {
                     msg = JSON.parse(String(raw)) as ClientMessage;
@@ -76,6 +79,7 @@ try {
                 }
                 if ('hello' in msg) {
                     pluginBuild = msg.hello.build ?? null;
+                    expectedBuild = await readExpectedBuild(BUILD_JSON);
                     log('file:', msg.hello.fileName, `(${msg.hello.editorType})`, 'build:', pluginBuild ?? 'unknown');
                     if (stalePlugin(expectedBuild, pluginBuild)) log(`plugin build ${pluginBuild ?? 'unknown'} differs from expected ${expectedBuild}. ${STALE_FIX}`);
                 }

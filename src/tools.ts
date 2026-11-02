@@ -302,6 +302,7 @@ export const TOOLS: ToolDef[] = [
                 label: { type: 'string', description: 'Text on the arrow, such as "Continue".' },
                 prototype: { type: 'boolean', description: 'Also set the trigger’s navigate reaction. Default true.' },
                 boardId: { type: 'string', description: 'Board node ID. Defaults to the source screen’s board.' },
+                exit: { type: 'string', enum: ['side', 'bottom'], description: 'For a target below and right: "bottom" leaves the source’s bottom edge and turns right, keeping a busy gutter clear. Default "side".' },
             },
             ['from', 'to', 'label'],
         ),

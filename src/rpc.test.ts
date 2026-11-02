@@ -255,7 +255,7 @@ describe('flow tools', () => {
         const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
         const by = (n: string) => tools.find((t) => t.name === n);
         expect(by('connect')?.inputSchema.required).toEqual(['from', 'to', 'label']);
-        expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId']);
+        expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId', 'exit']);
         expect(by('reroute_flow')?.inputSchema.properties).toHaveProperty('arrowIds');
         expect(by('adopt_board')?.inputSchema.required).toEqual(['boardNodeId']);
         expect(by('adopt_board')?.inputSchema.properties).toHaveProperty('dryRun');

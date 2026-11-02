@@ -1210,11 +1210,11 @@ ${logs.join(`
   }
   var done = (kind, raw, backwards = false) => {
     const points = dedupe(raw);
-    return { ok: true, kind, points, dot: points[0], labelAnchor: labelAnchorOf(points, kind === "below" || kind === "above"), backwards };
+    return { ok: true, kind, points, dot: points[0], labelAnchor: labelAnchorOf(points, kind === "below" || kind === "above" || kind === "elbow"), backwards };
   };
   var clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
   function routeArrow(input) {
-    const { source, target, trigger, gutter, lane } = input;
+    const { source, target, trigger, gutter, lane, exit = "side" } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
       case "overlap":
@@ -1223,6 +1223,10 @@ ${logs.join(`
         const tx = target.x;
         const ty = midY(target);
         const sx = right(source);
+        if (exit === "bottom" && target.y >= bottom(source)) {
+          const x = clamp(source.x + ENTRY_OFFSET + off, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
+          return done("elbow", [{ x, y: bottom(source) }, { x, y: ty + off }, { x: tx, y: ty + off }]);
+        }
         if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
           const y = midY(source);
           return done("straight", [{ x: sx, y }, { x: tx, y }]);
@@ -1306,7 +1310,7 @@ ${logs.join(`
     if (!from || !to)
       return null;
     const trig = meta.trigger ? await sceneById(meta.trigger) : null;
-    return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig };
+    return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig, exit: meta.exit ?? "side" };
   }
   function planRoutes(meta, items) {
     const gutter = gutterOf(meta);
@@ -1314,7 +1318,7 @@ ${logs.join(`
     const lanes = assignLanes(items.map((it, i) => {
       const r = first[i];
       const ys = r.ok ? r.points.map((p) => p.y) : [0];
-      return { key: r.ok && r.kind !== "straight" ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
+      return { key: r.ok && r.kind !== "straight" && r.kind !== "elbow" ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
     }));
     return items.map((it, i) => {
       const lane = lanes[i];
@@ -1463,6 +1467,7 @@ ${logs.join(`
       return fail("connect needs from, to and label.");
     const triggerId = str(args, "trigger") ?? null;
     const prototype = bool(args, "prototype", true);
+    const exit = str(args, "exit") === "bottom" ? "bottom" : "side";
     const [from, to] = await Promise.all([sceneById(fromId), sceneById(toId)]);
     if (!from)
       return fail(`No node ${fromId}.`);
@@ -1477,7 +1482,7 @@ ${logs.join(`
     const board = await loadBoard(boardId);
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
-    const ends = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false };
+    const ends = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false, exit };
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []);
     const plans = planRoutes(board.meta, [...others, { id: "new", ends }]);
     const mine = plans[plans.length - 1];
@@ -1507,6 +1512,7 @@ ${logs.join(`
       trigger: trigger?.id ?? null,
       label,
       mode: trigger ? "trigger" : "auto",
+      ...exit === "bottom" ? { exit } : {},
       vectorId: parts.vector.id,
       dotId: parts.dot.id,
       labelId: parts.label.id
@@ -2268,7 +2274,7 @@ ${body}
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "291edb50" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "1d1df808" });
       return;
     }
     if (msg.type !== "command")
@@ -2276,7 +2282,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"291edb50"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"1d1df808"}) is stale. Re-run Plugins → Development → Local Agent Bridge to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

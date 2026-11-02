@@ -169,6 +169,25 @@ describe('routeArrow', () => {
         expect(x(2) - x(0)).toBe(-24);
     });
 
+    test('exit bottom: a target below and right leaves the bottom edge, then turns right into the target', () => {
+        const s = screen(0, 0);
+        const t = screen(1, 2);
+        const r = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0, exit: 'bottom' }));
+        expect(r.kind).toBe('elbow');
+        expect(r.points).toEqual([
+            { x: s.x + 340, y: s.y + H },
+            { x: s.x + 340, y: t.y + H / 2 },
+            { x: t.x, y: t.y + H / 2 },
+        ]);
+        expect(r.labelAnchor.x).toBe(s.x + 340);
+    });
+
+    test('exit bottom is ignored when the target is not below the source', () => {
+        const s = screen(0, 0);
+        const r = must(routeArrow({ source: s, target: screen(1, 0), trigger: null, gutter: GUTTER, lane: 0, exit: 'bottom' }));
+        expect(r.kind).toBe('straight');
+    });
+
     test('lanes give arrows sharing a target their own arrowhead without crossing', () => {
         const s = screen(0, 0);
         const t = screen(1, 1);
