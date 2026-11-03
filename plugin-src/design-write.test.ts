@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { SyncOp } from '../shared/design-ops';
-import { codeCombo, fontAvailable, slotTarget, solidFrom, formatVariantName, hexToRgba, modeIdFor, parseVariantName, phaseOf, renameVariantProps } from './design-write';
+import { codeCombo, fontAvailable, paddingResets, slotTarget, solidFrom, formatVariantName, hexToRgba, modeIdFor, parseVariantName, phaseOf, renameVariantProps } from './design-write';
 
 describe('hexToRgba', () => {
     test('#RRGGBBAA to 0-1 channels', () => {
@@ -77,4 +77,19 @@ test('solidFrom splits a resolved RGBA into paint colour and opacity', () => {
     expect(solidFrom({ r: 1, g: 1, b: 1 })).toEqual({ color: { r: 1, g: 1, b: 1 }, opacity: 1 });
     expect(solidFrom(12)).toBeNull();
     expect(solidFrom({ type: 'VARIABLE_ALIAS', id: 'x' })).toBeNull();
+});
+
+describe('paddingResets', () => {
+    const w = { kind: 'size', axis: 'width', value: 36 } as const;
+    const h = { kind: 'size', axis: 'height', value: 36 } as const;
+    test('a fixed width and height with no padding resets every side', () => {
+        expect(paddingResets([w, h])).toEqual(['top', 'right', 'bottom', 'left']);
+    });
+    test('only sides code leaves out are reset', () => {
+        expect(paddingResets([w, h, { kind: 'padding', side: 'left', value: 4 }, { kind: 'padding', side: 'right', value: 4 }])).toEqual(['top', 'bottom']);
+    });
+    test('nothing is reset unless both width and height are fixed', () => {
+        expect(paddingResets([h])).toEqual([]);
+        expect(paddingResets([])).toEqual([]);
+    });
 });

@@ -3077,6 +3077,14 @@ ${body}
       return null;
     return { color: { r, g, b }, opacity: isNum2(a) ? a : 1 };
   }
+  var SIDES = ["top", "right", "bottom", "left"];
+  function paddingResets(decls) {
+    const fixed = (axis) => decls.some((d) => d.kind === "size" && d.axis === axis);
+    if (!fixed("width") || !fixed("height"))
+      return [];
+    const set = new Set(decls.flatMap((d) => d.kind === "padding" ? [d.side] : []));
+    return SIDES.filter((s) => !set.has(s));
+  }
   function slotTarget(slot, layers) {
     const mapped = layers[slot];
     if (mapped === "")
@@ -3364,6 +3372,13 @@ ${body}
           if (decls.length)
             problems.add(`no layer named ${slot}`);
           continue;
+        }
+        if ("layoutMode" in node && node.layoutMode !== "NONE") {
+          for (const side of paddingResets(decls)) {
+            const field = `padding${side.charAt(0).toUpperCase()}${side.slice(1)}`;
+            node.setBoundVariable(field, null);
+            node[field] = 0;
+          }
         }
         for (const d of decls) {
           try {
@@ -4261,7 +4276,7 @@ ${body}
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "3cf679f3" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a4b44a60" });
       return;
     }
     if (msg.type !== "command")
@@ -4269,7 +4284,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"3cf679f3"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a4b44a60"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

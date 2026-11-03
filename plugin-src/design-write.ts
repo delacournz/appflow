@@ -1,6 +1,7 @@
 /** Pure helpers for applying sync ops. No `figma` global. */
 import type { SyncOp } from '../shared/design-ops';
 import { normalizeHex } from '../shared/design-spec';
+import type { StyleDecl } from '../shared/design-style';
 
 export function hexToRgba(hex: string): { r: number; g: number; b: number; a: number } {
     const n = normalizeHex(hex);
@@ -74,6 +75,20 @@ export function solidFrom(value: unknown): { color: { r: number; g: number; b: n
     const { r, g, b, a } = value as Record<string, unknown>;
     if (!isNum(r) || !isNum(g) || !isNum(b)) return null;
     return { color: { r, g, b }, opacity: isNum(a) ? a : 1 };
+}
+
+export type PaddingSide = 'top' | 'right' | 'bottom' | 'left';
+const SIDES: PaddingSide[] = ['top', 'right', 'bottom', 'left'];
+
+/**
+ * Sides to zero on a layer whose code fixes both width and height but sets no padding for them (an icon button):
+ * padding left over from the design would otherwise push the fixed size out.
+ */
+export function paddingResets(decls: readonly StyleDecl[]): PaddingSide[] {
+    const fixed = (axis: 'width' | 'height') => decls.some((d) => d.kind === 'size' && d.axis === axis);
+    if (!fixed('width') || !fixed('height')) return [];
+    const set = new Set(decls.flatMap((d) => (d.kind === 'padding' ? [d.side] : [])));
+    return SIDES.filter((s) => !set.has(s));
 }
 
 export type SlotTarget = { kind: 'root' } | { kind: 'skip' } | { kind: 'layer'; name: string };

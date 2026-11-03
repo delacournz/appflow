@@ -5,7 +5,7 @@
 import type { ApplyResult, ComponentOp } from '../shared/design-ops';
 import { CODE_ID_KEY, PLUGIN_DATA_NAMESPACE, type SpecComponent } from '../shared/design-spec';
 import { resolveSlots, type Amount, type StyleDecl } from '../shared/design-style';
-import { codeCombo, fontAvailable, formatVariantName, parseVariantName, renameVariantProps, slotTarget, solidFrom } from './design-write';
+import { codeCombo, fontAvailable, formatVariantName, paddingResets, parseVariantName, renameVariantProps, slotTarget, solidFrom } from './design-write';
 
 export type ComponentState = {
     result: ApplyResult;
@@ -264,6 +264,14 @@ export async function styleComponent(op: Extract<ComponentOp, { op: 'style-compo
             if (!node) {
                 if (decls.length) problems.add(`no layer named ${slot}`);
                 continue;
+            }
+            // Zero the padding first so a fixed size can shrink below what the old padding needed.
+            if ('layoutMode' in node && node.layoutMode !== 'NONE') {
+                for (const side of paddingResets(decls)) {
+                    const field = `padding${side.charAt(0).toUpperCase()}${side.slice(1)}` as 'paddingTop' | 'paddingRight' | 'paddingBottom' | 'paddingLeft';
+                    node.setBoundVariable(field, null);
+                    node[field] = 0;
+                }
             }
             for (const d of decls) {
                 try {
