@@ -8,12 +8,12 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import type { JsonObject, PluginReply } from '../shared/protocol';
 import { createServer } from './mcp';
 import { CodeConnectStore } from './store';
-import type { ToolContext } from './tools';
+import { callTool, type ToolContext } from './tools';
 
 type Call = { tool: string; args: JsonObject; timeoutMs: number };
 type Content = { type: string; text?: string; data?: string; mimeType?: string };
 type ToolResult = { content: Content[]; isError?: boolean };
-type ListedTool = { name: string; inputSchema: { required?: string[]; properties?: Record<string, object> } };
+type ListedTool = { name: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } };
 
 let dir: string;
 const clients = new Map<ToolContext, Promise<Client>>();
@@ -180,8 +180,8 @@ describe('tools', () => {
     });
 
     test('get_screenshot returns an image', async () => {
-        const r = await call('get_screenshot', { nodeId: '1:2' }, ctx({ get_screenshot: { ok: true, result: { width: 10 }, images: ['iVBOR'] } }));
-        expect(r.content[0]).toEqual({ type: 'image', data: 'iVBOR', mimeType: 'image/png' });
+        const r = await call('get_screenshot', { nodeId: '1:2' }, ctx({ get_screenshot: { ok: true, result: { width: 10 }, images: ['iVBORw=='] } }));
+        expect(r.content[0]).toEqual({ type: 'image', data: 'iVBORw==', mimeType: 'image/png' });
     });
 
     test('get_design_context returns code, context and the screenshot', async () => {
@@ -358,5 +358,16 @@ describe('flow tools', () => {
         expect(c.calls.map((x) => x.tool)).toEqual(['connect', 'reroute_flow', 'adopt_board']);
         expect(c.calls[0]?.args).toEqual(args);
         expect(c.calls[2]?.args).toEqual({ boardNodeId: '1:0', dryRun: true });
+    });
+});
+
+describe('callTool (outside MCP)', () => {
+    test('validates arguments before running the tool', async () => {
+        const c = ctx({ use_figma: { ok: true, result: 1 } });
+        const bad = await callTool('use_figma', { code: 1 }, c);
+        expect(bad.isError).toBe(true);
+        expect(c.calls).toEqual([]);
+        expect(json(await callTool('use_figma', { code: 'return 1' }, c))).toEqual({ result: 1, logs: [] });
+        expect((await callTool('nope', {}, c)).isError).toBe(true);
     });
 });

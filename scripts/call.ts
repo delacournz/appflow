@@ -7,16 +7,16 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { ClientMessage, JsonObject, PluginReply, ServerMessage } from '../shared/protocol';
+import type { ClientMessage, PluginReply, ServerMessage } from '../shared/protocol';
 import { CodeConnectStore } from '../src/store';
-import { runTool, type ToolContext } from '../src/tools';
+import { callTool, type ToolContext } from '../src/tools';
 
 const [tool, raw] = process.argv.slice(2);
 if (!tool) {
     console.error('Usage: bun run scripts/call.ts <tool> [json-args | @file.json]');
     process.exit(2);
 }
-const args = (raw ? JSON.parse(raw.startsWith('@') ? await readFile(raw.slice(1), 'utf8') : raw) : {}) as JsonObject;
+const args: unknown = raw ? JSON.parse(raw.startsWith('@') ? await readFile(raw.slice(1), 'utf8') : raw) : {};
 const PORT = Number(process.env.APPFLOW_PORT ?? process.env.FIGMA_BRIDGE_PORT ?? 3055);
 const HOME = process.env.APPFLOW_HOME ?? process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.appflow');
 
@@ -60,7 +60,7 @@ const ctx: ToolContext = {
 };
 
 await Promise.race([connected, Bun.sleep(10_000)]);
-const result = await runTool(tool, args, ctx);
+const result = await callTool(tool, args, ctx);
 const dir = join(HOME, 'cli');
 for (const [i, c] of result.content.entries()) {
     if (c.type === 'text') console.log(c.text);
