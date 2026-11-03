@@ -3,20 +3,26 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+
 import type { JsonObject, PluginReply } from '../shared/protocol';
-import { handleRequest, type RpcResponse } from './rpc';
+import { createServer } from './mcp';
 import { CodeConnectStore } from './store';
 import type { ToolContext } from './tools';
 
 type Call = { tool: string; args: JsonObject; timeoutMs: number };
 type Content = { type: string; text?: string; data?: string; mimeType?: string };
 type ToolResult = { content: Content[]; isError?: boolean };
+type ListedTool = { name: string; inputSchema: { required?: string[]; properties?: Record<string, object> } };
 
 let dir: string;
+const clients = new Map<ToolContext, Promise<Client>>();
 beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'appflow-'));
 });
 afterEach(async () => {
+    for (const c of clients.values()) await (await c).close();
+    clients.clear();
     await rm(dir, { recursive: true, force: true });
 });
 
@@ -34,27 +40,54 @@ function ctx(replies: Record<string, PluginReply>, connected = true): ToolContex
     };
 }
 
+/** An SDK client connected in memory to a fresh appflow server for this context. */
+function client(c: ToolContext = ctx({})): Promise<Client> {
+    const existing = clients.get(c);
+    if (existing) return existing;
+    const made = (async () => {
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+        await createServer(c).connect(serverSide);
+        const mc = new Client({ name: 'appflow-test', version: '0.0.0' });
+        await mc.connect(clientSide);
+        return mc;
+    })();
+    clients.set(c, made);
+    return made;
+}
+
 async function call(name: string, args: JsonObject, c: ToolContext): Promise<ToolResult> {
-    const res = (await handleRequest({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name, arguments: args } }, c)) as RpcResponse;
-    return res.result as ToolResult;
+    return (await (await client(c)).callTool({ name, arguments: args })) as ToolResult;
+}
+
+async function listTools(): Promise<ListedTool[]> {
+    return (await (await client()).listTools()).tools;
 }
 
 const json = (r: ToolResult, i = 0) => JSON.parse(r.content[i]?.text ?? 'null');
+const promptText = (r: { messages: { content: { type: string; text?: string } }[] }) => r.messages[0]?.content.text ?? '';
 
 describe('protocol', () => {
-    test('initialize echoes the version and declares tools and prompts', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, ctx({}));
-        expect(res).toMatchObject({ id: 1, result: { protocolVersion: '2025-06-18', capabilities: { tools: {}, prompts: {} }, serverInfo: { name: 'appflow' } } });
+    test('initialize reports appflow with tools, prompts, resources and instructions', async () => {
+        const mc = await client();
+        expect(mc.getServerVersion()?.name).toBe('appflow');
+        expect(mc.getServerCapabilities()).toMatchObject({ tools: {}, prompts: {}, resources: {} });
+        expect(mc.getInstructions()).toContain('figma_status');
     });
 
-    test('notifications get no response; unknown methods are method-not-found', async () => {
-        expect(await handleRequest({ jsonrpc: '2.0', method: 'notifications/initialized' }, ctx({}))).toBeNull();
-        expect((await handleRequest({ jsonrpc: '2.0', id: 3, method: 'nope' }, ctx({})))?.error?.code).toBe(-32601);
+    test('an unknown tool is rejected as invalid params', async () => {
+        await expect((await client()).callTool({ name: 'create_shader', arguments: {} })).rejects.toMatchObject({ code: -32602 });
+    });
+
+    test('invalid arguments are a tool error and never reach the plugin', async () => {
+        const c = ctx({ use_figma: { ok: true, result: null } });
+        const r = await call('use_figma', { timeoutMs: 5 }, c);
+        expect(r.isError).toBe(true);
+        expect(r.content[0]?.text).toContain('code');
+        expect(c.calls).toEqual([]);
     });
 
     test('tools/list uses the official tool names', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        const names = (res?.result as { tools: { name: string }[] }).tools.map((t) => t.name);
+        const names = (await listTools()).map((t) => t.name);
         for (const n of [
             'figma_status',
             'whoami',
@@ -81,54 +114,41 @@ describe('protocol', () => {
     });
 
     test('flow layout: instructions, tool, skill resource and prompt', async () => {
-        const init = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, ctx({}));
-        const result = init?.result as { capabilities: Record<string, unknown>; instructions: string };
-        expect(result.capabilities).toHaveProperty('resources');
-        expect(result.instructions).toContain('left to right');
-        expect(result.instructions).toContain('lint_flow_layout');
+        const mc = await client();
+        expect(mc.getInstructions()).toContain('left to right');
+        expect(mc.getInstructions()).toContain('lint_flow_layout');
+        expect((await listTools()).map((t) => t.name)).toContain('lint_flow_layout');
 
-        const tools = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        expect((tools?.result as { tools: { name: string }[] }).tools.map((t) => t.name)).toContain('lint_flow_layout');
-
-        const list = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'resources/list' }, ctx({}));
-        const uri = (list?.result as { resources: { uri: string }[] }).resources[0]?.uri ?? '';
+        const uri = (await mc.listResources()).resources[0]?.uri ?? '';
         expect(uri).toBe('skill://appflow/flow-layout/SKILL.md');
-        const read = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri } }, ctx({}));
-        const text = (read?.result as { contents: { text: string; mimeType: string }[] }).contents[0];
-        expect(text?.mimeType).toBe('text/markdown');
-        expect(text?.text).toContain('left to right');
-        expect((await handleRequest({ jsonrpc: '2.0', id: 5, method: 'resources/read', params: { uri: 'skill://nope' } }, ctx({})))?.error).toBeDefined();
+        const content = (await mc.readResource({ uri })).contents[0];
+        expect(content?.mimeType).toBe('text/markdown');
+        expect(content && 'text' in content ? content.text : '').toContain('left to right');
+        await expect(mc.readResource({ uri: 'skill://nope' })).rejects.toBeDefined();
 
-        const prompts = await handleRequest({ jsonrpc: '2.0', id: 6, method: 'prompts/list' }, ctx({}));
-        expect((prompts?.result as { prompts: { name: string }[] }).prompts.map((p) => p.name)).toContain('flow_layout');
-        const got = await handleRequest({ jsonrpc: '2.0', id: 7, method: 'prompts/get', params: { name: 'flow_layout' } }, ctx({}));
-        expect((got?.result as { messages: { content: { text: string } }[] }).messages[0]?.content.text).toContain('lint_flow_layout');
+        expect((await mc.listPrompts()).prompts.map((p) => p.name)).toContain('flow_layout');
+        expect(promptText(await mc.getPrompt({ name: 'flow_layout' }))).toContain('lint_flow_layout');
     });
 
     test('verify built: instructions, tools, skill resource and prompt', async () => {
-        const init = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, ctx({}));
-        expect((init?.result as { instructions: string }).instructions).toContain('verify-built');
-        const tools = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        const names = (tools?.result as { tools: { name: string }[] }).tools.map((t) => t.name);
+        const mc = await client();
+        expect(mc.getInstructions()).toContain('verify-built');
+        const names = (await listTools()).map((t) => t.name);
         expect(names).toContain('set_screen_status');
         expect(names).toContain('badge_screens');
         const uri = 'skill://appflow/verify-built/SKILL.md';
-        const list = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'resources/list' }, ctx({}));
-        expect((list?.result as { resources: { uri: string }[] }).resources.map((r) => r.uri)).toContain(uri);
-        const read = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri } }, ctx({}));
-        expect((read?.result as { contents: { text: string }[] }).contents[0]?.text).toContain('set_screen_status');
-        const got = await handleRequest({ jsonrpc: '2.0', id: 5, method: 'prompts/get', params: { name: 'verify_built' } }, ctx({}));
-        expect((got?.result as { messages: { content: { text: string } }[] }).messages[0]?.content.text).toContain('set_screen_status');
+        expect((await mc.listResources()).resources.map((r) => r.uri)).toContain(uri);
+        const content = (await mc.readResource({ uri })).contents[0];
+        expect(content && 'text' in content ? content.text : '').toContain('set_screen_status');
+        expect(promptText(await mc.getPrompt({ name: 'verify_built' }))).toContain('set_screen_status');
     });
 
     test('prompts: create_design_system_rules', async () => {
-        const list = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'prompts/list' }, ctx({}));
-        expect((list?.result as { prompts: { name: string }[] }).prompts[0]?.name).toBe('create_design_system_rules');
-        const got = await handleRequest(
-            { jsonrpc: '2.0', id: 5, method: 'prompts/get', params: { name: 'create_design_system_rules', arguments: { clientFrameworks: 'react-native' } } },
-            ctx({}),
-        );
-        const text = (got?.result as { messages: { content: { text: string } }[] }).messages[0]?.content.text ?? '';
+        const mc = await client();
+        const listed = (await mc.listPrompts()).prompts;
+        expect(listed[0]?.name).toBe('create_design_system_rules');
+        expect(listed[0]?.arguments?.map((a) => a.name)).toEqual(['clientLanguages', 'clientFrameworks']);
+        const text = promptText(await mc.getPrompt({ name: 'create_design_system_rules', arguments: { clientFrameworks: 'react-native' } }));
         expect(text).toContain('react-native');
         expect(text).toContain('search_design_system');
     });
@@ -236,8 +256,7 @@ describe('tools', () => {
 
 describe('screenshot targets and build handshake', () => {
     test('get_screenshot schema accepts nodeIds and region', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, ctx({}));
-        const tools = (res?.result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
+        const tools = await listTools();
         const shot = tools.find((t) => t.name === 'get_screenshot');
         expect(Object.keys(shot?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining(['nodeId', 'nodeIds', 'region', 'maxDimension', 'scale']));
     });
@@ -267,8 +286,7 @@ describe('screenshot targets and build handshake', () => {
 
 describe('duplicate_screen', () => {
     test('is listed with its required args and forwards to the plugin', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const tools = await listTools();
         const t = tools.find((x) => x.name === 'duplicate_screen');
         expect(t?.inputSchema.required).toEqual(['id', 'col', 'row', 'name']);
         expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'banner']);
@@ -280,8 +298,7 @@ describe('duplicate_screen', () => {
 
 describe('board grid tools', () => {
     test('are listed with their required args', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const tools = await listTools();
         const by = (n: string) => tools.find((t) => t.name === n);
         expect(by('create_board')?.inputSchema.required).toEqual(['name']);
         expect(Object.keys(by('create_board')?.inputSchema.properties ?? {})).toEqual(['name', 'x', 'y', 'colWidth', 'rowHeight', 'screenW', 'screenH', 'cols', 'rows']);
@@ -312,8 +329,7 @@ describe('board grid tools', () => {
 
 describe('flow tools', () => {
     test('connect, reroute_flow and adopt_board are listed with their required args', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
-        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const tools = await listTools();
         const by = (n: string) => tools.find((t) => t.name === n);
         expect(by('connect')?.inputSchema.required).toEqual(['from', 'to', 'label']);
         expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId', 'exit']);
@@ -323,8 +339,7 @@ describe('flow tools', () => {
     });
 
     test('describe_board is listed with optional boardId and width', async () => {
-        const res = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'tools/list' }, ctx({}));
-        const tools = (res?.result as { tools: { name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } }[] }).tools;
+        const tools = await listTools();
         const t = tools.find((x) => x.name === 'describe_board');
         expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['boardId', 'width']);
         expect(t?.inputSchema.required ?? []).toEqual([]);
