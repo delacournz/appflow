@@ -30,6 +30,8 @@ export const DOT_GAP = 10;
 export const LANE_STEP = 24;
 export const BACKWARDS_DROP = 60;
 export const FAN_STEP = 16;
+/** Gap between a source's edge and its nearest fan lane. */
+export const FAN_EDGE = 24;
 
 export type Fan = { index: number; count: number };
 
@@ -142,6 +144,13 @@ const done = (kind: RouteKind, raw: Pt[], backwards = false): Route => {
     return { ok: true, kind, points, dot: points[0] as Pt, labelAnchor: labelAnchorOf(points, kind === 'below' || kind === 'above' || kind === 'elbow'), backwards };
 };
 
+/** A straight arrow's label, moved right of the vertical lanes of arrows fanning out beside it, so lines never cross it. */
+export function clearOfLanes(route: Route, laneXs: readonly number[]): Route {
+    if (laneXs.length === 0) return route;
+    const end = route.points[route.points.length - 1] as Pt;
+    return { ...route, labelAnchor: { x: (Math.max(...laneXs) + end.x) / 2, y: route.labelAnchor.y } };
+}
+
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 export function routeArrow(input: RouteInput): Route | RouteError {
@@ -165,8 +174,12 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             if (fan && fan.count > 1) {
                 const base: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
                 const start: Pt = { x: base.x, y: base.y + fan.index * FAN_STEP };
-                const fanX = sx + Math.min(gutter, tx - sx) / 2 + ((fan.count - 1) / 2 - fan.index) * LANE_STEP;
-                return done(trigger ? 'trigger' : 'gutter', [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
+                // Lanes hug the source edge so the labels, which sit right of them, get most of the gutter.
+                const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP, tx - EDGE_MARGIN);
+                const r = done(trigger ? 'trigger' : 'gutter', [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
+                // Fanned arrows share their first stretch, so each label goes on the segment entering its own target.
+                const last = r.points[r.points.length - 2] as Pt;
+                return { ...r, labelAnchor: { x: (last.x + tx) / 2, y: ty } };
             }
             const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
             const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };

@@ -1130,6 +1130,10 @@ ${logs.join(`
     return [...items].sort((a, b) => a.sourceX - b.sourceX || a.targetY - b.targetY || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
   var isNavigate = (a) => !!a && a.type === "NODE" && a.navigation === "NAVIGATE";
+  function destinationsOf(reactions) {
+    const ids = reactions.flatMap((r) => [...r.action ? [r.action] : [], ...r.actions ?? []]).flatMap((a) => a.type === "NODE" && typeof a.destinationId === "string" ? [a.destinationId] : []);
+    return [...new Set(ids)];
+  }
   function setNavigateTarget(reactions, to) {
     const out = reactions.map((r) => ({ ...r }));
     const idx = out.findIndex((r) => isNavigate(r.action) || (r.actions ?? []).some(isNavigate));
@@ -1145,6 +1149,31 @@ ${logs.join(`
       r.actions = r.actions.map((a, i) => i === first ? { ...a, destinationId: to } : a);
     }
     return { reactions: out, replaced: true };
+  }
+
+  // plugin-src/lift.ts
+  function lift(frame) {
+    const group = frame.parent;
+    const host = group?.parent;
+    if (group?.type !== "GROUP" || !host?.insertChild || !group.insertChild || !group.children || !host.children)
+      return null;
+    const index = group.children.indexOf(frame);
+    host.insertChild(host.children.indexOf(group) + 1, frame);
+    return () => group.insertChild?.(index, frame);
+  }
+  async function liftOutOfGroups(frames, work) {
+    const restores = [];
+    try {
+      for (const f of new Set(frames)) {
+        const r = lift(f);
+        if (r)
+          restores.push(r);
+      }
+      return await work();
+    } finally {
+      for (const r of restores.reverse())
+        r();
+    }
   }
 
   // plugin-src/screen-status.ts
@@ -1223,6 +1252,7 @@ ${logs.join(`
   var LANE_STEP = 24;
   var BACKWARDS_DROP = 60;
   var FAN_STEP = 16;
+  var FAN_EDGE = 24;
   function fanIndex(items) {
     const groups = new Map;
     for (const it of items)
@@ -1325,6 +1355,12 @@ ${logs.join(`
     const points = dedupe(raw);
     return { ok: true, kind, points, dot: points[0], labelAnchor: labelAnchorOf(points, kind === "below" || kind === "above" || kind === "elbow"), backwards };
   };
+  function clearOfLanes(route, laneXs) {
+    if (laneXs.length === 0)
+      return route;
+    const end = route.points[route.points.length - 1];
+    return { ...route, labelAnchor: { x: (Math.max(...laneXs) + end.x) / 2, y: route.labelAnchor.y } };
+  }
   var clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
   function routeArrow(input) {
     const { source, target, trigger, gutter, lane, exit = "side", fan } = input;
@@ -1347,8 +1383,10 @@ ${logs.join(`
         if (fan && fan.count > 1) {
           const base = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
           const start = { x: base.x, y: base.y + fan.index * FAN_STEP };
-          const fanX = sx + Math.min(gutter, tx - sx) / 2 + ((fan.count - 1) / 2 - fan.index) * LANE_STEP;
-          return done(trigger ? "trigger" : "gutter", [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
+          const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP, tx - EDGE_MARGIN);
+          const r = done(trigger ? "trigger" : "gutter", [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
+          const last = r.points[r.points.length - 2];
+          return { ...r, labelAnchor: { x: (last.x + tx) / 2, y: ty } };
         }
         const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
         const start = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
@@ -1450,11 +1488,24 @@ ${logs.join(`
       const shared = r.ok && r.kind !== "straight" && r.kind !== "elbow" && !fans.has(it.id);
       return { key: shared ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
     }));
-    return items.map((it, i) => {
+    const routes = items.map((it, i) => {
       const lane = lanes[i];
       const fan = fans.get(it.id);
-      const r = fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? first[i] : routeArrow({ ...it.ends, gutter, lane });
-      return r.ok ? { id: it.id, route: r, error: null } : { id: it.id, route: null, error: r.error };
+      return fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? first[i] : routeArrow({ ...it.ends, gutter, lane });
+    });
+    const edgeOf = (e) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
+    const fanLanes = new Map;
+    items.forEach((it, i) => {
+      const r = routes[i];
+      if (r.ok && fans.has(it.id))
+        fanLanes.set(edgeOf(it.ends), [...fanLanes.get(edgeOf(it.ends)) ?? [], r.points[1].x]);
+    });
+    return items.map((it, i) => {
+      const r = routes[i];
+      if (!r.ok)
+        return { id: it.id, route: null, error: r.error };
+      const route = r.kind === "straight" ? clearOfLanes(r, fanLanes.get(edgeOf(it.ends)) ?? []) : r;
+      return { id: it.id, route, error: null };
     });
   }
   async function paintFor(style) {
@@ -1696,7 +1747,8 @@ ${logs.join(`
       if (!("reactions" in trigger))
         return fail(`${trigger.name} cannot hold prototype reactions. The arrow was drawn (${group.id}).`);
       const next = setNavigateTarget(trigger.reactions, to.id);
-      await trigger.setReactionsAsync(next.reactions);
+      const destinations = (await Promise.all(destinationsOf(next.reactions).map(sceneById))).filter((n) => n !== null);
+      await liftOutOfGroups([from, to, ...destinations], () => trigger.setReactionsAsync(next.reactions));
       prototypeUpdated = true;
     }
     return ok({
@@ -4276,7 +4328,7 @@ ${body}
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a4b44a60" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "29a536b4" });
       return;
     }
     if (msg.type !== "command")
@@ -4284,7 +4336,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a4b44a60"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"29a536b4"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

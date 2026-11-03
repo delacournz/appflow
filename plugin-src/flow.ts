@@ -8,6 +8,7 @@ import {
     SCREEN_KEY,
     arrowGroupName,
     cellOfRect,
+    destinationsOf,
     parseArrowMeta,
     parseBoardMeta,
     parseScreenMeta,
@@ -18,9 +19,10 @@ import {
     type ReactionLike,
     type ScreenMeta,
 } from './flowmeta';
+import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
-import { assignLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, clearOfLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
 
 const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
@@ -114,11 +116,23 @@ function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[]): 
             return { key: shared ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
         }),
     );
-    return items.map((it, i) => {
+    const routes = items.map((it, i) => {
         const lane = lanes[i] as number;
         const fan = fans.get(it.id);
-        const r = fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? (first[i] as ReturnType<typeof routeArrow>) : routeArrow({ ...it.ends, gutter, lane });
-        return r.ok ? { id: it.id, route: r, error: null } : { id: it.id, route: null, error: r.error };
+        return fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? (first[i] as ReturnType<typeof routeArrow>) : routeArrow({ ...it.ends, gutter, lane });
+    });
+    // A straight arrow out of the same screen edge as a fan keeps its label right of the fan's vertical lanes.
+    const edgeOf = (e: Endpoints) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
+    const fanLanes = new Map<string, number[]>();
+    items.forEach((it, i) => {
+        const r = routes[i] as ReturnType<typeof routeArrow>;
+        if (r.ok && fans.has(it.id)) fanLanes.set(edgeOf(it.ends), [...(fanLanes.get(edgeOf(it.ends)) ?? []), (r.points[1] as Pt).x]);
+    });
+    return items.map((it, i) => {
+        const r = routes[i] as ReturnType<typeof routeArrow>;
+        if (!r.ok) return { id: it.id, route: null, error: r.error };
+        const route = r.kind === 'straight' ? clearOfLanes(r, fanLanes.get(edgeOf(it.ends)) ?? []) : r;
+        return { id: it.id, route, error: null };
     });
 }
 
@@ -372,7 +386,8 @@ export const connect: Handler = async (args) => {
     if (trigger && prototype) {
         if (!('reactions' in trigger)) return fail(`${trigger.name} cannot hold prototype reactions. The arrow was drawn (${group.id}).`);
         const next = setNavigateTarget(trigger.reactions as unknown as ReactionLike[], to.id);
-        await trigger.setReactionsAsync(next.reactions as unknown as Reaction[]);
+        const destinations = (await Promise.all(destinationsOf(next.reactions).map(sceneById))).filter((n): n is SceneNode => n !== null);
+        await liftOutOfGroups([from, to, ...destinations], () => trigger.setReactionsAsync(next.reactions as unknown as Reaction[]));
         prototypeUpdated = true;
     }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assignLanes, fanIndex, gutterKey, laneOffset, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, clearOfLanes, fanIndex, gutterKey, laneOffset, routeArrow, type Pt, type Rect, type Route } from './route';
 
 const W = 393;
 const H = 852;
@@ -281,12 +281,41 @@ describe('fan-out from one source', () => {
         expect(startY(c) - startY(b)).toBe(16);
         expect(laneX(a) - laneX(b)).toBe(24);
         expect(laneX(b) - laneX(c)).toBe(24);
-        expect(laneX(b)).toBe(s.x + W + GUTTER / 2);
+        expect(laneX(c)).toBe(s.x + W + 24);
     });
 
     test('fan arrows enter each target at its middle', () => {
         const t = screen(1, 2);
         expect(route(t, 2, 3).points.at(-1)).toEqual({ x: t.x, y: t.y + H / 2 });
+    });
+
+    test('each fan label sits on the segment entering its own target, so labels never stack', () => {
+        const targets = [screen(1, 0), screen(1, 1), screen(1, 2)];
+        for (const trigger of [banner, null]) {
+            const routes = targets.map((t, i) => must(routeArrow({ source: s, target: t, trigger, gutter: GUTTER, lane: 0, fan: { index: i, count: 3 } })));
+            routes.forEach((r, i) => {
+                const t = targets[i] as Rect;
+                const last = r.points.at(-2) as Pt;
+                expect(r.labelAnchor.y).toBe(t.y + H / 2);
+                expect(r.labelAnchor.x).toBe((last.x + t.x) / 2);
+            });
+            expect(new Set(routes.map((r) => r.labelAnchor.y)).size).toBe(3);
+        }
+    });
+
+    test('a straight arrow beside a fan moves its label right of the fan lanes', () => {
+        const t = screen(1, 0);
+        const straight = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
+        const lanes = [s.x + W + 140, s.x + W + 164];
+        const moved = clearOfLanes(straight, lanes);
+        expect(moved.labelAnchor).toEqual({ x: (s.x + W + 164 + t.x) / 2, y: straight.labelAnchor.y });
+        expect(clearOfLanes(straight, [])).toBe(straight);
+    });
+
+    test('fan lanes hug the source edge, leaving room for a label right of them', () => {
+        const lanes = [0, 1, 2].map((i) => (route(screen(1, i), i, 3).points[1] as Pt).x);
+        const target = screen(1, 0);
+        expect(target.x - Math.max(...lanes)).toBeGreaterThanOrEqual(220);
     });
 
     test('fanIndex orders arrows sharing a source and gutter by target height', () => {

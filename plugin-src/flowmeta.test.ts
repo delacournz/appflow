@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
     arrowGroupName,
     cellOfRect,
+    destinationsOf,
     parseArrowMeta,
     parseBoardMeta,
     parseScreenMeta,
@@ -120,5 +121,16 @@ describe('screen build data', () => {
     test('rejects a bad build or badgeId', () => {
         expect(parseScreenMeta(JSON.stringify({ ...old, build: { status: 'nope' } }))).toBeNull();
         expect(parseScreenMeta(JSON.stringify({ ...old, badgeId: 3 }))).toBeNull();
+    });
+});
+
+describe('destinationsOf', () => {
+    test('lists every node destination once, from actions and the legacy action field', () => {
+        const reactions: ReactionLike[] = [
+            { trigger: { type: 'ON_CLICK' }, actions: [{ type: 'NODE', destinationId: 'a', navigation: 'NAVIGATE' }, { type: 'URL', url: 'x' }] },
+            { trigger: { type: 'ON_HOVER' }, action: { type: 'NODE', destinationId: 'b', navigation: 'OVERLAY' } },
+            { trigger: { type: 'ON_PRESS' }, actions: [{ type: 'NODE', destinationId: 'a', navigation: 'NAVIGATE' }, { type: 'NODE', destinationId: null }] },
+        ];
+        expect(destinationsOf(reactions)).toEqual(['a', 'b']);
     });
 });

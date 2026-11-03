@@ -138,6 +138,12 @@ export type ReactionLike = { trigger: { type: string; [key: string]: unknown } |
 
 const isNavigate = (a: ActionLike | undefined): a is ActionLike => !!a && a.type === 'NODE' && a.navigation === 'NAVIGATE';
 
+/** Every node a set of reactions points at, once each, in order. */
+export function destinationsOf(reactions: readonly ReactionLike[]): string[] {
+    const ids = reactions.flatMap((r) => [...(r.action ? [r.action] : []), ...(r.actions ?? [])]).flatMap((a) => (a.type === 'NODE' && typeof a.destinationId === 'string' ? [a.destinationId] : []));
+    return [...new Set(ids)];
+}
+
 /**
  * Points the first navigate reaction at `to`, keeping its trigger, transition and any other fields.
  * Adds an on-click navigate when there is none.
