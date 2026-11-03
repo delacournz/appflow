@@ -51,6 +51,8 @@ Code runs with `documentAccess: "dynamic-page"`, so use the async APIs: `getNode
 3. In the Figma desktop app, go to Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
 4. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
 
+Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin socket. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin window reconnects within about 2 s.
+
 Environment:
 
 - `APPFLOW_PORT` (default 3055): to change it, also change the port in the plugin window and in `devAllowedDomains`.
