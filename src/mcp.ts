@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 
 import pkg from '../package.json' with { type: 'json' };
 import flowLayoutSkill from './skills/flow-layout.md' with { type: 'text' };
+import syncFromCodeSkill from './skills/sync-from-code.md' with { type: 'text' };
 import verifyBuiltSkill from './skills/verify-built.md' with { type: 'text' };
 import { runTool, TOOLS, type ToolContext } from './tools';
 
@@ -13,6 +14,7 @@ const INSTRUCTIONS = [
     'use_figma runs Plugin API code with documentAccess "dynamic-page": use async APIs (getNodeByIdAsync, setCurrentPageAsync, setReactionsAsync). Colours are 0-1. Load fonts before editing text.',
     'Screen flows read left to right: the main path goes right, branches go straight down, overlays and entry points straight up; arrows never point or run left; move the target screen rather than bending an arrow back. Read skill://appflow/flow-layout/SKILL.md before laying out a flow. On a flow board use the board tools, not hand-drawn vectors: adopt_board or create_board, describe_board, move_screen / insert_columns / insert_rows / compact_board, duplicate_screen for state copies, connect (from the triggering control; it also sets the prototype) and reroute_flow. Finish with lint_flow_layout and describe_board.',
     'Each screen shows a Built, Drift or Not built badge. Change it only with set_screen_status, after following skill://appflow/verify-built/SKILL.md (compare the route code and running app with the frame); never mark a screen built because its file exists.',
+    'Code is the source of truth for variables, text styles and component variants: follow skill://appflow/sync-from-code/SKILL.md (sync_design_system or sync_tokens / sync_text_styles / sync_components, dry run first, never prune without the user’s say-so).',
     'Code Connect mappings are stored locally. Cloud-only tools (shaders, generative plugins, Weave, generate_image, create_new_file, generate_figma_design, send_code_to_figma, get_motion_context) are not available.',
 ].join(' ');
 
@@ -29,12 +31,19 @@ const SKILLS = [
         description: 'Check board screens against their route code and the running app, then record Built / Drift / Not built badges with set_screen_status.',
         text: verifyBuiltSkill,
     },
+    {
+        uri: 'skill://appflow/sync-from-code/SKILL.md',
+        name: 'sync-from-code',
+        description: 'Make Figma variables, text styles and component variants match the code design system: dry run, apply, confirm only orphans remain.',
+        text: syncFromCodeSkill,
+    },
 ];
 
 /** Prompts that hand the agent a skill's text as a user message. */
 const SKILL_PROMPTS = [
     { name: 'flow_layout', description: 'Rules for laying out a screen flow left to right, and the check to run before finishing.', text: flowLayoutSkill },
     { name: 'verify_built', description: 'Check which board screens are built and match the design, and record their Built / Drift / Not built badges.', text: verifyBuiltSkill },
+    { name: 'sync_from_code', description: 'Bring Figma variables, text styles and component variants in line with the code design system.', text: syncFromCodeSkill },
 ];
 
 const userMessage = (text: string) => ({ messages: [{ role: 'user' as const, content: { type: 'text' as const, text } }] });

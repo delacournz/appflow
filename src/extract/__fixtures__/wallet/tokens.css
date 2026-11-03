@@ -1,0 +1,260 @@
+@theme {
+	/*
+	 * The one number every generic corner is derived from, in the `@theme
+	 * inline` block at the bottom of this file. shadcn's own scale, so a
+	 * `--radius` copied out of a web app retunes every rounded edge here at
+	 * once — and unlike the older `calc(var(--radius) - 4px)` form some theme
+	 * generators still emit, a multiplier scales rather than shifts, so a
+	 * square-cornered theme stays square at every step.
+	 *
+	 * It lives in `tokens.css` rather than beside the palette because
+	 * `apps/web` imports only this file; a `--radius` in `theme.css` would
+	 * leave every derived radius undefined on the docs site.
+	 */
+	--radius: 1rem;
+
+	--text-xs: 12px;
+	--text-sm: 14px;
+	--text-base: 16px;
+	--text-lg: 18px;
+	--text-xl: 20px;
+	--text-2xl: 24px;
+	--text-3xl: 30px;
+
+	/*
+	 * The Sony FT type scale, set in Archivo. Each role carries its size,
+	 * line height, tracking and weight, so `text-title-1` is the whole style.
+	 * Line heights and tracking are absolute points because React Native has
+	 * no unitless `lineHeight` and no `em`.
+	 *
+	 * Weights are 400, 500 and 600 only: titles stop at 600, amounts use 500.
+	 * Every amount, balance, limit, date and reference also takes
+	 * `tabular-nums`. Balance and amounts scale with Large Title, rows with
+	 * Body. Never truncate an amount — narrow the width, then wrap the unit.
+	 */
+	--text-amount-lg: 64px;
+	--text-amount-lg--line-height: 64px;
+	--text-amount-lg--letter-spacing: -1.92px;
+	--text-amount-lg--font-weight: 500;
+	--text-balance: 62px;
+	--text-balance--line-height: 62px;
+	--text-balance--letter-spacing: -1.86px;
+	--text-balance--font-weight: 500;
+	--text-amount-md: 52px;
+	--text-amount-md--line-height: 55px;
+	--text-amount-md--letter-spacing: -1.56px;
+	--text-amount-md--font-weight: 500;
+	--text-title-1: 22px;
+	--text-title-1--line-height: 28px;
+	--text-title-1--letter-spacing: -0.22px;
+	--text-title-1--font-weight: 600;
+	--text-title-2: 17px;
+	--text-title-2--line-height: 22px;
+	--text-title-2--font-weight: 600;
+	--text-body-strong: 15px;
+	--text-body-strong--line-height: 20px;
+	--text-body-strong--font-weight: 500;
+	--text-body: 15px;
+	--text-body--line-height: 22px;
+	--text-body--font-weight: 400;
+	--text-subhead: 14px;
+	--text-subhead--line-height: 20px;
+	--text-subhead--font-weight: 400;
+	--text-footnote: 13px;
+	--text-footnote--line-height: 18px;
+	--text-footnote--font-weight: 400;
+	--text-caption: 12px;
+	--text-caption--line-height: 16px;
+	--text-caption--font-weight: 500;
+	--text-micro: 11px;
+	--text-micro--line-height: 13px;
+	--text-micro--font-weight: 500;
+
+	/*
+	 * Glacier, OKLCH hue 222. 500 is the base: light steps for text and
+	 * pressed states, dark steps for tints. Static — the ramp does not change
+	 * per theme. The semantic roles (`primary`, `ring`, `selected`) live in
+	 * `theme.css`.
+	 */
+	--color-glacier-100: #E7F9FF;
+	--color-glacier-200: #D0EEF9;
+	--color-glacier-300: #B4E4F5;
+	--color-glacier-400: #A4DDF1;
+	--color-glacier-500: #93D6EE;
+	--color-glacier-600: #6CA9BE;
+	--color-glacier-700: #487A8B;
+	--color-glacier-800: #254854;
+	--color-glacier-900: #10252C;
+
+	/*
+	 * Sony FT corners, by what they round. Pills (buttons, chips) use
+	 * `rounded-full`; people, quick actions and avatars are circles.
+	 */
+	--radius-sheet: 32px;
+	--radius-tile: 20px;
+	--radius-card: 16px;
+	--radius-notice: 14px;
+	--radius-input: 12px;
+
+	/*
+	 * The button's three scales, stepped together: the height — which is also
+	 * the square footprint at an `icon-*` size — the label's type, and the
+	 * corner.
+	 *
+	 * The corner is half the height at every step, so a button is a capsule and
+	 * a square one a circle. A token rather than `rounded-full` because the
+	 * shape is a default, not a law: a kit that wants squarer buttons changes
+	 * three numbers here and touches no component. Each must stay
+	 * under half its height — past that the renderer clamps and the number
+	 * stops meaning what it says.
+	 */
+	--spacing-button-sm: 36px;
+	--spacing-button-md: 44px;
+	--spacing-button-lg: 56px;
+
+	--text-button-sm: 14px;
+	--text-button-md: 15px;
+	--text-button-lg: 17px;
+
+	--radius-button-sm: 18px;
+	--radius-button-md: 22px;
+	--radius-button-lg: 28px;
+
+	/*
+	 * Field heights, and the type scale paired step-for-step with them.
+	 *
+	 * A scale of its own rather than `--spacing-button-*`, even though the
+	 * numbers agree today: a control that borrowed the button's would retune
+	 * silently whenever the button's did.
+	 */
+	--spacing-input-sm: 36px;
+	--spacing-input-md: 44px;
+	--spacing-input-lg: 52px;
+
+	--text-input-sm: 14px;
+	--text-input-md: 15px;
+	--text-input-lg: 17px;
+
+	/*
+	 * The icon scale, shared by `Icon` and `Spinner` so a named size means the
+	 * same edge length in both and one can replace the other without the
+	 * layout moving. `size-icon-md`.
+	 *
+	 * A component's own size axis indexes into this scale rather than restating
+	 * a number: a button's sm/md/lg icon is icon-sm/md/lg.
+	 *
+	 * It sizes more than glyphs. A `Checkbox`'s square reads it too, two steps
+	 * above the tick it holds, rather than minting a scale that would have to be
+	 * retuned in step with this one forever.
+	 */
+	--spacing-icon-xs: 14px;
+	--spacing-icon-sm: 16px;
+	--spacing-icon-md: 18px;
+	--spacing-icon-lg: 20px;
+	--spacing-icon-xl: 24px;
+	--spacing-icon-2xl: 32px;
+
+	/*
+	 * Screen chrome. `h-navbar-row` is the navbar's control row on its own —
+	 * the safe-area band above it is padding, not part of this number, so one
+	 * value holds across every device.
+	 *
+	 * `px-screen-gutter` is the horizontal gutter `Screen.Header`,
+	 * `Screen.Navbar` and a screen's own content all line up against. It is one
+	 * token rather than three `px-5`s so a change moves every edge together.
+	 *
+	 * The footer's padding is deliberately NOT here — see `screen.variants.ts`.
+	 */
+	--spacing-navbar-row: 56px;
+	--spacing-screen-gutter: 20px;
+
+	/*
+	 * Sony FT minimums: a list row is at least 52pt, a touch target at least
+	 * 44pt. A quick action is a 58pt circle, four across.
+	 */
+	--spacing-row: 52px;
+	--spacing-touch: 44px;
+	--spacing-quick-action: 58px;
+
+	/*
+	 * A chart's height. It has no intrinsic one — a canvas fills whatever box
+	 * it is given — so without a token every chart on a dashboard would be a
+	 * different height and the rows would not line up.
+	 *
+	 * A height rather than an aspect ratio on purpose: two charts side by side
+	 * at different widths must still agree, and `aspect-video` would give them
+	 * different heights. Registering the names with tailwind-merge is what lets
+	 * a caller's `aspect-video h-auto` cleanly win when they want that instead.
+	 */
+	--spacing-chart-sm: 160px;
+	--spacing-chart-md: 220px;
+	--spacing-chart-lg: 280px;
+
+	/*
+	 * The kicker: the tiny uppercase mono label that sits over a group, a
+	 * screen or a field. Ten points at 0.2em tracking, named as a pair so
+	 * `Text variant="kicker"` and a hand-written `text-kicker tracking-kicker`
+	 * agree. Nothing reads it unless asked, so the default look is unchanged.
+	 */
+	--text-kicker: 10px;
+	--tracking-kicker: 0.2em;
+
+	/*
+	 * The etched material: a one-pixel highlight set into a surface's edge plus
+	 * a very soft drop. Light puts the highlight on the bottom edge as a
+	 * darkening, dark puts it on the top edge as a lightening, so a card reads
+	 * as lit from above in both. They are two tokens because one `shadow-*`
+	 * utility sets one `box-shadow` and a scheme flip needs `dark:`.
+	 *
+	 * `etched-primary` is the primary button's own: a white inset top edge at
+	 * 16% that is the same in both schemes, because the fill under it is the
+	 * dark one in light and invisible against the pale one in dark.
+	 *
+	 * `focus` is the three-point halo an etched field draws round its ring
+	 * border. A neutral alpha rather than the ring colour: `color-mix` inside a
+	 * `box-shadow` does not survive Uniwind's compile and draws nothing, and
+	 * the ring is a neutral in every base ramp anyway.
+	 *
+	 * Opt-in only: no default component reads any of these. Sony FT draws no
+	 * shadows, so all five are empty; focus is a 2pt `ring` outline instead.
+	 */
+	--shadow-etched: 0 0 #0000;
+	--shadow-etched-dark: 0 0 #0000;
+	--shadow-etched-primary: 0 0 #0000;
+	--shadow-focus: 0 0 #0000;
+	--shadow-focus-dark: 0 0 #0000;
+
+	/*
+	 * A floating action button's footprint — the circle's edge, and the
+	 * height of an extended one. A scale of its own rather than
+	 * `--spacing-button-*`: a fab sits over content rather than in a row of
+	 * controls, so it is a step larger, and retuning a toolbar's density must
+	 * not move the one thing floating over the list.
+	 */
+	--spacing-fab-sm: 44px;
+	--spacing-fab-md: 56px;
+	--spacing-fab-lg: 64px;
+}
+
+/*
+ * The generic corner scale, derived from `--radius`.
+ *
+ * `inline` for the same reason the palette uses it: a utility has to read
+ * `var(--radius)` itself, so a theme that redeclares `--radius` reaches
+ * `rounded-lg` rather than a copy taken when the scale was compiled.
+ *
+ * `--radius-button-*` above is deliberately NOT part of this. A button's corner
+ * is half its own height — a shape, not a step on a scale — and it must not
+ * move when a consumer retunes `--radius`.
+ */
+@theme inline {
+	--radius-xs: calc(var(--radius) * 0.4);
+	--radius-sm: calc(var(--radius) * 0.6);
+	--radius-md: calc(var(--radius) * 0.8);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) * 1.4);
+	--radius-2xl: calc(var(--radius) * 1.8);
+	--radius-3xl: calc(var(--radius) * 2.2);
+	--radius-4xl: calc(var(--radius) * 2.6);
+	--radius-full: 9999px;
+}

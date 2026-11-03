@@ -2959,6 +2959,862 @@ ${body}
     return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, badgeId: badgeCopy?.id ?? null, bannerUpdated });
   };
 
+  // shared/design-spec.ts
+  var PLUGIN_DATA_NAMESPACE = "appflow";
+  var CODE_ID_KEY = "codeId";
+  var tokenKey = (collection, name) => `${collection}/${name}`;
+  function normalizeHex(input) {
+    const m = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(input.trim());
+    if (!m || m[1] === undefined)
+      return null;
+    let h = m[1].toUpperCase();
+    if (h.length <= 4)
+      h = [...h].map((c) => c + c).join("");
+    return h.length === 6 ? `#${h}FF` : `#${h}`;
+  }
+
+  // shared/design-style.ts
+  function declKey(d) {
+    switch (d.kind) {
+      case "fill":
+      case "fill-none":
+        return "fill";
+      case "stroke":
+      case "stroke-none":
+        return "stroke";
+      case "size":
+        return `size:${d.axis}`;
+      case "padding":
+        return `padding:${d.side}`;
+      case "align":
+        return `align:${d.axis}`;
+      default:
+        return d.kind;
+    }
+  }
+  function mergeDecls(...lists) {
+    const out = new Map;
+    for (const list of lists)
+      for (const d of list)
+        out.set(declKey(d), d);
+    return [...out.values()];
+  }
+  function resolveSlots(styles, combo) {
+    const layers = [styles.base];
+    for (const [axis, option] of Object.entries(combo)) {
+      const s = styles.variants[axis]?.[option];
+      if (s)
+        layers.push(s);
+    }
+    for (const c of styles.compound)
+      if (Object.entries(c.when).every(([a, o]) => combo[a] === o))
+        layers.push(c.slots);
+    const slots = new Set(layers.flatMap((l) => Object.keys(l)));
+    const out = {};
+    for (const slot of slots)
+      out[slot] = mergeDecls(...layers.map((l) => l[slot] ?? []));
+    return out;
+  }
+
+  // plugin-src/design-write.ts
+  function hexToRgba(hex) {
+    const n = normalizeHex(hex);
+    if (!n)
+      throw new Error(`Not a hex colour: ${hex}`);
+    const ch = (i) => Number.parseInt(n.slice(i, i + 2), 16) / 255;
+    return { r: ch(1), g: ch(3), b: ch(5), a: ch(7) };
+  }
+  function modeIdFor(modes, name) {
+    const hit = modes.find((m) => m.name.toLowerCase() === name.toLowerCase());
+    if (hit)
+      return hit.modeId;
+    return modes.length === 1 ? modes[0]?.modeId ?? null : null;
+  }
+  function phaseOf(op) {
+    switch (op.op) {
+      case "create-collection":
+      case "add-mode":
+        return 0;
+      case "style-component":
+        return 2;
+      case "orphan-token":
+      case "orphan-text-style":
+      case "orphan-component":
+      case "orphan-variant-axis":
+      case "orphan-variant-option":
+        return 3;
+      default:
+        return 1;
+    }
+  }
+  var fontAvailable = (fonts, family, style) => fonts.some((f) => f.fontName.family === family && f.fontName.style === style);
+  function parseVariantName(name) {
+    const out = {};
+    for (const part of name.split(",")) {
+      const eq = part.indexOf("=");
+      if (eq > 0)
+        out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+    }
+    return out;
+  }
+  var formatVariantName = (props) => Object.entries(props).map(([k, v]) => `${k}=${v}`).join(", ");
+  function renameVariantProps(props, axis, to, options) {
+    const out = {};
+    for (const [k, v] of Object.entries(props)) {
+      if (k === axis)
+        out[to] = options[v] ?? v;
+      else
+        out[k] = v;
+    }
+    return out;
+  }
+  function slotTarget(slot, layers) {
+    const mapped = layers[slot];
+    if (mapped === "")
+      return { kind: "skip" };
+    if (mapped === "root" || mapped === undefined && slot === "root")
+      return { kind: "root" };
+    return { kind: "layer", name: mapped ?? slot };
+  }
+  function codeCombo(props, axes) {
+    const out = {};
+    for (const [k, v] of Object.entries(props)) {
+      const axis = Object.keys(axes).find((a) => a.toLowerCase() === k.toLowerCase());
+      const option = axis ? axes[axis]?.find((o) => o.toLowerCase() === v.toLowerCase()) : undefined;
+      if (axis && option)
+        out[axis] = option;
+    }
+    return out;
+  }
+
+  // plugin-src/design-components.ts
+  var CODE_PAGE = "Code components";
+  var GAP = 24;
+  async function nodeFor(op, s) {
+    const made = s.created.get(op.component);
+    if (made)
+      return made;
+    const node = op.figmaId ? await figma.getNodeByIdAsync(op.figmaId) : null;
+    if (!node || node.type !== "COMPONENT_SET" && node.type !== "COMPONENT")
+      throw new Error("component not found");
+    return node;
+  }
+  async function setFor(op, s) {
+    const node = await nodeFor(op, s);
+    if (node.type !== "COMPONENT_SET")
+      throw new Error(`${node.name} is a single component, not a variant set`);
+    return node;
+  }
+  var variants = (node) => node.type === "COMPONENT" ? [node] : node.children.filter((c) => c.type === "COMPONENT");
+  function cloneVariant(set, props, s) {
+    const name = formatVariantName(props);
+    if (variants(set).some((v) => v.name === name))
+      return;
+    const base = set.defaultVariant;
+    const copy = base.clone();
+    set.appendChild(copy);
+    copy.name = name;
+    const bottom = Math.max(...set.children.filter((c) => c !== copy).map((c) => c.y + c.height));
+    copy.x = base.x;
+    copy.y = bottom + GAP;
+    s.result.created.push(copy.id);
+  }
+  async function createSet(component, s) {
+    let page = figma.root.children.find((p) => p.name === CODE_PAGE);
+    if (!page) {
+      page = figma.createPage();
+      page.name = CODE_PAGE;
+    }
+    await page.loadAsync();
+    const combos = [{ ...component.defaults }];
+    for (const [axis, options] of Object.entries(component.axes)) {
+      const def = component.defaults[axis] ?? options[0];
+      if (combos[0] && def !== undefined)
+        combos[0][axis] = def;
+      for (const o of options)
+        if (o !== def)
+          combos.push({ ...combos[0], [axis]: o });
+    }
+    await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+    const nodes = combos.map((combo, i) => {
+      const c = figma.createComponent();
+      c.layoutMode = "HORIZONTAL";
+      c.primaryAxisSizingMode = "AUTO";
+      c.counterAxisSizingMode = "AUTO";
+      c.paddingLeft = c.paddingRight = 16;
+      c.paddingTop = c.paddingBottom = 12;
+      const label = figma.createText();
+      label.name = "label";
+      label.characters = component.name;
+      c.appendChild(label);
+      c.name = Object.keys(combo).length ? formatVariantName(combo) : "Default";
+      c.y = i * 64;
+      page.appendChild(c);
+      return c;
+    });
+    const right = Math.max(0, ...page.children.filter((n) => !nodes.includes(n)).map((n) => n.x + n.width));
+    const set = figma.combineAsVariants(nodes, page);
+    set.name = component.name;
+    set.x = right + 200;
+    if (component.codeId)
+      set.setSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY, component.codeId);
+    s.created.set(component.name, set);
+    s.result.created.push(set.id);
+    return set;
+  }
+  async function componentOp(op, s, prune) {
+    switch (op.op) {
+      case "create-component":
+        await createSet(op.component, s);
+        return "done";
+      case "rename-variant": {
+        const set = await setFor(op, s);
+        for (const v of variants(set))
+          v.name = formatVariantName(renameVariantProps(parseVariantName(v.name), op.axis, op.to, op.options));
+        s.result.updated.push(set.id);
+        return "done";
+      }
+      case "add-variant-axis": {
+        const set = await setFor(op, s);
+        for (const v of variants(set))
+          v.name = formatVariantName({ ...parseVariantName(v.name), [op.axis]: op.existing });
+        const base = parseVariantName(set.defaultVariant.name);
+        for (const o of op.options)
+          if (o !== op.existing)
+            cloneVariant(set, { ...base, [op.axis]: o }, s);
+        s.result.updated.push(set.id);
+        return "done";
+      }
+      case "add-variant-option": {
+        const set = await setFor(op, s);
+        cloneVariant(set, { ...parseVariantName(set.defaultVariant.name), [op.axis]: op.option }, s);
+        return "done";
+      }
+      case "link-component": {
+        const set = await nodeFor(op, s);
+        if (op.codeId)
+          set.setSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY, op.codeId);
+        s.result.updated.push(set.id);
+        return "done";
+      }
+      case "orphan-variant-option": {
+        if (!prune)
+          return "variant kept: pass prune: true to remove it";
+        const set = await setFor(op, s);
+        const doomed = variants(set).filter((v) => parseVariantName(v.name)[op.axis] === op.option);
+        if (doomed.length === variants(set).length)
+          return "kept: it is every variant of the set";
+        for (const v of doomed) {
+          s.result.removed.push(v.id);
+          v.remove();
+        }
+        return "done";
+      }
+      case "orphan-variant-axis":
+      case "orphan-component":
+        return "Figma-only axes and components are reported, never removed";
+    }
+  }
+  function slotNode(variant, slot, layers) {
+    const target = slotTarget(slot, layers);
+    if (target.kind === "skip")
+      return "skip";
+    if (target.kind === "root")
+      return variant;
+    const name = target.name.toLowerCase();
+    return variant.findOne((n) => n.name.toLowerCase() === name);
+  }
+  function paint(token, s) {
+    const v = s.byName.get(token);
+    if (!v)
+      throw new Error(`variable ${token} does not exist`);
+    return figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 0, g: 0, b: 0 } }, "color", v);
+  }
+  function amount(node, field, a, s, set) {
+    const v = a.token ? s.byName.get(a.token) : undefined;
+    if (v && "setBoundVariable" in node) {
+      node.setBoundVariable(field, v);
+      return;
+    }
+    if (a.value === undefined)
+      throw new Error(`variable ${a.token ?? "?"} does not exist`);
+    set(a.value);
+  }
+  var texts = (node) => node.type === "TEXT" ? [node] : ("findAllWithCriteria" in node) ? node.findAllWithCriteria({ types: ["TEXT"] }) : [];
+  async function loadText(t) {
+    if (t.fontName === figma.mixed)
+      throw new Error(`text ${t.name} mixes fonts`);
+    await figma.loadFontAsync(t.fontName);
+    return t.fontName;
+  }
+  async function apply(node, d, s) {
+    const frame = node;
+    switch (d.kind) {
+      case "fill":
+        if ("fills" in node)
+          frame.fills = [paint(d.token, s)];
+        return;
+      case "fill-none":
+        if ("fills" in node)
+          frame.fills = [];
+        return;
+      case "stroke":
+        if ("strokes" in node)
+          frame.strokes = [paint(d.token, s)];
+        return;
+      case "stroke-none":
+        if ("strokes" in node)
+          frame.strokes = [];
+        return;
+      case "stroke-weight":
+        amount(node, "strokeWeight", d, s, (n) => frame.strokeWeight = n);
+        return;
+      case "radius":
+        for (const f of ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"])
+          amount(node, f, d, s, (n) => frame[f] = n);
+        return;
+      case "size":
+        if (d.axis === "width" && "layoutSizingHorizontal" in node)
+          frame.layoutSizingHorizontal = "FIXED";
+        if (d.axis === "height" && "layoutSizingVertical" in node)
+          frame.layoutSizingVertical = "FIXED";
+        amount(node, d.axis, d, s, (n) => frame.resize(d.axis === "width" ? n : frame.width, d.axis === "height" ? n : frame.height));
+        return;
+      case "padding": {
+        if (!("layoutMode" in node) || frame.layoutMode === "NONE")
+          throw new Error(`${node.name} has no auto layout for padding`);
+        const field = `padding${d.side.charAt(0).toUpperCase()}${d.side.slice(1)}`;
+        amount(node, field, d, s, (n) => frame[field] = n);
+        return;
+      }
+      case "gap":
+        if (!("layoutMode" in node) || frame.layoutMode === "NONE")
+          throw new Error(`${node.name} has no auto layout for gap`);
+        amount(node, "itemSpacing", d, s, (n) => frame.itemSpacing = n);
+        return;
+      case "layout":
+        if ("layoutMode" in node)
+          frame.layoutMode = d.mode;
+        return;
+      case "align":
+        if (!("layoutMode" in node) || frame.layoutMode === "NONE")
+          return;
+        if (d.axis === "primary")
+          frame.primaryAxisAlignItems = d.value;
+        else if (d.value !== "SPACE_BETWEEN")
+          frame.counterAxisAlignItems = d.value;
+        return;
+      case "opacity":
+        if ("opacity" in node)
+          frame.opacity = d.value;
+        return;
+      case "text-fill":
+        for (const t of texts(node)) {
+          await loadText(t);
+          t.fills = [paint(d.token, s)];
+        }
+        return;
+      case "font-size":
+        for (const t of texts(node)) {
+          await loadText(t);
+          const v = d.token ? s.byName.get(d.token) : undefined;
+          if (v)
+            t.setBoundVariable("fontSize", v);
+          else if (d.value !== undefined)
+            t.fontSize = d.value;
+          else
+            throw new Error(`variable ${d.token ?? "?"} does not exist`);
+        }
+        return;
+      case "font-weight":
+        for (const t of texts(node)) {
+          const font = await loadText(t);
+          s.fonts ??= await figma.listAvailableFontsAsync();
+          if (!fontAvailable(s.fonts, font.family, d.style))
+            throw new Error(`font ${font.family} ${d.style} is not available`);
+          const next = { family: font.family, style: d.style };
+          await figma.loadFontAsync(next);
+          t.fontName = next;
+        }
+        return;
+    }
+  }
+  async function styleComponent(op, s) {
+    const set = await nodeFor(op, s);
+    const problems = new Set;
+    for (const v of variants(set)) {
+      const combo = codeCombo(parseVariantName(v.name), op.axes);
+      for (const [slot, decls] of Object.entries(resolveSlots(op.styles, combo))) {
+        const node = slotNode(v, slot, op.layers ?? {});
+        if (node === "skip")
+          continue;
+        if (!node) {
+          if (decls.length)
+            problems.add(`no layer named ${slot}`);
+          continue;
+        }
+        for (const d of decls) {
+          try {
+            await apply(node, d, s);
+          } catch (error) {
+            problems.add(`${slot} ${d.kind}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+      s.result.updated.push(v.id);
+    }
+    return [...problems];
+  }
+
+  // plugin-src/design-apply.ts
+  class Skip extends Error {
+  }
+  var RESOLVED = { color: "COLOR", float: "FLOAT", string: "STRING", boolean: "BOOLEAN" };
+  var nameOf = (op) => {
+    switch (op.op) {
+      case "create-collection":
+      case "add-mode":
+        return op.collection;
+      case "create-token":
+        return tokenKey(op.collection, op.token.name);
+      case "update-token":
+      case "orphan-token":
+        return tokenKey(op.collection, op.name);
+      case "create-text-style":
+        return op.style.name;
+      case "update-text-style":
+      case "orphan-text-style":
+        return op.name;
+      case "create-component":
+        return op.component.name;
+      default:
+        return op.component;
+    }
+  };
+  async function load() {
+    const collections = new Map;
+    const vars = new Map;
+    for (const c of await figma.variables.getLocalVariableCollectionsAsync()) {
+      collections.set(c.name, c);
+      for (const id of c.variableIds) {
+        const v = await figma.variables.getVariableByIdAsync(id);
+        if (v)
+          vars.set(tokenKey(c.name, v.name), v);
+      }
+    }
+    return { collections, vars };
+  }
+  function toFigmaValue(value, s) {
+    switch (value.kind) {
+      case "color":
+        return hexToRgba(value.hex);
+      case "float":
+      case "string":
+      case "boolean":
+        return value.value;
+      case "alias": {
+        const target = s.vars.get(value.to);
+        if (!target)
+          throw new Error(`alias target ${value.to} does not exist`);
+        return figma.variables.createVariableAlias(target);
+      }
+    }
+  }
+  function setValue(v, c, mode, value, s) {
+    const modeId = modeIdFor(c.modes, mode);
+    if (!modeId)
+      throw new Error(`collection ${c.name} has no mode ${mode}`);
+    v.setValueForMode(modeId, toFigmaValue(value, s));
+  }
+  function link(v, codeId, codeSyntax) {
+    if (codeId)
+      v.setSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY, codeId);
+    for (const p of ["WEB", "ANDROID", "iOS"]) {
+      const syntax = codeSyntax?.[p];
+      if (syntax)
+        v.setVariableCodeSyntax(p, syntax);
+    }
+  }
+  async function variableFor(op, s) {
+    const v = (op.figmaId ? await figma.variables.getVariableByIdAsync(op.figmaId) : null) ?? s.vars.get(tokenKey(op.collection, op.name));
+    if (!v)
+      throw new Error("variable not found");
+    return v;
+  }
+  async function collectionOf(v) {
+    const c = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId);
+    if (!c)
+      throw new Error("collection not found");
+    return c;
+  }
+  async function structure(op, s) {
+    switch (op.op) {
+      case "create-collection": {
+        const c = figma.variables.createVariableCollection(op.collection);
+        const [first, ...rest] = op.modes;
+        if (first && c.modes[0])
+          c.renameMode(c.modes[0].modeId, first);
+        for (const m of rest)
+          c.addMode(m);
+        s.collections.set(op.collection, c);
+        s.result.created.push(c.id);
+        return null;
+      }
+      case "add-mode": {
+        const c = s.collections.get(op.collection);
+        if (!c)
+          throw new Error("collection not found");
+        c.addMode(op.mode);
+        s.result.updated.push(c.id);
+        return null;
+      }
+      case "create-token": {
+        const c = s.collections.get(op.collection);
+        if (!c)
+          throw new Error("collection not found");
+        const type = RESOLVED[op.token.type];
+        if (!type)
+          throw new Error(`unsupported type ${op.token.type}`);
+        const v = figma.variables.createVariable(op.token.name, c, type);
+        v.scopes = op.token.scopes ?? [];
+        if (op.token.description)
+          v.description = op.token.description;
+        link(v, op.token.codeId, op.token.codeSyntax);
+        s.vars.set(tokenKey(c.name, v.name), v);
+        s.result.created.push(v.id);
+        return async () => {
+          for (const [mode, value] of Object.entries(op.token.values))
+            setValue(v, c, mode, value, s);
+        };
+      }
+      case "update-token": {
+        const v = await variableFor(op, s);
+        const c = await collectionOf(v);
+        if (op.rename) {
+          s.vars.delete(tokenKey(c.name, v.name));
+          v.name = op.rename.to;
+          s.vars.set(tokenKey(c.name, v.name), v);
+        }
+        link(v, op.codeId, op.codeSyntax);
+        s.result.updated.push(v.id);
+        return op.values.length === 0 ? null : async () => {
+          for (const change of op.values)
+            setValue(v, c, change.mode, change.to, s);
+        };
+      }
+      case "orphan-token":
+        return null;
+    }
+  }
+  async function fontFor2(family, style, s) {
+    s.fonts ??= await figma.listAvailableFontsAsync();
+    if (!fontAvailable(s.fonts, family, style))
+      throw new Error(`font ${family} ${style} is not available in Figma`);
+    const font = { family, style };
+    await figma.loadFontAsync(font);
+    return font;
+  }
+  async function writeStyle(style, spec, s) {
+    style.fontName = await fontFor2(spec.fontFamily, spec.fontStyle, s);
+    if (spec.fontSize !== undefined)
+      style.fontSize = spec.fontSize;
+    if (spec.lineHeight)
+      style.lineHeight = spec.lineHeight;
+    if (spec.letterSpacing)
+      style.letterSpacing = spec.letterSpacing;
+  }
+  function changed(changes) {
+    const out = {};
+    for (const c of changes) {
+      switch (c.field) {
+        case "fontFamily":
+        case "fontStyle":
+          out[c.field] = c.to;
+          break;
+        case "fontSize":
+          out.fontSize = c.to;
+          break;
+        case "lineHeight":
+          out.lineHeight = c.to;
+          break;
+        case "letterSpacing":
+          out.letterSpacing = c.to;
+          break;
+      }
+    }
+    return out;
+  }
+  async function textStyleOp(op, s) {
+    if (op.op === "create-text-style") {
+      const style = figma.createTextStyle();
+      try {
+        await writeStyle(style, op.style, s);
+      } catch (error) {
+        style.remove();
+        throw error;
+      }
+      style.name = op.style.name;
+      if (op.style.codeId)
+        style.setSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY, op.style.codeId);
+      s.result.created.push(style.id);
+      return;
+    }
+    const found = op.figmaId ? await figma.getStyleByIdAsync(op.figmaId) : null;
+    if (!found || found.type !== "TEXT")
+      throw new Error("text style not found");
+    const style = found;
+    const next = changed(op.changes);
+    await writeStyle(style, { ...next, fontFamily: next.fontFamily ?? style.fontName.family, fontStyle: next.fontStyle ?? style.fontName.style }, s);
+    if (op.rename)
+      style.name = op.rename.to;
+    if (op.codeId)
+      style.setSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY, op.codeId);
+    s.result.updated.push(style.id);
+  }
+  async function remove(op, s) {
+    if (op.op === "orphan-token") {
+      const v = await variableFor(op, s);
+      s.vars.delete(tokenKey(op.collection, op.name));
+      s.result.removed.push(v.id);
+      v.remove();
+      return;
+    }
+    const style = op.figmaId ? await figma.getStyleByIdAsync(op.figmaId) : null;
+    if (!style)
+      throw new Error("text style not found");
+    s.result.removed.push(style.id);
+    style.remove();
+  }
+  var applyDesignOps = async (args) => {
+    const ops = Array.isArray(args.ops) ? args.ops : [];
+    const prune = bool(args, "prune", false);
+    const s = { ...await load(), fonts: null, result: { applied: 0, created: [], updated: [], removed: [], skipped: [], errors: [] } };
+    const later = [];
+    let componentState = null;
+    const components = () => {
+      if (componentState)
+        return componentState;
+      const byName = new Map;
+      for (const [key, v] of s.vars) {
+        const name = key.slice(key.indexOf("/") + 1);
+        if (!byName.has(name) || key.startsWith("Primitives/") === false)
+          byName.set(name, v);
+      }
+      componentState = { result: s.result, byName, fonts: s.fonts, created: new Map };
+      return componentState;
+    };
+    const run = async (op, fn) => {
+      try {
+        await fn();
+        s.result.applied++;
+      } catch (error) {
+        if (error instanceof Skip) {
+          s.result.skipped.push({ op: op.op, name: nameOf(op), reason: error.message });
+          return;
+        }
+        s.result.errors.push({ op: op.op, name: nameOf(op), error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    for (const op of [...ops].sort((a, b) => phaseOf(a) - phaseOf(b))) {
+      switch (op.op) {
+        case "create-collection":
+        case "add-mode":
+        case "create-token":
+        case "update-token":
+          await run(op, async () => {
+            const step = await structure(op, s);
+            if (step)
+              later.push({ op, step });
+          });
+          break;
+        case "create-text-style":
+        case "update-text-style":
+          await run(op, () => textStyleOp(op, s));
+          break;
+        case "orphan-token":
+        case "orphan-text-style":
+          break;
+        case "style-component":
+          await run(op, async () => {
+            const problems = await styleComponent(op, components());
+            for (const p of problems)
+              s.result.errors.push({ op: op.op, name: op.component, error: p });
+          });
+          break;
+        default:
+          await run(op, async () => {
+            const outcome = await componentOp(op, components(), prune);
+            if (outcome !== "done")
+              throw new Skip(outcome);
+          });
+      }
+    }
+    for (const { op, step } of later) {
+      try {
+        await step();
+      } catch (error) {
+        s.result.errors.push({ op: op.op, name: nameOf(op), error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    for (const op of ops) {
+      if (op.op !== "orphan-token" && op.op !== "orphan-text-style")
+        continue;
+      if (!prune)
+        s.result.skipped.push({ op: op.op, name: nameOf(op), reason: "orphan kept: pass prune: true to remove it" });
+      else
+        await run(op, () => remove(op, s));
+    }
+    return ok(s.result);
+  };
+
+  // plugin-src/design-read.ts
+  var byte = (v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, "0").toUpperCase();
+  var rgbaToHex = (c) => `#${byte(c.r)}${byte(c.g)}${byte(c.b)}${byte(c.a ?? 1)}`;
+  function toSpecLineHeight(lh) {
+    return lh.unit === "AUTO" ? { unit: "AUTO" } : { unit: lh.unit, value: lh.value };
+  }
+  var toSpecLetterSpacing = (ls) => ({ unit: ls.unit, value: ls.value });
+  var TYPES = { COLOR: "color", FLOAT: "float", STRING: "string", BOOLEAN: "boolean" };
+  var tokenTypeOf = (resolvedType) => TYPES[resolvedType] ?? null;
+  function axesFromVariantNames(names) {
+    const axes = {};
+    for (const name of names) {
+      for (const part of name.split(",")) {
+        const eq = part.indexOf("=");
+        if (eq < 0)
+          continue;
+        const axis = part.slice(0, eq).trim();
+        const option = part.slice(eq + 1).trim();
+        if (!axis || !option)
+          continue;
+        const list = axes[axis] ??= [];
+        if (!list.includes(option))
+          list.push(option);
+      }
+    }
+    return axes;
+  }
+
+  // plugin-src/design-export.ts
+  var codeIdOf = (item) => item.getSharedPluginData(PLUGIN_DATA_NAMESPACE, CODE_ID_KEY) || undefined;
+  async function keyOfVariable(id, known) {
+    const cached = known.get(id);
+    if (cached)
+      return cached;
+    const v = await figma.variables.getVariableByIdAsync(id);
+    if (!v)
+      return `?/${id}`;
+    const c = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId);
+    const key = tokenKey(c?.name ?? "?", v.name);
+    known.set(id, key);
+    return key;
+  }
+  async function toTokenValue(value, known) {
+    if (typeof value === "number")
+      return { kind: "float", value };
+    if (typeof value === "string")
+      return { kind: "string", value };
+    if (typeof value === "boolean")
+      return { kind: "boolean", value };
+    if ("type" in value && value.type === "VARIABLE_ALIAS")
+      return { kind: "alias", to: await keyOfVariable(value.id, known) };
+    return { kind: "color", hex: rgbaToHex(value) };
+  }
+  function codeSyntaxOf(v) {
+    const out = {};
+    for (const p of ["WEB", "ANDROID", "iOS"]) {
+      const s = v.codeSyntax[p];
+      if (s)
+        out[p] = s;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  async function exportCollections() {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    const known = new Map;
+    const vars = new Map;
+    for (const c of collections) {
+      for (const id of c.variableIds) {
+        const v = await figma.variables.getVariableByIdAsync(id);
+        if (!v)
+          continue;
+        vars.set(id, v);
+        known.set(id, tokenKey(c.name, v.name));
+      }
+    }
+    const out = [];
+    for (const c of collections) {
+      const tokens = [];
+      for (const id of c.variableIds) {
+        const v = vars.get(id);
+        const type = v ? tokenTypeOf(v.resolvedType) : null;
+        if (!v || !type)
+          continue;
+        const values = {};
+        for (const m of c.modes) {
+          const raw = v.valuesByMode[m.modeId];
+          if (raw !== undefined)
+            values[m.name] = await toTokenValue(raw, known);
+        }
+        const codeId = codeIdOf(v);
+        const codeSyntax = codeSyntaxOf(v);
+        tokens.push({
+          name: v.name,
+          type,
+          values,
+          scopes: [...v.scopes],
+          ...codeId ? { codeId } : {},
+          ...codeSyntax ? { codeSyntax } : {},
+          ...v.description ? { description: v.description } : {},
+          figmaId: v.id
+        });
+      }
+      out.push({ name: c.name, modes: c.modes.map((m) => m.name), tokens, figmaId: c.id });
+    }
+    return out;
+  }
+  async function exportTextStyles() {
+    return (await figma.getLocalTextStylesAsync()).map((s) => {
+      const codeId = codeIdOf(s);
+      return {
+        name: s.name,
+        fontFamily: s.fontName.family,
+        fontStyle: s.fontName.style,
+        fontSize: s.fontSize,
+        lineHeight: toSpecLineHeight(s.lineHeight),
+        letterSpacing: toSpecLetterSpacing(s.letterSpacing),
+        ...codeId ? { codeId } : {},
+        figmaId: s.id
+      };
+    });
+  }
+  async function exportComponents() {
+    await figma.loadAllPagesAsync();
+    const out = [];
+    for (const node of figma.root.findAllWithCriteria({ types: ["COMPONENT_SET", "COMPONENT"] })) {
+      if (node.type === "COMPONENT" && node.parent?.type === "COMPONENT_SET")
+        continue;
+      const codeId = codeIdOf(node);
+      let axes = {};
+      let defaults = {};
+      if (node.type === "COMPONENT_SET") {
+        axes = axesFromVariantNames(node.children.map((c) => c.name));
+        const d = node.defaultVariant;
+        defaults = d?.variantProperties ? { ...d.variantProperties } : {};
+      }
+      out.push({ name: node.name, axes, defaults, ...codeId ? { codeId } : {}, figmaId: node.id });
+    }
+    return out;
+  }
+  var exportDesignSystem = async (args) => {
+    const spec = {
+      collections: await exportCollections(),
+      textStyles: await exportTextStyles(),
+      components: bool(args, "includeComponents", true) ? await exportComponents() : []
+    };
+    return ok(spec);
+  };
+
   // plugin-src/group-screens.ts
   async function groupBoard(board, dryRun, missingLabel) {
     const parent = board.node.parent;
@@ -3252,7 +4108,7 @@ ${body}
     const { screens, stale } = await loadScreens(board);
     return finish(board, screens, stale, compactPlan(cellsOf(screens)), true);
   };
-  async function fontFor2(text) {
+  async function fontFor3(text) {
     const current = text.fontName;
     const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
     for (const font of candidates) {
@@ -3324,8 +4180,8 @@ ${body}
     const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
     const heading = headingStyle ? headingStyle.clone() : figma.createText();
     page.appendChild(heading);
-    await figma.loadFontAsync(await fontFor2(heading));
-    heading.fontName = await fontFor2(heading);
+    await figma.loadFontAsync(await fontFor3(heading));
+    heading.fontName = await fontFor3(heading);
     if (!headingStyle) {
       heading.fontSize = 48;
       heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
@@ -3386,12 +4242,14 @@ ${body}
     duplicate_screen: duplicateScreen,
     group_screens: groupScreens,
     set_screen_status: setScreenStatus,
-    badge_screens: badgeScreens
+    badge_screens: badgeScreens,
+    export_design_system: exportDesignSystem,
+    apply_design_ops: applyDesignOps
   };
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "64d7e5a4" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "b59ef4d9" });
       return;
     }
     if (msg.type !== "command")
@@ -3399,7 +4257,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"64d7e5a4"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"b59ef4d9"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

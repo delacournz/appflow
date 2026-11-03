@@ -32,10 +32,51 @@ Most tools take an optional `nodeId` (`193:443` or `193-443`). Without one they 
 | `badge_screens` | Adds or refreshes the build badge on every grouped screen of a board. |
 | `get_context_for_code_connect` | Properties, variants, nested instances and text layers of a component. |
 | `get_code_connect_suggestions` / `get_code_connect_map` / `add_code_connect_map` / `send_code_connect_mappings` | Code Connect mappings, stored locally in `~/.appflow/code-connect.json`. They are not synced with Figma's Code Connect. |
+| `export_design_system` | The file's local variables (modes, aliases, scopes, code syntax, code ids), text styles and components with their variant axes, as DesignSpec JSON. |
+| `diff_design_system` | Compares the project's code design system with the file. Code is the source of truth. Returns create, update and orphan ops plus rename candidates. Changes nothing. |
+| `sync_tokens` | Makes the file's variables match the code tokens: creates collections, modes and variables (with scopes, code syntax and code ids), renames matched variables to code names, sets values and aliases. Dry run by default; Figma-only variables are removed only with `prune: true`. |
+| `sync_text_styles` | Makes the file's text styles match the code type roles. A font that Figma does not have is an error, never a guess. Dry run and prune as above. |
+| `sync_design_system` | Runs `sync_tokens`, `sync_text_styles` and `sync_components` in that order (or the kinds in `include`) with the same `dryRun` and `prune`. Returns one result per kind. |
+| `sync_components` | Makes component sets match the code components (tailwind-variants): renames axes and options per the mapping, adds missing axes and options (cloned from the default variant), creates missing sets on a "Code components" page and, with `styling` (default true), paints each variant from its code classes, bound to the synced variables. Run `sync_tokens` first. |
 
-Prompts: `create_design_system_rules` (arguments `clientLanguages` and `clientFrameworks`), `flow_layout` and `verify_built`.
+Prompts: `create_design_system_rules` (arguments `clientLanguages` and `clientFrameworks`), `flow_layout`, `verify_built` and `sync_from_code`.
 
-Skills (MCP resources): `skill://appflow/flow-layout/SKILL.md` and `skill://appflow/verify-built/SKILL.md`. The verify skill checks each screen's route code and the running app against its frame, then calls `set_screen_status`.
+Skills (MCP resources): `skill://appflow/flow-layout/SKILL.md`, `skill://appflow/verify-built/SKILL.md` and `skill://appflow/sync-from-code/SKILL.md`. The verify skill checks each screen's route code and the running app against its frame, then calls `set_screen_status`. The sync skill runs a dry run, applies it, and confirms that only orphans are left.
+
+### Design sync
+
+Code is the source of truth for tokens, text styles and component variants. Put an `appflow.design.json` at the project root:
+
+```json
+{
+  "sources": [{ "kind": "tailwind-css", "paths": ["src/styles/tokens.css", "src/styles/theme.css"], "modes": ["dark"], "textStylePrefix": "Sony FT/" }],
+  "rename": { "tokens": { "Tokens/text/text-2": "Tokens/color/muted-foreground" }, "textStyles": {}, "components": { "Notice": "Alert" } },
+  "ignore": { "tokens": ["Primitives/*"], "textStyles": [], "components": [] }
+}
+```
+
+- `sources` lists where the code spec comes from. Paths must stay inside the project.
+  - `tailwind-css` reads Tailwind v4 / Uniwind CSS in cascade order. `@theme` `--color-<ramp>-<step>` literals become `Primitives` (`glacier/500`). `@theme inline` `--color-X: var(--X)` becomes `Tokens` `color/X`, with one value per `@variant light|dark` (limit them with `modes`). `--radius-*`, `--spacing-*` and `--text-*` become floats; `--radius` is `radius/base`. A `var()` to another token is an alias. `calc()`, `oklch()`, `rgb()` and `color-mix(in oklch, …)` are resolved. `--text-<role>` with `--line-height`, `--letter-spacing` or `--font-weight` becomes a text style named `textStylePrefix` + `Role name`. Anything else is reported as a warning. Options: `modes`, `primitives`, `tokens` (collection names), `textStylePrefix`, `fontFamily`.
+  - `tailwind-variants` maps a component name to the `path#export` of its `tv()` result, or to `{ "ref": "…", "axes": ["status", "variant"] }` to pick the axes that become variants (leave behaviour flags such as `isLoading` out; `[]` for none). An axis left out is fixed at its code default, so its default classes still style the component. Only listed files are imported, in a child `bun` process with the project as its working directory, so the project's imports and tsconfig paths resolve and none of its code runs in the server. It runs after the token sources, so classes bind to their tokens.
+  - `spec-json` is a DesignSpec file (`shared/design-spec.ts`); missing lists default to empty.
+- `rename` maps a Figma token key (`Collection/name`), text style name or component name to its code name. It seeds the first match.
+- `variants` maps a Figma component's axis to its code axis and options: `{ "Notice": { "Tone": { "axis": "status", "options": { "Error": "destructive" } } } }`.
+- `variantDefaults` sets the option existing variants take when an axis is added: `{ "Alert": { "variant": "notice" } }`. Default: the code default.
+- `layers` maps a code slot to the Figma layer it styles: `{ "Notice": { "title": "Text", "indicator": "Icon" } }`. Default: a layer named like the slot; `root` is the variant itself. Map a slot to `"root"` to paint the variant with it (an OTP `slot` that is the whole component), or to `""` to skip a slot the Figma component does not draw. Several components can use one `tv()` export (`List row` and `Toggle row` both on `item`); each pairs with the Figma component of its own name. A single component (not a variant set) is linked and styled but gets no axes.
+- `ignore` takes globs where `*` matches anything, `/` included. They apply to both sides.
+
+Matching order: the code id stored on the Figma item (shared plugin data `appflow` / `codeId`), then `rename`, then the same name. Floats match within 0.001 and colours within 1 per channel. A code literal equals a Figma alias that resolves to it, so links to primitives survive. Line heights and tracking compare in px at the font size, so `-1%` at 22 equals `-0.22px`. Two single-mode collections match whatever their modes are called. Figma items that match nothing are reported as orphans and are never removed by a diff. An orphan with exactly one unclaimed code lookalike is listed as a rename candidate.
+
+Styling reads `bg-*`, `border-*`, `rounded-*`, `h-*`/`w-*`/`size-*`, `p*-*`, `gap-*`, `text-<size|colour>`, `font-<weight>`, `opacity-*`, `flex-row`/`flex-col`, `items-*` and `justify-*`. A class that names a token binds its variable; scale steps (`gap-1.5`) become numbers. Everything else, including state prefixes (`active:`) and arbitrary values, is listed as not expressible.
+
+Plans come back as one line per op (`+` create, `~` update, `?` Figma only); pass `verbose: true` for the full JSON. Run a sync with `dryRun` first, read the plan, then run it with `dryRun: false`; the result includes what is left, which should be orphans only.
+
+Drift check: with the plugin open on the file, this exits 1 when Figma is behind the code (orphans do not count):
+
+```sh
+bun run scripts/call.ts diff_design_system '{"projectRoot":"/path/to/app","includeComponents":true}' \
+  | jq -e '.counts.create + .counts.update == 0'
+```
 
 ### Not available locally
 

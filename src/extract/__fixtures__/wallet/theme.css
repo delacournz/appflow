@@ -1,0 +1,437 @@
+/*
+ * The Sony FT theme. Source: "Sony FT Wallet Visual Directions", section 4,
+ * "Final direction: Sony FT" — near-black canvas, Glacier as the single
+ * accent, Archivo. Dark theme only; the light theme comes later.
+ *
+ * Two layers, as Delacour UI expects. Layer one is a raw name declared once
+ * per theme: the spec's own names (`--surface`, `--positive`, `--caution`)
+ * and the shadcn names Delacour components read (`--card`, `--destructive`),
+ * mapped onto the same hexes. Layer two is the `@theme inline` block at the
+ * bottom, which maps each raw name onto the `--color-*` Tailwind mints
+ * `bg-*` / `text-*` / `border-*` from.
+ *
+ * The spec calls Glacier `--accent`. Here it is `--primary`, because shadcn
+ * and every Delacour component use `accent` for a quiet neutral fill. Glacier
+ * in `bg-accent` would paint large areas, which the spec forbids. The full
+ * ramp is in `tokens.css` as `glacier-100` … `glacier-900`.
+ *
+ * `light` is a copy of `dark` on purpose. The app is locked to dark
+ * (`app.config.ts`, `app/_layout.tsx`); the copy stops a system light setting
+ * reaching the old neutral palette. `theme.test.ts` keeps the two equal until
+ * the light spec lands — then replace the `light` block and drop that test.
+ *
+ * Uniwind reads a theme only from `@variant light` / `@variant dark`. A
+ * literal `.dark { … }` is a utility class that silently does nothing.
+ * `@theme inline` emits no `--color-*` variable at runtime, which is why
+ * `useThemeColor` looks up the raw name — see `hooks/use-theme-color.ts`.
+ */
+@layer theme {
+	:root {
+		@variant light {
+			/*
+			 * Grounds. Elevation is tone only: bg → surface → surface-2. No
+			 * shadows, no borders, no glows.
+			 */
+			--background: #0A0A0A;
+			--foreground: #F2F2F2;
+			--surface: #1C1C1C;
+			--surface-foreground: #F2F2F2;
+			--surface-2: #262626;
+			--surface-2-foreground: #F2F2F2;
+			--divider: #2E2E2E;
+
+			/* shadcn names Delacour components read, mapped onto the grounds. */
+			--card: #1C1C1C;
+			--card-foreground: #F2F2F2;
+			--popover: #1C1C1C;
+			--popover-foreground: #F2F2F2;
+			--secondary: #1C1C1C;
+			--secondary-foreground: #F2F2F2;
+			--muted: #262626;
+			--muted-foreground: #A3A3A3;
+			--accent: #262626;
+			--accent-foreground: #F2F2F2;
+			--elevated: #262626;
+			--elevated-foreground: #F2F2F2;
+			/* ImageViewer's opaque stage and the chrome over it. */
+			--media: var(--background);
+			--media-foreground: var(--foreground);
+			--tertiary: color-mix(in oklch, var(--secondary) 50%, var(--background));
+			--tertiary-foreground: #A3A3A3;
+
+			/* Text. text-1 is `foreground`, text-2 is `muted-foreground`. */
+			--placeholder: #8F8F8F;
+			--disabled: #7A7A7A;
+
+			/*
+			 * Glacier, the single accent. 500 fills the primary button, the
+			 * active tab and the coin mark; 300 is the pressed fill; 600 is the
+			 * focus ring; 800 is the selected-row tint with 100 text on it. It
+			 * never fills a large area, and never appears in an error, limit or
+			 * caution message.
+			 */
+			--primary: #93D6EE;
+			--primary-foreground: #0A0A0A;
+			--primary-pressed: #B4E4F5;
+			--on-accent: #0A0A0A;
+			--ring: #6CA9BE;
+			--selected: #254854;
+			--selected-foreground: #E7F9FF;
+
+			--border: #2E2E2E;
+			--input: #2E2E2E;
+
+			/*
+			 * Status. Always shown with a ring shape and a text label, never by
+			 * colour alone. Caution is warm amber and is never the accent.
+			 */
+			--positive: #34D399;
+			--positive-foreground: #0A0A0A;
+			--negative: #F87171;
+			--negative-foreground: #0A0A0A;
+			--caution: #F2BD68;
+			--caution-foreground: #0A0A0A;
+
+			/* The same three under the names Delacour components read. */
+			--destructive: #F87171;
+			--destructive-foreground: #0A0A0A;
+			--success: #34D399;
+			--success-foreground: #0A0A0A;
+			--warning: #F2BD68;
+			--warning-foreground: #0A0A0A;
+			--info: #93D6EE;
+			--info-foreground: #0A0A0A;
+
+			--destructive-soft: color-mix(in oklch, var(--destructive) 14%, var(--background));
+			--destructive-soft-foreground: var(--destructive);
+			--success-soft: color-mix(in oklch, var(--success) 14%, var(--background));
+			--success-soft-foreground: var(--success);
+			--warning-soft: color-mix(in oklch, var(--warning) 14%, var(--background));
+			--warning-soft-foreground: var(--warning);
+			--info-soft: #262626;
+			--info-soft-foreground: #F2F2F2;
+
+			--chart-1: #93D6EE;
+			--chart-2: #6CA9BE;
+			--chart-3: #487A8B;
+			--chart-4: #B4E4F5;
+			--chart-5: #254854;
+
+			--sidebar: #1C1C1C;
+			--sidebar-foreground: #F2F2F2;
+			--sidebar-primary: #93D6EE;
+			--sidebar-primary-foreground: #0A0A0A;
+			--sidebar-accent: #262626;
+			--sidebar-accent-foreground: #F2F2F2;
+			--sidebar-border: #2E2E2E;
+			--sidebar-ring: #6CA9BE;
+
+			/* Sheets sit on a 62% black scrim. */
+			--overlay: oklch(0 0 0 / 62%);
+
+			/*
+			 * No elevation by shadow. Kept as names so a pasted component's
+			 * `shadow-md` resolves to nothing instead of an undefined variable.
+			 */
+			--shadow: 0 0 #0000;
+			--shadow-2xs: 0 0 #0000;
+			--shadow-xs: 0 0 #0000;
+			--shadow-sm: 0 0 #0000;
+			--shadow-md: 0 0 #0000;
+			--shadow-lg: 0 0 #0000;
+			--shadow-xl: 0 0 #0000;
+			--shadow-2xl: 0 0 #0000;
+		}
+
+		@variant dark {
+			/*
+			 * Grounds. Elevation is tone only: bg → surface → surface-2. No
+			 * shadows, no borders, no glows.
+			 */
+			--background: #0A0A0A;
+			--foreground: #F2F2F2;
+			--surface: #1C1C1C;
+			--surface-foreground: #F2F2F2;
+			--surface-2: #262626;
+			--surface-2-foreground: #F2F2F2;
+			--divider: #2E2E2E;
+
+			/* shadcn names Delacour components read, mapped onto the grounds. */
+			--card: #1C1C1C;
+			--card-foreground: #F2F2F2;
+			--popover: #1C1C1C;
+			--popover-foreground: #F2F2F2;
+			--secondary: #1C1C1C;
+			--secondary-foreground: #F2F2F2;
+			--muted: #262626;
+			--muted-foreground: #A3A3A3;
+			--accent: #262626;
+			--accent-foreground: #F2F2F2;
+			--elevated: #262626;
+			--elevated-foreground: #F2F2F2;
+			/* ImageViewer's opaque stage and the chrome over it. */
+			--media: var(--background);
+			--media-foreground: var(--foreground);
+			--tertiary: color-mix(in oklch, var(--secondary) 50%, var(--background));
+			--tertiary-foreground: #A3A3A3;
+
+			/* Text. text-1 is `foreground`, text-2 is `muted-foreground`. */
+			--placeholder: #8F8F8F;
+			--disabled: #7A7A7A;
+
+			/*
+			 * Glacier, the single accent. 500 fills the primary button, the
+			 * active tab and the coin mark; 300 is the pressed fill; 600 is the
+			 * focus ring; 800 is the selected-row tint with 100 text on it. It
+			 * never fills a large area, and never appears in an error, limit or
+			 * caution message.
+			 */
+			--primary: #93D6EE;
+			--primary-foreground: #0A0A0A;
+			--primary-pressed: #B4E4F5;
+			--on-accent: #0A0A0A;
+			--ring: #6CA9BE;
+			--selected: #254854;
+			--selected-foreground: #E7F9FF;
+
+			--border: #2E2E2E;
+			--input: #2E2E2E;
+
+			/*
+			 * Status. Always shown with a ring shape and a text label, never by
+			 * colour alone. Caution is warm amber and is never the accent.
+			 */
+			--positive: #34D399;
+			--positive-foreground: #0A0A0A;
+			--negative: #F87171;
+			--negative-foreground: #0A0A0A;
+			--caution: #F2BD68;
+			--caution-foreground: #0A0A0A;
+
+			/* The same three under the names Delacour components read. */
+			--destructive: #F87171;
+			--destructive-foreground: #0A0A0A;
+			--success: #34D399;
+			--success-foreground: #0A0A0A;
+			--warning: #F2BD68;
+			--warning-foreground: #0A0A0A;
+			--info: #93D6EE;
+			--info-foreground: #0A0A0A;
+
+			--destructive-soft: color-mix(in oklch, var(--destructive) 14%, var(--background));
+			--destructive-soft-foreground: var(--destructive);
+			--success-soft: color-mix(in oklch, var(--success) 14%, var(--background));
+			--success-soft-foreground: var(--success);
+			--warning-soft: color-mix(in oklch, var(--warning) 14%, var(--background));
+			--warning-soft-foreground: var(--warning);
+			--info-soft: #262626;
+			--info-soft-foreground: #F2F2F2;
+
+			--chart-1: #93D6EE;
+			--chart-2: #6CA9BE;
+			--chart-3: #487A8B;
+			--chart-4: #B4E4F5;
+			--chart-5: #254854;
+
+			--sidebar: #1C1C1C;
+			--sidebar-foreground: #F2F2F2;
+			--sidebar-primary: #93D6EE;
+			--sidebar-primary-foreground: #0A0A0A;
+			--sidebar-accent: #262626;
+			--sidebar-accent-foreground: #F2F2F2;
+			--sidebar-border: #2E2E2E;
+			--sidebar-ring: #6CA9BE;
+
+			/* Sheets sit on a 62% black scrim. */
+			--overlay: oklch(0 0 0 / 62%);
+
+			/*
+			 * No elevation by shadow. Kept as names so a pasted component's
+			 * `shadow-md` resolves to nothing instead of an undefined variable.
+			 */
+			--shadow: 0 0 #0000;
+			--shadow-2xs: 0 0 #0000;
+			--shadow-xs: 0 0 #0000;
+			--shadow-sm: 0 0 #0000;
+			--shadow-md: 0 0 #0000;
+			--shadow-lg: 0 0 #0000;
+			--shadow-xl: 0 0 #0000;
+			--shadow-2xl: 0 0 #0000;
+		}
+	}
+}
+
+@layer theme {
+	:root {
+		/*
+		 * Archivo (SIL OFL), embedded at build time by the `expo-font` config
+		 * plugin in `app.config.ts`: 400, 500 and 600 only. All three files
+		 * share the typographic family "Archivo", so iOS picks the file from
+		 * `fontWeight` — `font-medium` gives Archivo Medium.
+		 *
+		 * React Native's `fontFamily` takes one name with no fallback list, so
+		 * this is a single family, not a web stack. Android is not a v1 target
+		 * (ADR-0001) and keeps its system faces.
+		 */
+		@variant ios {
+			--font-sans: "Archivo";
+			--font-serif: "Georgia";
+			--font-mono: "Menlo";
+			--font-heading: "Archivo";
+		}
+
+		@variant android {
+			--font-sans: "sans-serif";
+			--font-serif: "serif";
+			--font-mono: "monospace";
+			--font-heading: "sans-serif";
+		}
+	}
+}
+
+@layer theme {
+	:root {
+		/*
+		 * The geometry, restated so it can be retuned at runtime.
+		 *
+		 * Every number here is already declared in `tokens.css`. A variable in
+		 * a plain `@theme` block is inlined at build time; one declared inside a
+		 * `@variant` compiles to a getter against the live store. `native` is a
+		 * platform variant every theme inherits, so one block covers both.
+		 * `theme.test.ts` asserts this block and `tokens.css` agree.
+		 */
+		@variant native {
+			--radius: 1rem;
+
+			--spacing-button-sm: 36px;
+			--spacing-button-md: 44px;
+			--spacing-button-lg: 56px;
+
+			--text-button-sm: 14px;
+			--text-button-md: 15px;
+			--text-button-lg: 17px;
+
+			--radius-button-sm: 18px;
+			--radius-button-md: 22px;
+			--radius-button-lg: 28px;
+
+			--spacing-input-sm: 36px;
+			--spacing-input-md: 44px;
+			--spacing-input-lg: 52px;
+
+			--text-input-sm: 14px;
+			--text-input-md: 15px;
+			--text-input-lg: 17px;
+
+			--spacing-icon-xs: 14px;
+			--spacing-icon-sm: 16px;
+			--spacing-icon-md: 18px;
+			--spacing-icon-lg: 20px;
+			--spacing-icon-xl: 24px;
+			--spacing-icon-2xl: 32px;
+
+			--spacing-navbar-row: 56px;
+			--spacing-screen-gutter: 20px;
+			--spacing-row: 52px;
+			--spacing-touch: 44px;
+			--spacing-quick-action: 58px;
+
+			--spacing-chart-sm: 160px;
+			--spacing-chart-md: 220px;
+			--spacing-chart-lg: 280px;
+
+			--spacing-fab-sm: 44px;
+			--spacing-fab-md: 56px;
+			--spacing-fab-lg: 64px;
+		}
+	}
+}
+
+/*
+ * Every raw colour above, mapped onto the namespace Tailwind mints utilities
+ * from. A name added to the palette and forgotten here has no `bg-*`;
+ * `theme.test.ts` fails on the gap.
+ *
+ * The fonts are deliberately absent: aliasing `--font-sans` to itself makes
+ * Uniwind compile a variable that recurses, and every `font-*` draws nothing.
+ */
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-surface: var(--surface);
+	--color-surface-foreground: var(--surface-foreground);
+	--color-surface-2: var(--surface-2);
+	--color-surface-2-foreground: var(--surface-2-foreground);
+	--color-divider: var(--divider);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-elevated: var(--elevated);
+	--color-elevated-foreground: var(--elevated-foreground);
+	--color-media: var(--media);
+	--color-media-foreground: var(--media-foreground);
+	--color-tertiary: var(--tertiary);
+	--color-tertiary-foreground: var(--tertiary-foreground);
+	--color-placeholder: var(--placeholder);
+	--color-disabled: var(--disabled);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-primary-pressed: var(--primary-pressed);
+	--color-on-accent: var(--on-accent);
+	--color-ring: var(--ring);
+	--color-selected: var(--selected);
+	--color-selected-foreground: var(--selected-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-positive: var(--positive);
+	--color-positive-foreground: var(--positive-foreground);
+	--color-negative: var(--negative);
+	--color-negative-foreground: var(--negative-foreground);
+	--color-caution: var(--caution);
+	--color-caution-foreground: var(--caution-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-success: var(--success);
+	--color-success-foreground: var(--success-foreground);
+	--color-warning: var(--warning);
+	--color-warning-foreground: var(--warning-foreground);
+	--color-info: var(--info);
+	--color-info-foreground: var(--info-foreground);
+	--color-destructive-soft: var(--destructive-soft);
+	--color-destructive-soft-foreground: var(--destructive-soft-foreground);
+	--color-success-soft: var(--success-soft);
+	--color-success-soft-foreground: var(--success-soft-foreground);
+	--color-warning-soft: var(--warning-soft);
+	--color-warning-soft-foreground: var(--warning-soft-foreground);
+	--color-info-soft: var(--info-soft);
+	--color-info-soft-foreground: var(--info-soft-foreground);
+	--color-chart-1: var(--chart-1);
+	--color-chart-2: var(--chart-2);
+	--color-chart-3: var(--chart-3);
+	--color-chart-4: var(--chart-4);
+	--color-chart-5: var(--chart-5);
+	--color-sidebar: var(--sidebar);
+	--color-sidebar-foreground: var(--sidebar-foreground);
+	--color-sidebar-primary: var(--sidebar-primary);
+	--color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+	--color-sidebar-accent: var(--sidebar-accent);
+	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-sidebar-ring: var(--sidebar-ring);
+	--color-overlay: var(--overlay);
+
+	--shadow-2xs: var(--shadow-2xs);
+	--shadow-xs: var(--shadow-xs);
+	--shadow-sm: var(--shadow-sm);
+	--shadow-md: var(--shadow-md);
+	--shadow-lg: var(--shadow-lg);
+	--shadow-xl: var(--shadow-xl);
+	--shadow-2xl: var(--shadow-2xl);
+}

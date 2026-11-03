@@ -19,5 +19,8 @@
   "include": [
     "*.ts",
     "../shared/*.ts"
+  ],
+  "exclude": [
+    "../shared/*.test.ts"
   ]
 }

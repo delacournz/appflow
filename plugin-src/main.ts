@@ -8,6 +8,8 @@ import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
 import { describeBoard } from './describe';
 import { duplicateScreen } from './duplicate';
+import { applyDesignOps } from './design-apply';
+import { exportDesignSystem } from './design-export';
 import { groupScreens } from './group-screens';
 import { errorText } from './nodes';
 import { compactBoard, createBoard, insertColumns, insertRows, moveScreen } from './gridtools';
@@ -45,6 +47,8 @@ const handlers: Record<string, Handler> = {
     group_screens: groupScreens,
     set_screen_status: setScreenStatus,
     badge_screens: badgeScreens,
+    export_design_system: exportDesignSystem,
+    apply_design_ops: applyDesignOps,
 };
 
 declare const __BUILD__: string;

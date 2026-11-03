@@ -1,0 +1,39 @@
+{
+  "sources": [{ "kind": "tailwind-css", "paths": ["tokens.css", "theme.css"], "modes": ["dark"], "textStylePrefix": "Sony FT/" }],
+  "rename": {
+    "tokens": {
+      "Tokens/ground/bg": "Tokens/color/background",
+      "Tokens/ground/surface": "Tokens/color/surface",
+      "Tokens/ground/surface-2": "Tokens/color/surface-2",
+      "Tokens/ground/divider": "Tokens/color/divider",
+      "Tokens/ground/scrim": "Tokens/color/overlay",
+      "Tokens/text/text-1": "Tokens/color/foreground",
+      "Tokens/text/text-2": "Tokens/color/muted-foreground",
+      "Tokens/text/text-placeholder": "Tokens/color/placeholder",
+      "Tokens/text/text-disabled": "Tokens/color/disabled",
+      "Tokens/text/on-accent": "Tokens/color/on-accent",
+      "Tokens/status/positive": "Tokens/color/positive",
+      "Tokens/status/negative": "Tokens/color/negative",
+      "Tokens/status/caution": "Tokens/color/caution",
+      "Tokens/accent/accent": "Tokens/color/primary",
+      "Tokens/accent/accent-300": "Tokens/color/primary-pressed",
+      "Tokens/accent/accent-600": "Tokens/color/ring",
+      "Tokens/accent/accent-800": "Tokens/color/selected",
+      "Tokens/radius/pill": "Tokens/radius/full",
+      "Tokens/radius/tile-lg": "Tokens/radius/tile",
+      "Tokens/size/touch": "Tokens/spacing/touch",
+      "Tokens/size/button": "Tokens/spacing/button-lg",
+      "Tokens/size/row": "Tokens/spacing/row",
+      "Tokens/size/quick-action": "Tokens/spacing/quick-action",
+      "Tokens/size/nav": "Tokens/spacing/navbar-row",
+      "Tokens/size/input": "Tokens/spacing/input-lg"
+    },
+    "textStyles": { "Sony FT/Amount L": "Sony FT/Amount lg", "Sony FT/Amount M": "Sony FT/Amount md" },
+    "components": {}
+  },
+  "ignore": {
+    "tokens": ["Primitives/neutral/*", "Primitives/green/*", "Primitives/red/*", "Primitives/amber/*", "Tokens/space/*"],
+    "textStyles": [],
+    "components": []
+  }
+}

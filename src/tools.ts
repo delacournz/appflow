@@ -5,6 +5,12 @@ import * as z from 'zod/v4';
 
 import type { JsonObject, JsonValue, PluginReply } from '../shared/protocol';
 import { STALE_FIX, stalePlugin } from './build';
+import { CONFIG_FILE, loadDesignConfig, readCodeSpec } from './sync/config';
+import { isComponentOp, isTextStyleOp, isTokenOp, type SyncOp } from '../shared/design-ops';
+import type { DesignSpec } from '../shared/design-spec';
+import { diffSpecs, matchComponents, type DesignMapping, type SyncPlan } from './sync/diff';
+import { parseSpec } from './sync/spec-schema';
+import { summarizePlan } from './sync/summary';
 import type { CodeConnectEntry, CodeConnectStore } from './store';
 
 export type ToolContext = {
@@ -38,6 +44,7 @@ export type ToolDef = Omit<ToolSpec<ObjectSchema>, 'run'> & { run(args: unknown,
 const tool = <S extends ObjectSchema>(spec: ToolSpec<S>): ToolDef => ({ ...spec, run: (args, ctx) => spec.run(args as z.output<S>, ctx) });
 
 export const DEFAULT_TIMEOUT_MS = 60_000;
+const EXPORT_TIMEOUT_MS = 120_000;
 
 const NOT_CONNECTED = 'The Figma plugin is not connected. In the Figma desktop app, open the file and run Plugins → Development → AppFlow, then try again.';
 
@@ -112,6 +119,67 @@ async function saveMapping(ctx: ToolContext, m: z.output<typeof mappingSchema>):
     await ctx.store.set(c.key, entry);
     return { key: c.key, entry };
 }
+
+const VERBOSE = 'Return every op as full JSON. Default false: one line per op (+ create, ~ update, ? Figma only).';
+
+type SyncKind = 'tokens' | 'textStyles' | 'components';
+const SYNC_ORDER: SyncKind[] = ['tokens', 'textStyles', 'components'];
+const SYNC_SCOPE: Record<SyncKind, { keep(spec: DesignSpec): DesignSpec; is(op: SyncOp): boolean }> = {
+    tokens: { keep: (s) => ({ collections: s.collections, textStyles: [], components: [] }), is: isTokenOp },
+    textStyles: { keep: (s) => ({ collections: [], textStyles: s.textStyles, components: [] }), is: isTextStyleOp },
+    components: { keep: (s) => ({ collections: [], textStyles: [], components: s.components }), is: isComponentOp },
+};
+
+async function figmaSpec(ctx: ToolContext, includeComponents: boolean): Promise<DesignSpec> {
+    const r = await plugin(ctx, 'export_design_system', { includeComponents }, EXPORT_TIMEOUT_MS);
+    return parseSpec(r.result, 'The Figma export');
+}
+
+/** A style op per styled code component: on its matched Figma set, or on the set a create op makes. */
+function styleOps(code: DesignSpec, figma: DesignSpec, mapping: DesignMapping): SyncOp[] {
+    const { codeComps, pairs } = matchComponents(code, figma, mapping);
+    return codeComps.flatMap((c): SyncOp[] => {
+        if (!c.styles) return [];
+        const f = pairs.get(c);
+        const layers = f ? mapping.layers[f.name] : undefined;
+        return [{ op: 'style-component', component: f?.name ?? c.name, ...(f?.figmaId ? { figmaId: f.figmaId } : {}), axes: c.axes, styles: c.styles, ...(layers ? { layers } : {}) }];
+    });
+}
+
+type SyncArgs = { projectRoot: string; dryRun?: boolean; prune?: boolean; verbose?: boolean; styling?: boolean };
+
+/** Code spec, Figma export, diff, and (unless dryRun) apply and diff again. Limited to one kind of item. */
+const sync = async (ctx: ToolContext, kind: SyncKind, args: SyncArgs): Promise<ToolResult> => asJson(await syncKind(ctx, kind, args));
+
+async function syncKind(ctx: ToolContext, kind: SyncKind, args: SyncArgs): Promise<Record<string, unknown>> {
+    const show = (p: SyncPlan) => (args.verbose ? p : summarizePlan(p));
+    const config = await loadDesignConfig(args.projectRoot);
+    const warnings: string[] = [];
+    const scope = SYNC_SCOPE[kind];
+    const code = scope.keep(await readCodeSpec(args.projectRoot, config.sources, warnings));
+    const withComponents = kind === 'components';
+    const plan = (figma: DesignSpec) => {
+        const p = diffSpecs(code, scope.keep(figma), config.mapping);
+        return { ...p, ops: p.ops.filter(scope.is) };
+    };
+    const figma = await figmaSpec(ctx, withComponents);
+    const before = plan(figma);
+    const styling = withComponents && (args.styling ?? true) ? styleOps(code, figma, config.mapping) : [];
+    const ops = [...before.ops, ...styling];
+    if (args.dryRun ?? true) return { dryRun: true, plan: show({ ...before, ops }), warnings };
+    if (ops.length === 0) return { dryRun: false, result: null, remaining: before.counts, warnings };
+    const r = await plugin(ctx, 'apply_design_ops', { ops: ops as unknown as JsonValue, prune: args.prune ?? false }, EXPORT_TIMEOUT_MS);
+    const after = plan(await figmaSpec(ctx, withComponents));
+    return { dryRun: false, result: r.result, remaining: after.counts, remainingOps: show(after).ops, warnings };
+}
+
+const syncArgs = (what: string) =>
+    obj({
+        projectRoot: str(`Absolute path of the project that holds ${CONFIG_FILE}.`),
+        dryRun: bool(`Only return the plan. Default true; pass false to change ${what} in Figma.`).optional(),
+        prune: bool(`Delete Figma ${what} that code does not have. Default false: they are reported as orphans.`).optional(),
+        verbose: bool(VERBOSE).optional(),
+    });
 
 export const TOOLS: ToolDef[] = [
     tool({
@@ -495,6 +563,64 @@ export const TOOLS: ToolDef[] = [
             for (const m of mappings) saved.push((await saveMapping(ctx, m)).key);
             return asJson({ saved: saved.length, keys: saved });
         },
+    }),
+    tool({
+        name: 'export_design_system',
+        description: 'Export the open file’s local variables (with modes, aliases, scopes, code syntax), text styles and components as a DesignSpec JSON.',
+        inputSchema: obj({ includeComponents: bool('Also list component sets and their variant axes. Default true; loads every page.').optional() }),
+        async run(args, ctx) {
+            const r = await plugin(ctx, 'export_design_system', { includeComponents: args.includeComponents ?? true }, EXPORT_TIMEOUT_MS);
+            return asJson(r.result);
+        },
+    }),
+    tool({
+        name: 'diff_design_system',
+        description: `Compare the project’s code design system (read from ${CONFIG_FILE} at projectRoot) with the open Figma file. Code is the source of truth. Returns the ops that would make Figma match code (create, update, orphan), counts and rename candidates. Changes nothing.`,
+        inputSchema: obj({
+            projectRoot: str(`Absolute path of the project that holds ${CONFIG_FILE}.`),
+            includeComponents: bool('Compare components and variants too. Default true.').optional(),
+            verbose: bool(VERBOSE).optional(),
+        }),
+        async run(args, ctx) {
+            const config = await loadDesignConfig(args.projectRoot);
+            const code = await readCodeSpec(args.projectRoot, config.sources);
+            const includeComponents = args.includeComponents ?? true;
+            const r = await plugin(ctx, 'export_design_system', { includeComponents }, EXPORT_TIMEOUT_MS);
+            const figma = parseSpec(r.result, 'The Figma export');
+            const plan = diffSpecs(includeComponents ? code : { ...code, components: [] }, figma, config.mapping);
+            return asJson(args.verbose ? plan : summarizePlan(plan));
+        },
+    }),
+    tool({
+        name: 'sync_tokens',
+        description: `Make the open file's variables match the code tokens from ${CONFIG_FILE}: create collections, modes and variables (with scopes, code syntax and code ids), rename matched variables to code names, and set values and aliases. Dry run by default; Figma-only variables are removed only with prune.`,
+        inputSchema: syncArgs('variables'),
+        run: (args, ctx) => sync(ctx, 'tokens', args),
+    }),
+    tool({
+        name: 'sync_design_system',
+        description: `Run sync_tokens, sync_text_styles and sync_components in that order (or the kinds in include) with the same dryRun and prune. Returns one result per kind. See skill://appflow/sync-from-code/SKILL.md.`,
+        inputSchema: syncArgs('variables, text styles and variants').extend({
+            include: z.array(z.enum(['tokens', 'textStyles', 'components'])).min(1).describe('Kinds to sync. Default all three. Always run in the order tokens, textStyles, components.').optional(),
+            styling: bool('Paint component variants from their code classes. Default true.').optional(),
+        }),
+        async run(args, ctx) {
+            const out: Record<string, unknown> = {};
+            for (const kind of SYNC_ORDER) if (!args.include || args.include.includes(kind)) out[kind] = await syncKind(ctx, kind, args);
+            return asJson(out);
+        },
+    }),
+    tool({
+        name: 'sync_components',
+        description: `Make the open file's component sets match the code components (tailwind-variants) in ${CONFIG_FILE}: rename variant axes and options per the mapping, add missing axes and options (cloned from the default variant), create missing sets on a "Code components" page, link code ids, and (styling, default true) paint each variant from its code classes bound to the synced variables. Run sync_tokens first. Dry run by default; Figma-only variants are removed only with prune.`,
+        inputSchema: syncArgs('variants').extend({ styling: bool('Also paint each variant from its code classes. Default true.').optional() }),
+        run: (args, ctx) => sync(ctx, 'components', args),
+    }),
+    tool({
+        name: 'sync_text_styles',
+        description: `Make the open file's text styles match the code type roles from ${CONFIG_FILE}. Fonts must be available in Figma; a missing one is an error, never a guess. Dry run by default; Figma-only styles are removed only with prune.`,
+        inputSchema: syncArgs('text styles'),
+        run: (args, ctx) => sync(ctx, 'textStyles', args),
     }),
 ];
 

@@ -38,7 +38,7 @@ Only `set_screen_status` changes a badge. Never edit badges with `use_figma`, an
 **Static check: code against design.** Call `get_design_context` and `get_variable_defs` on the frame `id`, then compare with the route's component and what it renders:
 - **Copy:** every visible string matches word for word, including placeholders, helper and error text.
 - **Components:** the matching code component is used (see `get_code_connect_map`), not a hand-rolled copy.
-- **Tokens:** colours, spacing, radii and type use the project's tokens, not hard-coded values.
+- **Tokens:** colours, spacing, radii and type use the project's tokens, not hard-coded values. Code tokens are master: if the frame's colour differs only because its Figma variable is stale, that is not screen drift. Run the `sync-from-code` skill (`skill://appflow/sync-from-code/SKILL.md`) to fix the variable, then compare again.
 - **Structure:** elements appear in the same order and grouping.
 - **Behaviour:** each arrow out of this screen in `describe_board` (`--label--> Target [trigger: …]`) has a control that navigates to the target's route.
 

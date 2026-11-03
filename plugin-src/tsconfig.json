@@ -23,6 +23,7 @@
     "../node_modules/@figma/plugin-typings/index.d.ts"
   ],
   "exclude": [
-    "*.test.ts"
+    "*.test.ts",
+    "../shared/*.test.ts"
   ]
 }

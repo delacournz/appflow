@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -141,6 +141,16 @@ describe('protocol', () => {
         const content = (await mc.readResource({ uri })).contents[0];
         expect(content && 'text' in content ? content.text : '').toContain('set_screen_status');
         expect(promptText(await mc.getPrompt({ name: 'verify_built' }))).toContain('set_screen_status');
+    });
+
+    test('sync from code: instructions, skill resource and prompt', async () => {
+        const mc = await client();
+        expect(mc.getInstructions()).toContain('skill://appflow/sync-from-code/SKILL.md');
+        const uri = 'skill://appflow/sync-from-code/SKILL.md';
+        expect((await mc.listResources()).resources.map((r) => r.uri)).toContain(uri);
+        const text = (await mc.readResource({ uri })).contents[0];
+        expect(text && 'text' in text ? text.text : '').toContain('dryRun');
+        expect(promptText(await mc.getPrompt({ name: 'sync_from_code' }))).toContain('prune');
     });
 
     test('prompts: create_design_system_rules', async () => {
@@ -369,5 +379,143 @@ describe('callTool (outside MCP)', () => {
         expect(c.calls).toEqual([]);
         expect(json(await callTool('use_figma', { code: 'return 1' }, c))).toEqual({ result: 1, logs: [] });
         expect((await callTool('nope', {}, c)).isError).toBe(true);
+    });
+});
+
+describe('design sync', () => {
+    const figmaSpec: JsonObject = {
+        collections: [
+            {
+                name: 'Tokens',
+                modes: ['Dark'],
+                figmaId: 'C:1',
+                tokens: [
+                    { name: 'size/button-secondary', type: 'float', values: { Dark: { kind: 'float', value: 54 } }, figmaId: 'V:1' },
+                    { name: 'text/text-chip', type: 'color', values: { Dark: { kind: 'color', hex: '#E6E6E6FF' } }, figmaId: 'V:2' },
+                ],
+            },
+        ],
+        textStyles: [],
+        components: [],
+    };
+
+    test('export_design_system forwards to the plugin and returns the spec', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: figmaSpec } });
+        expect(json(await call('export_design_system', {}, c))).toEqual(figmaSpec);
+        expect(c.calls[0]).toMatchObject({ tool: 'export_design_system', args: { includeComponents: true } });
+        await call('export_design_system', { includeComponents: false }, c);
+        expect(c.calls[1]?.args).toEqual({ includeComponents: false });
+    });
+
+    test('diff_design_system compares the project spec with the Figma export', async () => {
+        const project = join(dir, 'project');
+        await mkdir(project, { recursive: true });
+        await writeFile(join(project, 'appflow.design.json'), JSON.stringify({ sources: [{ kind: 'spec-json', path: 'spec.json' }] }));
+        await writeFile(
+            join(project, 'spec.json'),
+            JSON.stringify({
+                collections: [{ name: 'Tokens', modes: ['Value'], tokens: [{ name: 'size/button-secondary', type: 'float', values: { Value: { kind: 'float', value: 56 } } }] }],
+            }),
+        );
+        const c = ctx({ export_design_system: { ok: true, result: figmaSpec } });
+        const plan = json(await call('diff_design_system', { projectRoot: project, verbose: true }, c));
+        expect(plan.counts).toEqual({ create: 0, update: 1, orphan: 1, matched: 0 });
+        expect(plan.ops.map((o: { op: string; name?: string }) => `${o.op}:${o.name}`)).toEqual(['update-token:size/button-secondary', 'orphan-token:text/text-chip']);
+    });
+
+    test('diff_design_system reports a missing config without calling the plugin', async () => {
+        const c = ctx({});
+        const r = await call('diff_design_system', { projectRoot: join(dir, 'nope') }, c);
+        expect(r.isError).toBe(true);
+        expect(r.content[0]?.text).toContain('appflow.design.json');
+        expect(c.calls).toEqual([]);
+    });
+
+    const project = async (name: string) => {
+        const root = join(dir, name);
+        await mkdir(join(root, 'styles'), { recursive: true });
+        await writeFile(join(root, 'appflow.design.json'), JSON.stringify({ sources: [{ kind: 'tailwind-css', paths: ['styles/tokens.css'], modes: ['dark'] }] }));
+        await writeFile(join(root, 'styles/tokens.css'), '@theme { --spacing-button-secondary: 56px; --text-body: 15px; --text-body--line-height: 22px; --font-sans: "Archivo"; }');
+        return root;
+    };
+    const exportWith = (textStyles: JsonObject[] = []): JsonObject => ({ ...figmaSpec, collections: [{ name: 'Tokens', modes: ['Dark'], figmaId: 'C:1', tokens: [{ name: 'spacing/button-secondary', type: 'float', values: { Dark: { kind: 'float', value: 54 } }, figmaId: 'V:1' }] }], textStyles });
+    const applied = { applied: 1, created: [], updated: ['V:1'], removed: [], skipped: [], errors: [] };
+
+    test('sync_tokens dry run returns the token plan without applying', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: exportWith() } });
+        const r = json(await call('sync_tokens', { projectRoot: await project('t1'), verbose: true }, c));
+        expect(r.dryRun).toBe(true);
+        expect(r.plan.ops.map((o: { op: string }) => o.op)).toEqual(['update-token', 'create-token']);
+        expect(r.plan.ops[0].values).toEqual([{ mode: 'Dark', from: { kind: 'float', value: 54 }, to: { kind: 'float', value: 56 } }]);
+        expect(c.calls.map((x) => x.tool)).toEqual(['export_design_system']);
+    });
+
+    test('sync_tokens applies token ops only, then diffs again', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: exportWith() }, apply_design_ops: { ok: true, result: applied } });
+        const r = json(await call('sync_tokens', { projectRoot: await project('t2'), dryRun: false, prune: true }, c));
+        expect(c.calls.map((x) => x.tool)).toEqual(['export_design_system', 'apply_design_ops', 'export_design_system']);
+        const ops = c.calls[1]?.args.ops as { op: string }[];
+        expect(ops.map((o) => o.op)).toEqual(['update-token', 'create-token']);
+        expect(c.calls[1]?.args.prune).toBe(true);
+        expect(r.result).toEqual(applied);
+        expect(r.remaining.update).toBe(1);
+    });
+
+    test('plans are one line per op unless verbose', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: exportWith() } });
+        const r = json(await call('sync_tokens', { projectRoot: await project('t4') }, c));
+        expect(r.plan.ops).toEqual(['~ Tokens/spacing/button-secondary; Dark: 54 → 56; link css:--spacing-button-secondary', '+ Tokens/text/body = 15']);
+    });
+
+    test('sync_components plans variant ops and styles every matched set', async () => {
+        const root = join(dir, 'c1');
+        await mkdir(root, { recursive: true });
+        await writeFile(join(root, 'tokens.css'), '@layer theme { :root { @variant dark { --muted: #262626; } } } @theme inline { --color-muted: var(--muted); }');
+        await writeFile(join(root, 'alert.variants.ts'), "export const alertVariants = Object.assign(() => '', { base: '', slots: {}, variants: { status: { info: '', destructive: 'bg-muted' } }, defaultVariants: { status: 'info' }, compoundVariants: [] });");
+        await writeFile(
+            join(root, 'appflow.design.json'),
+            JSON.stringify({
+                sources: [{ kind: 'tailwind-css', paths: ['tokens.css'] }, { kind: 'tailwind-variants', components: { Alert: 'alert.variants.ts#alertVariants' } }],
+                rename: { components: { Notice: 'Alert' } },
+                variants: { Notice: { Tone: { axis: 'status', options: { Info: 'info' } } } },
+                layers: { Notice: { root: 'Frame' } },
+            }),
+        );
+        const figma = { collections: [], textStyles: [], components: [{ name: 'Notice', axes: { Tone: ['Info'] }, defaults: { Tone: 'Info' }, figmaId: 'CS:1' }] };
+        const c = ctx({ export_design_system: { ok: true, result: figma } });
+        const r = json(await call('sync_components', { projectRoot: root, verbose: true }, c));
+        expect(r.plan.ops.map((o: { op: string }) => o.op)).toEqual(['rename-variant', 'add-variant-option', 'link-component', 'style-component']);
+        expect(r.plan.ops[3]).toMatchObject({ component: 'Notice', figmaId: 'CS:1', axes: { status: ['info', 'destructive'] }, layers: { root: 'Frame' } });
+        expect(c.calls[0]?.args).toEqual({ includeComponents: true });
+        const plain = json(await call('sync_components', { projectRoot: root, styling: false }, c));
+        expect(plain.plan.ops).toEqual(['~ Notice Tone → status (Info→info)', '+ Notice status=destructive', '~ component Notice: link tv:alert.variants.ts#alertVariants']);
+    });
+
+    test('sync_design_system runs the chosen kinds in order', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: exportWith() } });
+        const r = json(await call('sync_design_system', { projectRoot: await project('d1'), include: ['textStyles', 'tokens'] }, c));
+        expect(Object.keys(r)).toEqual(['tokens', 'textStyles']);
+        expect(r.tokens.plan.ops).toHaveLength(2);
+        expect(r.textStyles.plan.ops).toEqual(['+ text style Body: Archivo Regular 15']);
+    });
+
+    test('sync_text_styles plans text style ops only', async () => {
+        const c = ctx({ export_design_system: { ok: true, result: exportWith() } });
+        const r = json(await call('sync_text_styles', { projectRoot: await project('t3'), verbose: true }, c));
+        expect(r.plan.ops).toEqual([
+            {
+                op: 'create-text-style',
+                style: { name: 'Body', fontFamily: 'Archivo', fontStyle: 'Regular', fontSize: 15, lineHeight: { unit: 'PIXELS', value: 22 }, letterSpacing: { unit: 'PIXELS', value: 0 }, codeId: 'css:--text-body', source: 'styles/tokens.css:1' },
+            },
+        ]);
+    });
+
+    test('an invalid export from the plugin is a tool error', async () => {
+        const project = join(dir, 'p2');
+        await mkdir(project, { recursive: true });
+        await writeFile(join(project, 'appflow.design.json'), JSON.stringify({ sources: [] }));
+        const c = ctx({ export_design_system: { ok: true, result: { collections: 'x' } } });
+        const r = await call('diff_design_system', { projectRoot: project, verbose: true }, c);
+        expect(r.isError).toBe(true);
     });
 });
