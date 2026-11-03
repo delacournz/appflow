@@ -6,6 +6,8 @@ A local MCP server plus a Figma development plugin. It exposes the Figma MCP ser
 agent ⇄ stdio MCP (src/server.ts) ⇄ ws://localhost:3055/plugin ⇄ plugin UI iframe ⇄ plugin main (Plugin API)
 ```
 
+The MCP side is built on the official [MCP TypeScript SDK](https://ts.sdk.modelcontextprotocol.io/v2/) (`@modelcontextprotocol/server` v2). `src/mcp.ts` registers the tools, skill resources and prompts, `src/tools.ts` defines the tools with Zod schemas, and `src/server.ts` serves them over stdio.
+
 ## Tools
 
 Most tools take an optional `nodeId` (`193:443` or `193-443`). Without one they use the current selection.
