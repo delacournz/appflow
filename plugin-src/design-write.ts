@@ -66,6 +66,16 @@ export function renameVariantProps(props: Record<string, string>, axis: string, 
     return out;
 }
 
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** A resolved COLOR variable value as a solid paint's colour and opacity; null for anything else. */
+export function solidFrom(value: unknown): { color: { r: number; g: number; b: number }; opacity: number } | null {
+    if (typeof value !== 'object' || value === null) return null;
+    const { r, g, b, a } = value as Record<string, unknown>;
+    if (!isNum(r) || !isNum(g) || !isNum(b)) return null;
+    return { color: { r, g, b }, opacity: isNum(a) ? a : 1 };
+}
+
 export type SlotTarget = { kind: 'root' } | { kind: 'skip' } | { kind: 'layer'; name: string };
 
 /** Where a code slot's classes go: the variant itself (`root`, or a slot mapped to "root"), nowhere (mapped to ""), or a named layer. */

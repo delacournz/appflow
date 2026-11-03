@@ -3068,6 +3068,15 @@ ${body}
     }
     return out;
   }
+  var isNum2 = (v) => typeof v === "number" && Number.isFinite(v);
+  function solidFrom(value) {
+    if (typeof value !== "object" || value === null)
+      return null;
+    const { r, g, b, a } = value;
+    if (!isNum2(r) || !isNum2(g) || !isNum2(b))
+      return null;
+    return { color: { r, g, b }, opacity: isNum2(a) ? a : 1 };
+  }
   function slotTarget(slot, layers) {
     const mapped = layers[slot];
     if (mapped === "")
@@ -3224,11 +3233,14 @@ ${body}
     const name = target.name.toLowerCase();
     return variant.findOne((n) => n.name.toLowerCase() === name);
   }
-  function paint(token, s) {
+  function paint(token, s, node) {
     const v = s.byName.get(token);
     if (!v)
       throw new Error(`variable ${token} does not exist`);
-    return figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 0, g: 0, b: 0 } }, "color", v);
+    const solid = solidFrom(v.resolveForConsumer(node).value);
+    if (!solid)
+      throw new Error(`variable ${token} is not a colour`);
+    return figma.variables.setBoundVariableForPaint({ type: "SOLID", ...solid }, "color", v);
   }
   function amount(node, field, a, s, set) {
     const v = a.token ? s.byName.get(a.token) : undefined;
@@ -3252,7 +3264,7 @@ ${body}
     switch (d.kind) {
       case "fill":
         if ("fills" in node)
-          frame.fills = [paint(d.token, s)];
+          frame.fills = [paint(d.token, s, node)];
         return;
       case "fill-none":
         if ("fills" in node)
@@ -3260,7 +3272,7 @@ ${body}
         return;
       case "stroke":
         if ("strokes" in node)
-          frame.strokes = [paint(d.token, s)];
+          frame.strokes = [paint(d.token, s, node)];
         return;
       case "stroke-none":
         if ("strokes" in node)
@@ -3311,7 +3323,7 @@ ${body}
       case "text-fill":
         for (const t of texts(node)) {
           await loadText(t);
-          t.fills = [paint(d.token, s)];
+          t.fills = [paint(d.token, s, t)];
         }
         return;
       case "font-size":
@@ -4249,7 +4261,7 @@ ${body}
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "b59ef4d9" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "3cf679f3" });
       return;
     }
     if (msg.type !== "command")
@@ -4257,7 +4269,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"b59ef4d9"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"3cf679f3"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

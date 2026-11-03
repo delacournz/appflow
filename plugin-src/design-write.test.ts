@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { SyncOp } from '../shared/design-ops';
-import { codeCombo, fontAvailable, slotTarget, formatVariantName, hexToRgba, modeIdFor, parseVariantName, phaseOf, renameVariantProps } from './design-write';
+import { codeCombo, fontAvailable, slotTarget, solidFrom, formatVariantName, hexToRgba, modeIdFor, parseVariantName, phaseOf, renameVariantProps } from './design-write';
 
 describe('hexToRgba', () => {
     test('#RRGGBBAA to 0-1 channels', () => {
@@ -70,4 +70,11 @@ describe('slotTarget', () => {
         expect(slotTarget('root', { root: '' })).toEqual({ kind: 'skip' });
         expect(slotTarget('content', { content: '' })).toEqual({ kind: 'skip' });
     });
+});
+
+test('solidFrom splits a resolved RGBA into paint colour and opacity', () => {
+    expect(solidFrom({ r: 0.5, g: 0.25, b: 1, a: 0.4 })).toEqual({ color: { r: 0.5, g: 0.25, b: 1 }, opacity: 0.4 });
+    expect(solidFrom({ r: 1, g: 1, b: 1 })).toEqual({ color: { r: 1, g: 1, b: 1 }, opacity: 1 });
+    expect(solidFrom(12)).toBeNull();
+    expect(solidFrom({ type: 'VARIABLE_ALIAS', id: 'x' })).toBeNull();
 });

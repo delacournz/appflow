@@ -5,7 +5,7 @@
 import type { ApplyResult, ComponentOp } from '../shared/design-ops';
 import { CODE_ID_KEY, PLUGIN_DATA_NAMESPACE, type SpecComponent } from '../shared/design-spec';
 import { resolveSlots, type Amount, type StyleDecl } from '../shared/design-style';
-import { codeCombo, fontAvailable, formatVariantName, parseVariantName, renameVariantProps, slotTarget } from './design-write';
+import { codeCombo, fontAvailable, formatVariantName, parseVariantName, renameVariantProps, slotTarget, solidFrom } from './design-write';
 
 export type ComponentState = {
     result: ApplyResult;
@@ -147,10 +147,13 @@ function slotNode(variant: ComponentNode, slot: string, layers: Record<string, s
     return variant.findOne((n) => n.name.toLowerCase() === name);
 }
 
-function paint(token: string, s: ComponentState): SolidPaint {
+/** A solid paint bound to the token's variable, seeded with its value for `node` (the base colour is what renders). */
+function paint(token: string, s: ComponentState, node: SceneNode): SolidPaint {
     const v = s.byName.get(token);
     if (!v) throw new Error(`variable ${token} does not exist`);
-    return figma.variables.setBoundVariableForPaint({ type: 'SOLID', color: { r: 0, g: 0, b: 0 } }, 'color', v);
+    const solid = solidFrom(v.resolveForConsumer(node).value);
+    if (!solid) throw new Error(`variable ${token} is not a colour`);
+    return figma.variables.setBoundVariableForPaint({ type: 'SOLID', ...solid }, 'color', v);
 }
 
 type Bindable = Parameters<FrameNode['setBoundVariable']>[0];
@@ -178,13 +181,13 @@ async function apply(node: SceneNode, d: StyleDecl, s: ComponentState): Promise<
     const frame = node as FrameNode;
     switch (d.kind) {
         case 'fill':
-            if ('fills' in node) frame.fills = [paint(d.token, s)];
+            if ('fills' in node) frame.fills = [paint(d.token, s, node)];
             return;
         case 'fill-none':
             if ('fills' in node) frame.fills = [];
             return;
         case 'stroke':
-            if ('strokes' in node) frame.strokes = [paint(d.token, s)];
+            if ('strokes' in node) frame.strokes = [paint(d.token, s, node)];
             return;
         case 'stroke-none':
             if ('strokes' in node) frame.strokes = [];
@@ -224,7 +227,7 @@ async function apply(node: SceneNode, d: StyleDecl, s: ComponentState): Promise<
         case 'text-fill':
             for (const t of texts(node)) {
                 await loadText(t);
-                t.fills = [paint(d.token, s)];
+                t.fills = [paint(d.token, s, t)];
             }
             return;
         case 'font-size':
