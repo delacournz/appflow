@@ -2,6 +2,7 @@ import type { PluginCommand } from '../shared/protocol';
 import { downloadAssets, getScreenshot, uploadAssets } from './assets';
 import { componentRefs, getContextForCodeConnect, resolveComponent } from './codeconnect';
 import { generateDiagram, htmlBuild, useFigma } from './create';
+import { badgeScreens, setScreenStatus } from './badge';
 import { adoptBoard, connect, rerouteFlow } from './flow';
 import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
@@ -42,6 +43,8 @@ const handlers: Record<string, Handler> = {
     compact_board: compactBoard,
     duplicate_screen: duplicateScreen,
     group_screens: groupScreens,
+    set_screen_status: setScreenStatus,
+    badge_screens: badgeScreens,
 };
 
 declare const __BUILD__: string;

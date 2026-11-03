@@ -82,3 +82,34 @@ describe('renderBoard', () => {
         expect(out.issues).toEqual([]);
     });
 });
+
+describe('build status', () => {
+    test('marks cells, lists screens and flags gaps', () => {
+        const out = renderBoard(
+            {
+                ...base,
+                screens: [
+                    at('a', 'Welcome', 0, 0, { status: 'built', route: 'src/app/index.tsx', verifiedAt: '2026-11-03', hasBadge: true }),
+                    at('b', 'Verify your ID', 1, 0, { status: 'drift', route: 'src/app/verify.tsx', verifiedAt: '2026-11-03', hasBadge: true }),
+                    at('c', 'In-app browser', 1, 1, { status: 'built', route: null, verifiedAt: '2026-11-03', hasBadge: false }),
+                ],
+                arrows: [],
+            },
+            12,
+        );
+        expect(out.grid).toBe(
+            [
+                '    | c0           | c1',
+                '----+--------------+--------------',
+                ' r0 | ✓ Welcome    | ~ Verify yo…',
+                ' r1 |              | ✓ In-app br…',
+            ].join('\n'),
+        );
+        expect(out.screens).toEqual([
+            { id: 'a', name: 'Welcome', col: 0, row: 0, route: 'src/app/index.tsx', status: 'built', verifiedAt: '2026-11-03' },
+            { id: 'b', name: 'Verify your ID', col: 1, row: 0, route: 'src/app/verify.tsx', status: 'drift', verifiedAt: '2026-11-03' },
+            { id: 'c', name: 'In-app browser', col: 1, row: 1, route: null, status: 'built', verifiedAt: '2026-11-03' },
+        ]);
+        expect(out.issues).toEqual(['In-app browser: no build badge (run badge_screens)', 'In-app browser: marked built but has no route text']);
+    });
+});

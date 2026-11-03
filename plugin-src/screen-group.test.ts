@@ -18,8 +18,8 @@ describe('names', () => {
         expect(isScreenGroupName('Screen Verified')).toBe(false);
         expect(isScreenGroupName('Group 1')).toBe(false);
     });
-    test('all four layer names', () => {
-        expect(screenNames('New')).toEqual({ group: 'Screen · New', frame: 'New', label: 'Label · New', route: 'Route · New' });
+    test('all five layer names', () => {
+        expect(screenNames('New')).toEqual({ group: 'Screen · New', frame: 'New', label: 'Label · New', route: 'Route · New', badge: 'Badge · New' });
     });
 });
 
@@ -90,5 +90,24 @@ describe('shiftTargets', () => {
     });
     test('ungrouped screens move the three layers', () => {
         expect(shiftTargets({ frameId: 'f', groupId: null, frameParentId: 'page', labelId: 'l', labelParentId: 'page', routeId: null, routeParentId: null })).toEqual(['f', 'l']);
+    });
+});
+
+describe('badges', () => {
+    test('screenNames includes the badge', () => {
+        expect(screenNames('New').badge).toBe('Badge · New');
+    });
+    test('badge joins the group on top', () => {
+        expect(planGrouping(candidate({ badgeId: 'b' }))).toMatchObject({ kind: 'group', memberIds: ['f', 'r', 'l', 'b'] });
+    });
+    test('a group holding the badge is already grouped', () => {
+        const parent = { id: 'g', type: 'GROUP', name: 'Screen · Verified', childIds: ['f', 'r', 'l', 'b'] };
+        expect(planGrouping(candidate({ parent, badgeId: 'b' }))).toEqual({ kind: 'already', groupId: 'g' });
+    });
+    test('moves a loose badge beside the group', () => {
+        expect(shiftTargets({ frameId: 'f', groupId: 'g', frameParentId: 'g', labelId: null, labelParentId: null, routeId: null, routeParentId: null, badgeId: 'b', badgeParentId: 'page' })).toEqual(['g', 'b']);
+    });
+    test('ungrouped screens move the badge too', () => {
+        expect(shiftTargets({ frameId: 'f', groupId: null, frameParentId: 'page', labelId: null, labelParentId: null, routeId: null, routeParentId: null, badgeId: 'b', badgeParentId: 'page' })).toEqual(['f', 'b']);
     });
 });

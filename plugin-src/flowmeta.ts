@@ -33,7 +33,18 @@ export type ScreenMeta = {
     routeId: string | null;
     /** The `Screen · {name}` group holding the label, route and frame. Absent or null on ungrouped screens. */
     groupId?: string | null;
+    /** Whether the screen exists in code and matches the design. Absent reads as not built. */
+    build?: BuildStatus;
+    /** The `Badge · {name}` pill showing `build`. */
+    badgeId?: string | null;
 };
+
+export type BuildStatus =
+    | { status: 'not-built' }
+    | { status: 'built'; verifiedAt: string; commit: string | null; confidence: 'static' | 'runtime'; notes: string | null }
+    | { status: 'drift'; verifiedAt: string; commit: string | null; notes: string };
+
+export type BuildState = BuildStatus['status'];
 
 export type ArrowMeta = {
     v: 1;
@@ -54,6 +65,22 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 const isStr = (v: unknown): v is string => typeof v === 'string';
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const strOrNull = (v: unknown): v is string | null => v === null || isStr(v);
+
+export function parseBuildStatus(v: unknown): BuildStatus | null {
+    if (!isObj(v)) return null;
+    if (v.status === 'not-built') return { status: 'not-built' };
+    if (!isStr(v.verifiedAt) || !strOrNull(v.commit)) return null;
+    if (v.status === 'built') {
+        if (v.confidence !== 'static' && v.confidence !== 'runtime') return null;
+        if (!strOrNull(v.notes)) return null;
+        return { status: 'built', verifiedAt: v.verifiedAt, commit: v.commit, confidence: v.confidence, notes: v.notes };
+    }
+    if (v.status === 'drift') {
+        if (!isStr(v.notes) || !v.notes) return null;
+        return { status: 'drift', verifiedAt: v.verifiedAt, commit: v.commit, notes: v.notes };
+    }
+    return null;
+}
 
 function parse(raw: string): Record<string, unknown> | null {
     if (!raw) return null;
@@ -81,6 +108,8 @@ export function parseScreenMeta(raw: string): ScreenMeta | null {
     if (!o || o.v !== 1 || o.kind !== 'screen') return null;
     if (!isStr(o.boardId) || !isNum(o.col) || !isNum(o.row) || !strOrNull(o.labelId) || !strOrNull(o.routeId)) return null;
     if (o.groupId !== undefined && !strOrNull(o.groupId)) return null;
+    if (o.badgeId !== undefined && !strOrNull(o.badgeId)) return null;
+    if (o.build !== undefined && !parseBuildStatus(o.build)) return null;
     return o as unknown as ScreenMeta;
 }
 

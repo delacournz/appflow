@@ -13,7 +13,11 @@ async function groupBoard(board: Board, dryRun: boolean, missingLabel: string[])
     for (const { frame } of collectScreens(parent.children)) {
         const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
         if (!meta || meta.boardId !== board.node.id) continue;
-        const [label, route] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+        const [label, route, badge] = await Promise.all([
+            meta.labelId ? sceneById(meta.labelId) : null,
+            meta.routeId ? sceneById(meta.routeId) : null,
+            meta.badgeId ? sceneById(meta.badgeId) : null,
+        ]);
         if (!label) missingLabel.push(frame.id);
         const holder = frame.parent;
         if (!holder || !('children' in holder)) {
@@ -25,6 +29,7 @@ async function groupBoard(board: Board, dryRun: boolean, missingLabel: string[])
             frameName: frame.name,
             labelId: label?.id ?? null,
             routeId: route?.id ?? null,
+            badgeId: badge?.id ?? null,
             parent: { id: holder.id, type: holder.type, name: 'name' in holder ? holder.name : '', childIds: holder.children.map((k) => k.id) },
         });
         if (plan.kind === 'conflict') {
@@ -40,7 +45,7 @@ async function groupBoard(board: Board, dryRun: boolean, missingLabel: string[])
             out.push({ frameId: frame.id, name: frame.name, status: 'grouped', groupId: null });
             continue;
         }
-        const nodes = plan.memberIds.map((id) => [frame, label, route].find((n) => n?.id === id)).filter((n): n is SceneNode => !!n);
+        const nodes = plan.memberIds.map((id) => [frame, label, route, badge].find((n) => n?.id === id)).filter((n): n is SceneNode => !!n);
         const group = figma.group(nodes, holder as BaseNode & ChildrenMixin);
         group.name = plan.name;
         for (const n of nodes) group.appendChild(n);

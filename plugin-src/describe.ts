@@ -2,6 +2,7 @@ import type { JsonObject } from '../shared/protocol';
 import { renderBoard, type BoardArrow, type BoardDescription, type BoardScreen } from './board-text';
 import { collectScreens, loadBoard, readMeta, rectOf, sceneById, type Board } from './flow';
 import { ARROW_KEY, BOARD_KEY, SCREEN_KEY, parseArrowMeta, parseBoardMeta, parseScreenMeta } from './flowmeta';
+import { buildStatusOf } from './screen-status';
 import { fail, num, ok, str, type Handler } from './types';
 
 const DEFAULT_WIDTH = 16;
@@ -13,9 +14,26 @@ async function screensOf(board: Board): Promise<BoardScreen[]> {
     for (const { frame: c } of collectScreens(parent.children)) {
         const meta = readMeta(c, SCREEN_KEY, parseScreenMeta);
         if (!meta || meta.boardId !== board.node.id) continue;
-        const label = meta.labelId ? await sceneById(meta.labelId) : null;
+        const [label, route, badge] = await Promise.all([
+            meta.labelId ? sceneById(meta.labelId) : null,
+            meta.routeId ? sceneById(meta.routeId) : null,
+            meta.badgeId ? sceneById(meta.badgeId) : null,
+        ]);
         const r = rectOf(c);
-        out.push({ id: c.id, name: c.name, col: meta.col, row: meta.row, x: r.x, y: r.y, labelX: label ? rectOf(label).x : null });
+        const build = buildStatusOf(meta.build);
+        out.push({
+            id: c.id,
+            name: c.name,
+            col: meta.col,
+            row: meta.row,
+            x: r.x,
+            y: r.y,
+            labelX: label ? rectOf(label).x : null,
+            status: build.status,
+            route: route?.type === 'TEXT' ? route.characters.trim() || null : null,
+            verifiedAt: build.status === 'not-built' ? null : build.verifiedAt,
+            hasBadge: !!badge,
+        });
     }
     return out;
 }

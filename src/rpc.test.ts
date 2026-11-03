@@ -105,6 +105,22 @@ describe('protocol', () => {
         expect((got?.result as { messages: { content: { text: string } }[] }).messages[0]?.content.text).toContain('lint_flow_layout');
     });
 
+    test('verify built: instructions, tools, skill resource and prompt', async () => {
+        const init = await handleRequest({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, ctx({}));
+        expect((init?.result as { instructions: string }).instructions).toContain('verify-built');
+        const tools = await handleRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx({}));
+        const names = (tools?.result as { tools: { name: string }[] }).tools.map((t) => t.name);
+        expect(names).toContain('set_screen_status');
+        expect(names).toContain('badge_screens');
+        const uri = 'skill://appflow/verify-built/SKILL.md';
+        const list = await handleRequest({ jsonrpc: '2.0', id: 3, method: 'resources/list' }, ctx({}));
+        expect((list?.result as { resources: { uri: string }[] }).resources.map((r) => r.uri)).toContain(uri);
+        const read = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri } }, ctx({}));
+        expect((read?.result as { contents: { text: string }[] }).contents[0]?.text).toContain('set_screen_status');
+        const got = await handleRequest({ jsonrpc: '2.0', id: 5, method: 'prompts/get', params: { name: 'verify_built' } }, ctx({}));
+        expect((got?.result as { messages: { content: { text: string } }[] }).messages[0]?.content.text).toContain('set_screen_status');
+    });
+
     test('prompts: create_design_system_rules', async () => {
         const list = await handleRequest({ jsonrpc: '2.0', id: 4, method: 'prompts/list' }, ctx({}));
         expect((list?.result as { prompts: { name: string }[] }).prompts[0]?.name).toBe('create_design_system_rules');

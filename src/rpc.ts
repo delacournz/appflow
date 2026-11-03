@@ -1,6 +1,7 @@
 /** JSON-RPC for MCP over stdio: initialize, tools and prompts. Sockets live in server.ts. */
 import type { JsonObject } from '../shared/protocol';
 import flowLayoutSkill from './skills/flow-layout.md' with { type: 'text' };
+import verifyBuiltSkill from './skills/verify-built.md' with { type: 'text' };
 import { runTool, TOOLS, type ToolContext } from './tools';
 
 export type RpcRequest = { jsonrpc: '2.0'; id?: string | number; method: string; params?: Record<string, unknown> };
@@ -13,6 +14,7 @@ const INSTRUCTIONS = [
     'Call figma_status first. Most tools default to the current selection when nodeId is omitted.',
     'use_figma runs Plugin API code with documentAccess "dynamic-page": use async APIs (getNodeByIdAsync, setCurrentPageAsync, setReactionsAsync). Colours are 0-1. Load fonts before editing text.',
     'Screen flows read left to right: the main path goes right, branches go straight down, overlays and entry points straight up; arrows never point or run left; move the target screen rather than bending an arrow back. Read skill://appflow/flow-layout/SKILL.md before laying out a flow. On a flow board use the board tools, not hand-drawn vectors: adopt_board or create_board, describe_board, move_screen / insert_columns / insert_rows / compact_board, duplicate_screen for state copies, connect (from the triggering control; it also sets the prototype) and reroute_flow. Finish with lint_flow_layout and describe_board.',
+    'Each screen shows a Built, Drift or Not built badge. Change it only with set_screen_status, after following skill://appflow/verify-built/SKILL.md (compare the route code and running app with the frame); never mark a screen built because its file exists.',
     'Code Connect mappings are stored locally. Cloud-only tools (shaders, generative plugins, Weave, generate_image, create_new_file, generate_figma_design, send_code_to_figma, get_motion_context) are not available.',
 ].join(' ');
 
@@ -23,6 +25,13 @@ const SKILLS = [
         description: 'Lay out screen flows left to right with the board tools (move_screen, duplicate_screen, connect, reroute_flow); check with lint_flow_layout and describe_board.',
         mimeType: 'text/markdown',
         text: flowLayoutSkill,
+    },
+    {
+        uri: 'skill://appflow/verify-built/SKILL.md',
+        name: 'verify-built',
+        description: 'Check board screens against their route code and the running app, then record Built / Drift / Not built badges with set_screen_status.',
+        mimeType: 'text/markdown',
+        text: verifyBuiltSkill,
     },
 ];
 
@@ -38,6 +47,11 @@ const PROMPTS = [
     {
         name: 'flow_layout',
         description: 'Rules for laying out a screen flow left to right, and the check to run before finishing.',
+        arguments: [],
+    },
+    {
+        name: 'verify_built',
+        description: 'Check which board screens are built and match the design, and record their Built / Drift / Not built badges.',
         arguments: [],
     },
 ];
@@ -94,6 +108,9 @@ export async function handleRequest(req: RpcRequest, ctx: ToolContext): Promise<
             return reply({ contents: [{ uri: skill.uri, mimeType: skill.mimeType, text: skill.text }] });
         }
         case 'prompts/get': {
+            if (params.name === 'verify_built') {
+                return reply({ description: 'Verify built screens', messages: [{ role: 'user', content: { type: 'text', text: verifyBuiltSkill } }] });
+            }
             if (params.name === 'flow_layout') {
                 return reply({ description: 'Flow layout rules', messages: [{ role: 'user', content: { type: 'text', text: flowLayoutSkill } }] });
             }

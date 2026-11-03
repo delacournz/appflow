@@ -109,3 +109,16 @@ describe('setNavigateTarget', () => {
         expect(r.reactions).toEqual([nav('new'), nav('b')]);
     });
 });
+
+describe('screen build data', () => {
+    const old: ScreenMeta = { v: 1, kind: 'screen', boardId: '1:1', col: 0, row: 0, labelId: null, routeId: null };
+    test('old meta still parses', () => expect(parseScreenMeta(JSON.stringify(old))).toEqual(old));
+    test('round-trips build and badgeId', () => {
+        const next: ScreenMeta = { ...old, badgeId: '5:5', build: { status: 'drift', verifiedAt: '2026-11-03', commit: 'abc', notes: 'Copy' } };
+        expect(parseScreenMeta(JSON.stringify(next))).toEqual(next);
+    });
+    test('rejects a bad build or badgeId', () => {
+        expect(parseScreenMeta(JSON.stringify({ ...old, build: { status: 'nope' } }))).toBeNull();
+        expect(parseScreenMeta(JSON.stringify({ ...old, badgeId: 3 }))).toBeNull();
+    });
+});

@@ -44,12 +44,22 @@ async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: St
             continue;
         }
         const cell = cellOf(rect, board.meta);
-        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId };
+        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...(await ownBadge(stored, groupId)) };
         writeScreen(c, meta);
         stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
         screens.push({ node: c, meta });
     }
     return { screens, stale };
+}
+
+/**
+ * A hand copy of a screen keeps the original's badge id and build status. Keep them only when the badge sits in this
+ * screen's own group; otherwise the copy reads as not built with no badge.
+ */
+async function ownBadge(stored: ScreenMeta, groupId: string | null): Promise<Pick<ScreenMeta, 'badgeId' | 'build'>> {
+    const badge = stored.badgeId ? await sceneById(stored.badgeId) : null;
+    if (badge && groupId && badge.parent?.id === groupId) return { badgeId: stored.badgeId ?? null, build: stored.build };
+    return { badgeId: null, build: { status: 'not-built' } };
 }
 
 const cellsOf = (screens: Screen[]) => screens.map((s) => ({ id: s.node.id, col: s.meta.col, row: s.meta.row }));
@@ -69,7 +79,11 @@ async function applyMoves(board: Board, screens: Screen[], moves: Move[]): Promi
         const have = rectOf(s.node);
         const dx = want.x - have.x;
         const dy = want.y - have.y;
-        const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
+        const [label, route, badge] = await Promise.all([
+            s.meta.labelId ? sceneById(s.meta.labelId) : null,
+            s.meta.routeId ? sceneById(s.meta.routeId) : null,
+            s.meta.badgeId ? sceneById(s.meta.badgeId) : null,
+        ]);
         const targets = shiftTargets({
             frameId: s.node.id,
             groupId: s.meta.groupId,
@@ -78,6 +92,8 @@ async function applyMoves(board: Board, screens: Screen[], moves: Move[]): Promi
             labelParentId: label?.parent?.id ?? null,
             routeId: route?.id ?? null,
             routeParentId: route?.parent?.id ?? null,
+            badgeId: badge?.id ?? null,
+            badgeParentId: badge?.parent?.id ?? null,
         });
         for (const id of targets) shiftNode(await sceneById(id), dx, dy);
         s.meta = { ...s.meta, col: m.to.col, row: m.to.row };

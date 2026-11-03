@@ -1049,6 +1049,27 @@ ${logs.join(`
   var isStr = (v) => typeof v === "string";
   var isNum = (v) => typeof v === "number" && Number.isFinite(v);
   var strOrNull = (v) => v === null || isStr(v);
+  function parseBuildStatus(v) {
+    if (!isObj(v))
+      return null;
+    if (v.status === "not-built")
+      return { status: "not-built" };
+    if (!isStr(v.verifiedAt) || !strOrNull(v.commit))
+      return null;
+    if (v.status === "built") {
+      if (v.confidence !== "static" && v.confidence !== "runtime")
+        return null;
+      if (!strOrNull(v.notes))
+        return null;
+      return { status: "built", verifiedAt: v.verifiedAt, commit: v.commit, confidence: v.confidence, notes: v.notes };
+    }
+    if (v.status === "drift") {
+      if (!isStr(v.notes) || !v.notes)
+        return null;
+      return { status: "drift", verifiedAt: v.verifiedAt, commit: v.commit, notes: v.notes };
+    }
+    return null;
+  }
   function parse(raw) {
     if (!raw)
       return null;
@@ -1082,6 +1103,10 @@ ${logs.join(`
     if (!isStr(o.boardId) || !isNum(o.col) || !isNum(o.row) || !strOrNull(o.labelId) || !strOrNull(o.routeId))
       return null;
     if (o.groupId !== undefined && !strOrNull(o.groupId))
+      return null;
+    if (o.badgeId !== undefined && !strOrNull(o.badgeId))
+      return null;
+    if (o.build !== undefined && !parseBuildStatus(o.build))
       return null;
     return o;
   }
@@ -1122,19 +1147,58 @@ ${logs.join(`
     return { reactions: out, replaced: true };
   }
 
+  // plugin-src/screen-status.ts
+  var hex2 = (h) => ({ r: parseInt(h.slice(1, 3), 16) / 255, g: parseInt(h.slice(3, 5), 16) / 255, b: parseInt(h.slice(5, 7), 16) / 255 });
+  var BADGE_SPECS = {
+    built: { text: "Built", fill: hex2("#1F9D55"), textColor: hex2("#FFFFFF") },
+    drift: { text: "Drift", fill: hex2("#E5A50A"), textColor: hex2("#1A1A1A") },
+    "not-built": { text: "Not built", fill: hex2("#3A3A3C"), textColor: hex2("#A1A1A6") }
+  };
+  var badgeName = (name) => `Badge · ${name}`;
+  var MARKS = { built: "✓", drift: "~", "not-built": "·" };
+  var statusMark = (s) => MARKS[s];
+  var buildStatusOf = (build) => build ?? { status: "not-built" };
+  var optStr = (v) => typeof v === "string" && v.trim() ? v.trim() : null;
+  function statusFromInput(input, now) {
+    const commit = optStr(input.commit);
+    const notes = optStr(input.notes);
+    switch (input.status) {
+      case "not-built":
+        return { ok: true, value: { status: "not-built" } };
+      case "built": {
+        if (input.confidence !== "static" && input.confidence !== "runtime")
+          return { ok: false, error: 'built needs confidence: "static" or "runtime".' };
+        return { ok: true, value: { status: "built", verifiedAt: now, commit, confidence: input.confidence, notes } };
+      }
+      case "drift": {
+        if (!notes)
+          return { ok: false, error: "drift needs notes listing what differs." };
+        const value = { status: "drift", verifiedAt: now, commit, notes };
+        return parseBuildStatus(value) ? { ok: true, value } : { ok: false, error: "Invalid drift status." };
+      }
+      default:
+        return { ok: false, error: `Unknown status ${JSON.stringify(input.status)}. Use "built", "drift" or "not-built".` };
+    }
+  }
+  function badgePosition(frame, label, labelOffset, badge) {
+    const x = frame.x + frame.width - badge.width;
+    const y = label ? label.y + (label.height - badge.height) / 2 : frame.y - labelOffset;
+    return { x, y };
+  }
+
   // plugin-src/screen-group.ts
   var PREFIX = "Screen · ";
   var screenGroupName = (name) => `${PREFIX}${name}`;
   var isScreenGroupName = (name) => name.startsWith(PREFIX);
   function planGrouping(c) {
-    const memberIds = [c.frameId, ...c.routeId ? [c.routeId] : [], ...c.labelId ? [c.labelId] : []];
+    const memberIds = [c.frameId, ...c.routeId ? [c.routeId] : [], ...c.labelId ? [c.labelId] : [], ...c.badgeId ? [c.badgeId] : []];
     const members = new Set(memberIds);
     const { parent } = c;
     if (parent.type === "GROUP" && isScreenGroupName(parent.name)) {
       const inside = new Set(parent.childIds);
       if (parent.childIds.every((id) => members.has(id)) && memberIds.every((id) => inside.has(id)))
         return { kind: "already", groupId: parent.id };
-      return { kind: "conflict", reason: `${parent.name} (${parent.id}) does not hold exactly this screen's frame, label and route.` };
+      return { kind: "conflict", reason: `${parent.name} (${parent.id}) does not hold exactly this screen's frame, label, route and badge.` };
     }
     const at = parent.childIds.indexOf(c.frameId);
     const index = parent.childIds.slice(0, Math.max(0, at)).filter((id) => !members.has(id)).length;
@@ -1144,10 +1208,11 @@ ${logs.join(`
   function shiftTargets(s) {
     const grouped = !!s.groupId && s.frameParentId === s.groupId;
     if (!grouped)
-      return [s.frameId, ...s.labelId ? [s.labelId] : [], ...s.routeId ? [s.routeId] : []];
+      return [s.frameId, ...s.labelId ? [s.labelId] : [], ...s.routeId ? [s.routeId] : [], ...s.badgeId ? [s.badgeId] : []];
     const loose = [
       ...s.labelId && s.labelParentId !== s.groupId ? [s.labelId] : [],
-      ...s.routeId && s.routeParentId !== s.groupId ? [s.routeId] : []
+      ...s.routeId && s.routeParentId !== s.groupId ? [s.routeId] : [],
+      ...s.badgeId && s.badgeParentId !== s.groupId ? [s.badgeId] : []
     ];
     return [s.groupId, ...loose];
   }
@@ -1923,6 +1988,158 @@ ${logs.join(`
     return { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
   }
 
+  // plugin-src/badge.ts
+  var PAD_X = 8;
+  var HEIGHT = 20;
+  var FONT = { family: "Inter", style: "Medium" };
+  var FONT_SIZE = 11;
+  var writeScreen = (frame, meta) => frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+  function partsOf2(node) {
+    if (!node || node.type !== "GROUP")
+      return null;
+    const pill = node.children.find((k) => k.type === "RECTANGLE");
+    const text = node.children.find((k) => k.type === "TEXT");
+    return pill && text ? { group: node, pill, text } : null;
+  }
+  async function fontFor(label) {
+    const wanted = label?.type === "TEXT" && label.fontName !== figma.mixed ? label.fontName : FONT;
+    try {
+      await figma.loadFontAsync(wanted);
+      return wanted;
+    } catch {
+      await figma.loadFontAsync(FONT);
+      return FONT;
+    }
+  }
+  async function ensureBadge(frame, meta, build, labelOffset) {
+    const group = meta.groupId ? await sceneById(meta.groupId) : null;
+    if (!group || group.type !== "GROUP" || frame.parent?.id !== group.id)
+      throw new Error(`${frame.name} (${frame.id}) is not in its "Screen · …" group. Run group_screens first.`);
+    const label = meta.labelId ? await sceneById(meta.labelId) : null;
+    const spec = BADGE_SPECS[build.status];
+    const font = await fontFor(label);
+    let parts = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
+    if (!parts) {
+      const text = figma.createText();
+      text.fontName = font;
+      text.fontSize = FONT_SIZE;
+      text.textAutoResize = "WIDTH_AND_HEIGHT";
+      text.characters = spec.text;
+      const pill = figma.createRectangle();
+      pill.cornerRadius = HEIGHT / 2;
+      group.appendChild(pill);
+      group.appendChild(text);
+      const g = figma.group([pill, text], group);
+      parts = { group: g, pill, text };
+    }
+    const { pill, text } = parts;
+    await figma.loadFontAsync(text.fontName === figma.mixed ? font : text.fontName);
+    text.characters = spec.text;
+    text.fills = [{ type: "SOLID", color: spec.textColor }];
+    pill.fills = [{ type: "SOLID", color: spec.fill }];
+    const width = Math.ceil(text.width) + PAD_X * 2;
+    pill.resize(width, HEIGHT);
+    const at = badgePosition(rectOf(frame), label ? rectOf(label) : null, labelOffset, { width, height: HEIGHT });
+    const origin = rectOf(group);
+    const local = { x: group.x + (at.x - origin.x), y: group.y + (at.y - origin.y) };
+    pill.x = local.x;
+    pill.y = local.y;
+    text.x = local.x + PAD_X;
+    text.y = local.y + (HEIGHT - text.height) / 2;
+    parts.group.name = badgeName(frame.name);
+    group.appendChild(parts.group);
+    return parts.group;
+  }
+  async function screenFrame(id) {
+    const node = await sceneById(id);
+    if (!node)
+      return `No node ${id}.`;
+    if (node.type !== "FRAME")
+      return `${node.name} (${node.id}) is a ${node.type}, not a screen frame.`;
+    const meta = readMeta(node, SCREEN_KEY, parseScreenMeta);
+    if (!meta)
+      return `${node.name} (${node.id}) is not on an adopted board. Run adopt_board first.`;
+    return { frame: node, meta };
+  }
+  var setScreenStatus = async (args) => {
+    const raw = args.screens;
+    if (!Array.isArray(raw) || !raw.length)
+      return fail("set_screen_status needs screens: [{ id, status, confidence?, commit?, notes? }].");
+    const now = new Date().toISOString();
+    const done = [];
+    const errors = [];
+    const boards = new Map;
+    for (const item of raw) {
+      const e = typeof item === "object" && item !== null && !Array.isArray(item) ? item : {};
+      const id = typeof e.id === "string" ? e.id : "";
+      if (!id) {
+        errors.push({ id: null, error: "Each screen needs an id." });
+        continue;
+      }
+      const status = statusFromInput(e, now);
+      if (!status.ok) {
+        errors.push({ id, error: status.error });
+        continue;
+      }
+      const found = await screenFrame(id);
+      if (typeof found === "string") {
+        errors.push({ id, error: found });
+        continue;
+      }
+      const { frame, meta } = found;
+      try {
+        const board = boards.get(meta.boardId) ?? (await boardsFor({ boardId: meta.boardId }))[0];
+        if (!board)
+          throw new Error(`The board ${meta.boardId} is gone.`);
+        boards.set(meta.boardId, board);
+        const badge = await ensureBadge(frame, meta, status.value, board.meta.labelOffset);
+        writeScreen(frame, { ...meta, build: status.value, badgeId: badge.id });
+        done.push({ id: frame.id, name: frame.name, status: status.value.status, badgeId: badge.id });
+      } catch (error) {
+        errors.push({ id, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    for (const b of boards.values())
+      raiseArrows(b);
+    return ok({ updated: done, errors });
+  };
+  var badgeScreens = async (args) => {
+    const dryRun = bool(args, "dryRun", false);
+    const boards = await boardsFor(args);
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    const added = [];
+    const refreshed = [];
+    const skipped = [];
+    for (const board of boards) {
+      const parent = board.node.parent;
+      if (!parent || !("children" in parent))
+        continue;
+      for (const { frame, group } of collectScreens(parent.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (!meta || meta.boardId !== board.node.id)
+          continue;
+        if (!group || meta.groupId !== group.id) {
+          skipped.push({ id: frame.id, name: frame.name, reason: 'Not in its "Screen · …" group. Run group_screens first.' });
+          continue;
+        }
+        const has = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
+        const build = buildStatusOf(meta.build);
+        const row = { id: frame.id, name: frame.name, status: build.status };
+        if (dryRun) {
+          (has ? refreshed : added).push(row);
+          continue;
+        }
+        const badge = await ensureBadge(frame, meta, build, board.meta.labelOffset);
+        writeScreen(frame, { ...meta, build, badgeId: badge.id });
+        (has ? refreshed : added).push({ ...row, badgeId: badge.id });
+      }
+      if (!dryRun)
+        raiseArrows(board);
+    }
+    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, skipped });
+  };
+
   // plugin-src/util.ts
   var arbitrary = (value) => value.replace(/"/g, "'").replace(/,\s+/g, ",").replace(/\s+/g, "_");
   var NAMED = {
@@ -2361,6 +2578,7 @@ ${body}
     const w = Math.max(1, Math.floor(width));
     return text.length <= w ? text.padEnd(w) : `${text.slice(0, Math.max(0, w - 1))}…`.padEnd(w);
   }
+  var cellText = (s) => !s ? "" : s.status ? `${statusMark(s.status)} ${s.name}` : s.name;
   function renderGrid(screens, cols, rows, width) {
     if (!cols || !rows)
       return "";
@@ -2375,9 +2593,12 @@ ${body}
     const line = (label, cells) => `${label.padStart(head - 1).padEnd(head)}| ${cells.join(" | ")}`.trimEnd();
     const header = line("", Array.from({ length: cols }, (_, c) => fit(`c${c}`, w)));
     const rule = `${"-".repeat(head)}+${Array.from({ length: cols }, () => "-".repeat(w + 2)).join("+")}`;
-    const body = Array.from({ length: rows }, (_, r) => line(`r${r}`, Array.from({ length: cols }, (_, c) => fit(byCell.get(`${c},${r}`)?.name ?? "", w))));
+    const body = Array.from({ length: rows }, (_, r) => line(`r${r}`, Array.from({ length: cols }, (_, c) => fit(cellText(byCell.get(`${c},${r}`)), w))));
     return [header, rule, ...body].join(`
 `);
+  }
+  function statusRows(screens) {
+    return [...screens].sort((a, b) => a.row - b.row || a.col - b.col).map((s) => ({ id: s.id, name: s.name, col: s.col, row: s.row, route: s.route ?? null, status: s.status ?? "not-built", verifiedAt: s.verifiedAt ?? null }));
   }
   function renderBoard(input, width = 16) {
     const { screens, arrows, meta } = input;
@@ -2391,6 +2612,10 @@ ${body}
         issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
       if (s.labelX !== null && Math.abs(s.labelX - s.x) > LABEL_TOLERANCE)
         issues.push(`${s.name}: label is at x=${s.labelX} but the frame is at x=${s.x}`);
+      if (s.hasBadge === false)
+        issues.push(`${s.name}: no build badge (run badge_screens)`);
+      if (s.status === "built" && !s.route)
+        issues.push(`${s.name}: marked built but has no route text`);
     }
     const cellKeys = new Map;
     for (const s of screens)
@@ -2421,7 +2646,7 @@ ${body}
       if (from && to && to.col < from.col)
         issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
     }
-    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), arrows: lines, issues };
+    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, issues };
   }
 
   // plugin-src/describe.ts
@@ -2435,9 +2660,26 @@ ${body}
       const meta = readMeta(c, SCREEN_KEY, parseScreenMeta);
       if (!meta || meta.boardId !== board.node.id)
         continue;
-      const label = meta.labelId ? await sceneById(meta.labelId) : null;
+      const [label, route, badge] = await Promise.all([
+        meta.labelId ? sceneById(meta.labelId) : null,
+        meta.routeId ? sceneById(meta.routeId) : null,
+        meta.badgeId ? sceneById(meta.badgeId) : null
+      ]);
       const r = rectOf(c);
-      out.push({ id: c.id, name: c.name, col: meta.col, row: meta.row, x: r.x, y: r.y, labelX: label ? rectOf(label).x : null });
+      const build = buildStatusOf(meta.build);
+      out.push({
+        id: c.id,
+        name: c.name,
+        col: meta.col,
+        row: meta.row,
+        x: r.x,
+        y: r.y,
+        labelX: label ? rectOf(label).x : null,
+        status: build.status,
+        route: route?.type === "TEXT" ? route.characters.trim() || null : null,
+        verifiedAt: build.status === "not-built" ? null : build.verifiedAt,
+        hasBadge: !!badge
+      });
     }
     return out;
   }
@@ -2641,11 +2883,16 @@ ${body}
     const origin = rectOf2(src);
     const dx = target.x - origin.x;
     const dy = target.y - origin.y;
-    const [srcLabel, srcRoute] = await Promise.all([meta.labelId ? sceneById2(meta.labelId) : null, meta.routeId ? sceneById2(meta.routeId) : null]);
+    const [srcLabel, srcRoute, srcBadge] = await Promise.all([
+      meta.labelId ? sceneById2(meta.labelId) : null,
+      meta.routeId ? sceneById2(meta.routeId) : null,
+      meta.badgeId ? sceneById2(meta.badgeId) : null
+    ]);
     let copy;
     let label;
     let routeText;
     let groupCopy = null;
+    let badgeCopy = null;
     if (grouped && container && "children" in container) {
       groupCopy = grouped.clone();
       if (groupCopy.parent?.id !== container.id)
@@ -2661,6 +2908,7 @@ ${body}
       if (!frameTwin || frameTwin.type !== "FRAME")
         throw new Error(`Could not find the copied frame inside the cloned group of ${src.name}.`);
       copy = frameTwin;
+      badgeCopy = twin(srcBadge);
       const labelTwin = twin(srcLabel);
       const routeTwin = twin(srcRoute);
       label = labelTwin?.type === "TEXT" ? labelTwin : await cloneText(meta.labelId, dx, dy, labelName(name), name);
@@ -2683,8 +2931,21 @@ ${body}
     }
     copy.name = frameName(name);
     clearFlowData(groupCopy ?? copy);
-    const fresh = { v: 1, kind: "screen", boardId: meta.boardId, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, groupId: groupCopy?.id ?? null };
+    const fresh = {
+      v: 1,
+      kind: "screen",
+      boardId: meta.boardId,
+      col,
+      row,
+      labelId: label?.id ?? null,
+      routeId: routeText?.id ?? null,
+      groupId: groupCopy?.id ?? null,
+      build: { status: "not-built" },
+      badgeId: badgeCopy?.id ?? null
+    };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
+    if (badgeCopy && fresh.build)
+      await ensureBadge(copy, fresh, fresh.build, board.labelOffset);
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
     const bounds = rectOf2(boardNode);
     const grown = growBounds(bounds, [target, ...[label, routeText].flatMap((t) => t ? [rectOf2(t)] : [])], board.margin);
@@ -2695,7 +2956,7 @@ ${body}
       boardNode.y += grown.y - bounds.y;
       boardNode.resize(grown.width, grown.height);
     }
-    return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, bannerUpdated });
+    return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, badgeId: badgeCopy?.id ?? null, bannerUpdated });
   };
 
   // plugin-src/group-screens.ts
@@ -2708,7 +2969,11 @@ ${body}
       const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
       if (!meta || meta.boardId !== board.node.id)
         continue;
-      const [label, route] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+      const [label, route, badge] = await Promise.all([
+        meta.labelId ? sceneById(meta.labelId) : null,
+        meta.routeId ? sceneById(meta.routeId) : null,
+        meta.badgeId ? sceneById(meta.badgeId) : null
+      ]);
       if (!label)
         missingLabel.push(frame.id);
       const holder = frame.parent;
@@ -2721,6 +2986,7 @@ ${body}
         frameName: frame.name,
         labelId: label?.id ?? null,
         routeId: route?.id ?? null,
+        badgeId: badge?.id ?? null,
         parent: { id: holder.id, type: holder.type, name: "name" in holder ? holder.name : "", childIds: holder.children.map((k) => k.id) }
       });
       if (plan.kind === "conflict") {
@@ -2737,7 +3003,7 @@ ${body}
         out.push({ frameId: frame.id, name: frame.name, status: "grouped", groupId: null });
         continue;
       }
-      const nodes = plan.memberIds.map((id) => [frame, label, route].find((n) => n?.id === id)).filter((n) => !!n);
+      const nodes = plan.memberIds.map((id) => [frame, label, route, badge].find((n) => n?.id === id)).filter((n) => !!n);
       const group = figma.group(nodes, holder);
       group.name = plan.name;
       for (const n of nodes)
@@ -2836,7 +3102,7 @@ ${body}
   // plugin-src/gridtools.ts
   var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
   var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
-  var writeScreen = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+  var writeScreen2 = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
   async function loadScreens(board) {
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
@@ -2858,18 +3124,24 @@ ${body}
           screens.push({ node: c, meta: stored });
         } else {
           const meta = { ...stored, groupId };
-          writeScreen(c, meta);
+          writeScreen2(c, meta);
           screens.push({ node: c, meta });
         }
         continue;
       }
       const cell = cellOf(rect, board.meta);
-      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId };
-      writeScreen(c, meta);
+      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...await ownBadge(stored, groupId) };
+      writeScreen2(c, meta);
       stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
       screens.push({ node: c, meta });
     }
     return { screens, stale };
+  }
+  async function ownBadge(stored, groupId) {
+    const badge = stored.badgeId ? await sceneById(stored.badgeId) : null;
+    if (badge && groupId && badge.parent?.id === groupId)
+      return { badgeId: stored.badgeId ?? null, build: stored.build };
+    return { badgeId: null, build: { status: "not-built" } };
   }
   var cellsOf = (screens) => screens.map((s) => ({ id: s.node.id, col: s.meta.col, row: s.meta.row }));
   function shiftNode(node, dx, dy) {
@@ -2888,7 +3160,11 @@ ${body}
       const have = rectOf(s.node);
       const dx = want.x - have.x;
       const dy = want.y - have.y;
-      const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
+      const [label, route, badge] = await Promise.all([
+        s.meta.labelId ? sceneById(s.meta.labelId) : null,
+        s.meta.routeId ? sceneById(s.meta.routeId) : null,
+        s.meta.badgeId ? sceneById(s.meta.badgeId) : null
+      ]);
       const targets = shiftTargets({
         frameId: s.node.id,
         groupId: s.meta.groupId,
@@ -2896,12 +3172,14 @@ ${body}
         labelId: label?.id ?? null,
         labelParentId: label?.parent?.id ?? null,
         routeId: route?.id ?? null,
-        routeParentId: route?.parent?.id ?? null
+        routeParentId: route?.parent?.id ?? null,
+        badgeId: badge?.id ?? null,
+        badgeParentId: badge?.parent?.id ?? null
       });
       for (const id of targets)
         shiftNode(await sceneById(id), dx, dy);
       s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
-      writeScreen(s.node, s.meta);
+      writeScreen2(s.node, s.meta);
       out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
     }
     return out;
@@ -2974,7 +3252,7 @@ ${body}
     const { screens, stale } = await loadScreens(board);
     return finish(board, screens, stale, compactPlan(cellsOf(screens)), true);
   };
-  async function fontFor(text) {
+  async function fontFor2(text) {
     const current = text.fontName;
     const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
     for (const font of candidates) {
@@ -3046,8 +3324,8 @@ ${body}
     const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
     const heading = headingStyle ? headingStyle.clone() : figma.createText();
     page.appendChild(heading);
-    await figma.loadFontAsync(await fontFor(heading));
-    heading.fontName = await fontFor(heading);
+    await figma.loadFontAsync(await fontFor2(heading));
+    heading.fontName = await fontFor2(heading);
     if (!headingStyle) {
       heading.fontSize = 48;
       heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
@@ -3106,12 +3384,14 @@ ${body}
     insert_rows: insertRows,
     compact_board: compactBoard,
     duplicate_screen: duplicateScreen,
-    group_screens: groupScreens
+    group_screens: groupScreens,
+    set_screen_status: setScreenStatus,
+    badge_screens: badgeScreens
   };
   figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "f325904f" });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "64d7e5a4" });
       return;
     }
     if (msg.type !== "command")
@@ -3119,7 +3399,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"f325904f"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"64d7e5a4"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

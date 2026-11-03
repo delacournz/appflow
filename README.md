@@ -26,10 +26,14 @@ Most tools take an optional `nodeId` (`193:443` or `193-443`). Without one they 
 | `use_figma` | Runs Plugin API JavaScript. It returns the returned value and `console.log` lines. |
 | `html_to_figma` | Renders HTML in the plugin window and rebuilds it as frames, text, SVG and images. |
 | `generate_diagram` | Mermaid flowcharts: shapes and connectors in FigJam, frames and arrows in design files. |
+| `set_screen_status` | Records whether flow-board screens are built (`built` / `drift` / `not-built`) and shows a Built, Drift or Not built badge above each screen. Follow the `verify-built` skill first. |
+| `badge_screens` | Adds or refreshes the build badge on every grouped screen of a board. |
 | `get_context_for_code_connect` | Properties, variants, nested instances and text layers of a component. |
 | `get_code_connect_suggestions` / `get_code_connect_map` / `add_code_connect_map` / `send_code_connect_mappings` | Code Connect mappings, stored locally in `~/.appflow/code-connect.json`. They are not synced with Figma's Code Connect. |
 
-Prompt: `create_design_system_rules` (arguments `clientLanguages` and `clientFrameworks`).
+Prompts: `create_design_system_rules` (arguments `clientLanguages` and `clientFrameworks`), `flow_layout` and `verify_built`.
+
+Skills (MCP resources): `skill://appflow/flow-layout/SKILL.md` and `skill://appflow/verify-built/SKILL.md`. The verify skill checks each screen's route code and the running app against its frame, then calls `set_screen_status`.
 
 ### Not available locally
 

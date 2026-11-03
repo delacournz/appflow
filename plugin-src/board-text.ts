@@ -1,8 +1,25 @@
-import { cellOfRect, type ArrowMeta, type BoardMeta } from './flowmeta';
+import { cellOfRect, type ArrowMeta, type BoardMeta, type BuildState } from './flowmeta';
+import { statusMark } from './screen-status';
 
 /** Pure text renderer for an adopted flow board. No `figma` global. */
 
-export type BoardScreen = { id: string; name: string; col: number; row: number; x: number; y: number; labelX: number | null };
+export type BoardScreen = {
+    id: string;
+    name: string;
+    col: number;
+    row: number;
+    x: number;
+    y: number;
+    labelX: number | null;
+    /** Build status; when absent the grid shows no mark. */
+    status?: BuildState;
+    /** The route text (code path), or null when the screen has none. */
+    route?: string | null;
+    verifiedAt?: string | null;
+    hasBadge?: boolean;
+};
+
+export type ScreenStatusRow = { id: string; name: string; col: number; row: number; route: string | null; status: BuildState; verifiedAt: string | null };
 
 export type BoardArrow = {
     from: string;
@@ -27,6 +44,7 @@ export type BoardDescription = {
     cols: number;
     rows: number;
     grid: string;
+    screens: ScreenStatusRow[];
     arrows: string[];
     issues: string[];
 };
@@ -40,6 +58,8 @@ function fit(text: string, width: number): string {
     return text.length <= w ? text.padEnd(w) : `${text.slice(0, Math.max(0, w - 1))}…`.padEnd(w);
 }
 
+const cellText = (s: BoardScreen | undefined): string => (!s ? '' : s.status ? `${statusMark(s.status)} ${s.name}` : s.name);
+
 function renderGrid(screens: readonly BoardScreen[], cols: number, rows: number, width: number): string {
     if (!cols || !rows) return '';
     const byCell = new Map<string, BoardScreen>();
@@ -52,8 +72,14 @@ function renderGrid(screens: readonly BoardScreen[], cols: number, rows: number,
     const line = (label: string, cells: string[]) => `${label.padStart(head - 1).padEnd(head)}| ${cells.join(' | ')}`.trimEnd();
     const header = line('', Array.from({ length: cols }, (_, c) => fit(`c${c}`, w)));
     const rule = `${'-'.repeat(head)}+${Array.from({ length: cols }, () => '-'.repeat(w + 2)).join('+')}`;
-    const body = Array.from({ length: rows }, (_, r) => line(`r${r}`, Array.from({ length: cols }, (_, c) => fit(byCell.get(`${c},${r}`)?.name ?? '', w))));
+    const body = Array.from({ length: rows }, (_, r) => line(`r${r}`, Array.from({ length: cols }, (_, c) => fit(cellText(byCell.get(`${c},${r}`)), w))));
     return [header, rule, ...body].join('\n');
+}
+
+function statusRows(screens: readonly BoardScreen[]): ScreenStatusRow[] {
+    return [...screens]
+        .sort((a, b) => a.row - b.row || a.col - b.col)
+        .map((s) => ({ id: s.id, name: s.name, col: s.col, row: s.row, route: s.route ?? null, status: s.status ?? 'not-built', verifiedAt: s.verifiedAt ?? null }));
 }
 
 export function renderBoard(input: BoardInput, width = 16): BoardDescription {
@@ -67,6 +93,8 @@ export function renderBoard(input: BoardInput, width = 16): BoardDescription {
         const actual = cellOfRect(s, meta);
         if (actual.col !== s.col || actual.row !== s.row) issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
         if (s.labelX !== null && Math.abs(s.labelX - s.x) > LABEL_TOLERANCE) issues.push(`${s.name}: label is at x=${s.labelX} but the frame is at x=${s.x}`);
+        if (s.hasBadge === false) issues.push(`${s.name}: no build badge (run badge_screens)`);
+        if (s.status === 'built' && !s.route) issues.push(`${s.name}: marked built but has no route text`);
     }
 
     const cellKeys = new Map<string, BoardScreen[]>();
@@ -96,5 +124,5 @@ export function renderBoard(input: BoardInput, width = 16): BoardDescription {
         if (from && to && to.col < from.col) issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
     }
 
-    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), arrows: lines, issues };
+    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, issues };
 }

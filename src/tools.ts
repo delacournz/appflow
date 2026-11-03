@@ -333,7 +333,7 @@ export const TOOLS: ToolDef[] = [
     ),
     passthrough(
         'describe_board',
-        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, arrows, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale label meta, two screens in one cell, arrows with missing endpoints and arrows pointing left. Without boardId it covers every adopted board on the current page.',
+        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, screens, arrows, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), each prefixed with its build mark (✓ built, ~ drift, · not built); screens lists { id, name, col, row, route, status, verifiedAt } for the verify-built skill; arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale label meta, two screens in one cell, arrows with missing endpoints arrows pointing left, screens with no build badge and built screens with no route text. Without boardId it covers every adopted board on the current page.',
         obj({
             boardId: { type: 'string', description: 'Board node ID. Default: every adopted board on the current page.' },
             width: { type: 'number', description: 'Characters per grid cell before a screen name is truncated. Default 16.' },
@@ -341,7 +341,7 @@ export const TOOLS: ToolDef[] = [
     ),
     passthrough(
         'duplicate_screen',
-        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a \"Screen · …\" group, clones the whole group as a sibling of the source group), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
+        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a \"Screen · …\" group, clones the whole group as a sibling of the source group), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. The copy’s build badge resets to Not built. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
         obj(
             {
                 id: { type: 'string', description: 'The screen frame to duplicate.' },
@@ -366,10 +366,44 @@ export const TOOLS: ToolDef[] = [
     ),
     passthrough(
         'group_screens',
-        'Group each adopted screen\'s label text, route text and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
+        'Group each adopted screen\'s label text, route text, build badge and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
         obj({
             boardId: { type: 'string', description: 'Board node ID. Default: every adopted board on the current page.' },
             dryRun: { type: 'boolean', description: 'Report what would be grouped without changing the file. Default false.' },
+        }),
+        120_000,
+    ),
+    passthrough(
+        'set_screen_status',
+        'Record whether screens are built in code and show it as a "Badge · {name}" pill (Built green, Drift amber, Not built grey) inside each "Screen · …" group, right-aligned with the frame on the label line. Follow skill://appflow/verify-built/SKILL.md first: only mark built after comparing the route\'s code and the running app with the frame. built needs confidence ("runtime" when checked in the running app, "static" when only the code was compared); drift needs notes listing what differs. Batch every screen into one call. Screens must be grouped (run group_screens). Returns { updated: [{ id, name, status, badgeId }], errors: [{ id, error }] }.',
+        obj(
+            {
+                screens: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            id: { type: 'string', description: 'Screen frame ID.' },
+                            status: { type: 'string', enum: ['built', 'drift', 'not-built'] },
+                            confidence: { type: 'string', enum: ['static', 'runtime'], description: 'Required for built.' },
+                            commit: { type: 'string', description: 'Short git SHA the check ran against.' },
+                            notes: { type: 'string', description: 'Required for drift: what differs. Optional for built (e.g. why only static).' },
+                        },
+                        required: ['id', 'status'],
+                        additionalProperties: false,
+                    },
+                },
+            },
+            ['screens'],
+        ),
+        120_000,
+    ),
+    passthrough(
+        'badge_screens',
+        'Add or refresh the build badge on every adopted, grouped screen, showing its stored status (Not built when none). Idempotent; run once on existing boards and after group_screens. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, skipped: [{ id, name, reason }] }.',
+        obj({
+            boardId: { type: 'string', description: 'Board node ID. Default: every adopted board on the current page.' },
+            dryRun: { type: 'boolean', description: 'Report what would change without editing the file. Default false.' },
         }),
         120_000,
     ),
