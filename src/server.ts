@@ -3,17 +3,19 @@
  * "AppFlow" Figma plugin over a WebSocket on 127.0.0.1. Several sessions
  * share the port: see bridge.ts.
  *
- * stdout carries only JSON-RPC. Everything else is logged to stderr.
+ * stdout carries only MCP messages (via the SDK's stdio transport).
+ * Everything else is logged to stderr.
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
+
 import { startBridge } from './bridge';
 import { readExpectedBuild, stalePlugin, STALE_FIX } from './build';
-import { handleRequest, type RpcRequest } from './rpc';
+import { createServer } from './mcp';
 import { CodeConnectStore } from './store';
 import type { ToolContext } from './tools';
-
 const PORT = Number(process.env.APPFLOW_PORT ?? process.env.FIGMA_BRIDGE_PORT ?? 3055);
 const HOME = process.env.APPFLOW_HOME ?? process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.appflow');
 const log = (...parts: unknown[]) => console.error('[appflow]', ...parts);
@@ -43,35 +45,19 @@ const ctx: ToolContext = {
     pluginBuild: bridge.pluginBuild,
 };
 
-const write = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`);
+const handle = serveStdio(() => createServer(ctx), { onerror: (error) => log('mcp:', error.message) });
 
-async function onLine(line: string) {
-    if (line.trim() === '') return;
-    let req: RpcRequest;
-    try {
-        req = JSON.parse(line) as RpcRequest;
-    } catch {
-        write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
-        return;
-    }
-    const res = await handleRequest(req, ctx);
-    if (res) write(res);
+let stopping = false;
+/** Ends the MCP connection and frees the plugin port. Runs once, on stdin EOF or a signal. */
+async function shutdown() {
+    if (stopping) return;
+    stopping = true;
+    await handle.close().catch((error: unknown) => log('close:', error));
+    bridge.stop();
+    process.exit(0);
 }
 
-const inFlight = new Set<Promise<void>>();
-let buffer = '';
-const decoder = new TextDecoder();
-for await (const chunk of Bun.stdin.stream()) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let newline = buffer.indexOf('\n');
-    while (newline !== -1) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        const job = onLine(line).finally(() => inFlight.delete(job));
-        inFlight.add(job);
-        newline = buffer.indexOf('\n');
-    }
-}
-await Promise.allSettled([...inFlight]);
-bridge.stop();
-process.exit(0);
+process.stdin.on('end', shutdown);
+process.stdin.on('close', shutdown);
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
