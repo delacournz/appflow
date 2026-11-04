@@ -5,12 +5,12 @@ import { join } from 'node:path';
 
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 
-import type { JsonObject, PluginReply } from '../shared/protocol';
+import type { FileInfo, JsonObject, PluginReply } from '../shared/protocol';
 import { createServer } from './mcp';
 import { CodeConnectStore } from './store';
 import { callTool, type ToolContext } from './tools';
 
-type Call = { tool: string; args: JsonObject; timeoutMs: number };
+type Call = { tool: string; args: JsonObject; timeoutMs: number; connId?: string };
 type Content = { type: string; text?: string; data?: string; mimeType?: string };
 type ToolResult = { content: Content[]; isError?: boolean };
 type ListedTool = { name: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } };
@@ -26,13 +26,20 @@ afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
 });
 
-function ctx(replies: Record<string, PluginReply>, connected = true): ToolContext & { calls: Call[] } {
+const fileInfo = (over: Partial<FileInfo>): FileInfo => ({ connId: 'c1', fileKey: 'K1', docId: 'd1', fileName: 'File', editorType: 'figma', build: null, connectedAt: 1, lastActiveAt: 1, ...over });
+const FILE_A = fileInfo({ connId: 'ca', fileKey: 'KA', docId: 'da', fileName: 'Wallet app' });
+const FILE_B = fileInfo({ connId: 'cb', fileKey: 'KB', docId: 'db', fileName: 'Wallet marketing' });
+
+/** A fake context. `connected` true means one open file; pass a list for several. */
+function ctx(replies: Record<string, PluginReply>, connected: boolean | FileInfo[] = true): ToolContext & { calls: Call[] } {
     const calls: Call[] = [];
+    const files = connected === true ? [fileInfo({})] : connected === false ? [] : connected;
     return {
         calls,
-        connected: () => connected,
-        plugin: async (tool, args, timeoutMs) => {
-            calls.push({ tool, args, timeoutMs });
+        files: () => files,
+        session: { pinned: null },
+        plugin: async (tool, args, timeoutMs, connId) => {
+            calls.push({ tool, args, timeoutMs, ...(connId === undefined ? {} : { connId }) });
             return replies[tool] ?? { ok: false, error: `no fake for ${tool}` };
         },
         store: new CodeConnectStore(join(dir, 'code-connect.json')),
@@ -180,7 +187,7 @@ describe('tools', () => {
     test('use_figma returns the result and logs', async () => {
         const c = ctx({ use_figma: { ok: true, result: { count: 2 }, logs: ['hello'] } });
         const r = await call('use_figma', { code: 'return 1', timeoutMs: 5000 }, c);
-        expect(c.calls[0]).toEqual({ tool: 'use_figma', args: { code: 'return 1', timeoutMs: 5000 }, timeoutMs: 5000 });
+        expect(c.calls[0]).toEqual({ tool: 'use_figma', args: { code: 'return 1', timeoutMs: 5000 }, timeoutMs: 5000, connId: 'c1' });
         expect(json(r)).toEqual({ result: { count: 2 }, logs: ['hello'] });
     });
 
@@ -279,12 +286,12 @@ describe('screenshot targets and build handshake', () => {
     });
 
     test('figma_status reports stale when the plugin build differs', async () => {
-        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }), expectedBuild: 'new11111', pluginBuild: () => 'old22222' };
+        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }, [fileInfo({ build: 'old22222' })]), expectedBuild: 'new11111' };
         expect(json(await call('figma_status', {}, c))).toMatchObject({ connected: true, stale: true, fix: 'Re-run Plugins → Development → AppFlow', expectedBuild: 'new11111', pluginBuild: 'old22222' });
     });
 
     test('figma_status has no stale flag when builds match', async () => {
-        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }), expectedBuild: 'same', pluginBuild: () => 'same' };
+        const c = { ...ctx({ figma_status: { ok: true, result: { file: 'x' } } }, [fileInfo({ build: 'same' })]), expectedBuild: 'same' };
         expect(json(await call('figma_status', {}, c)).stale).toBeUndefined();
     });
 
@@ -294,12 +301,86 @@ describe('screenshot targets and build handshake', () => {
     });
 });
 
+describe('several files', () => {
+    const two = (replies: Record<string, PluginReply> = { use_figma: { ok: true, result: 1 } }) => ctx(replies, [FILE_A, FILE_B]);
+
+    test('every tool that talks to the plugin takes an optional file', async () => {
+        const tools = await listTools();
+        for (const t of tools.filter((x) => x.name !== 'list_files')) {
+            expect(t.inputSchema.properties).toHaveProperty('file');
+            expect(t.inputSchema.required ?? []).not.toContain('file');
+        }
+        expect(tools.map((t) => t.name)).toEqual(expect.arrayContaining(['list_files', 'select_file']));
+    });
+
+    test('a call that names no file is refused and lists the files', async () => {
+        const c = two();
+        const r = await call('use_figma', { code: 'x' }, c);
+        expect(r.isError).toBe(true);
+        expect(r.content[0]?.text).toContain('Wallet app');
+        expect(r.content[0]?.text).toContain('Wallet marketing');
+        expect(r.content[0]?.text).toContain('select_file');
+        expect(c.calls).toEqual([]);
+    });
+
+    test('file routes the call and is not forwarded to the plugin', async () => {
+        const c = two();
+        await call('use_figma', { code: 'x', file: 'https://www.figma.com/design/KB/Marketing?node-id=1-2' }, c);
+        expect(c.calls).toEqual([{ tool: 'use_figma', args: { code: 'x' }, timeoutMs: 60_000, connId: 'cb' }]);
+    });
+
+    test('an unknown file is refused', async () => {
+        const r = await call('use_figma', { code: 'x', file: 'Nope' }, two());
+        expect(r.isError).toBe(true);
+    });
+
+    test('select_file pins the session; file still wins; no file clears the pin', async () => {
+        const c = two();
+        expect(json(await call('select_file', { file: 'Wallet app' }, c))).toMatchObject({ pinned: { fileName: 'Wallet app', fileKey: 'KA' } });
+        await call('use_figma', { code: 'a' }, c);
+        await call('use_figma', { code: 'b', file: 'KB' }, c);
+        expect(c.calls.map((x) => x.connId)).toEqual(['ca', 'cb']);
+        expect(json(await call('select_file', {}, c))).toMatchObject({ pinned: null });
+        expect((await call('use_figma', { code: 'c' }, c)).isError).toBe(true);
+    });
+
+    test('select_file refuses an ambiguous name', async () => {
+        const r = await call('select_file', { file: 'wallet' }, two());
+        expect(r.isError).toBe(true);
+    });
+
+    test('list_files works without the plugin and shows the pin', async () => {
+        const c = two();
+        c.session.pinned = { fileKey: 'KB', docId: 'db', fileName: 'Wallet marketing' };
+        const r = json(await call('list_files', {}, c));
+        expect(r.files.map((f: { fileName: string }) => f.fileName)).toEqual(['Wallet app', 'Wallet marketing']);
+        expect(r.pinned).toMatchObject({ fileName: 'Wallet marketing' });
+        expect(json(await call('list_files', {}, ctx({}, false)))).toEqual({ files: [], pinned: null });
+    });
+
+    test('figma_status lists the files instead of failing when none is chosen', async () => {
+        const r = await call('figma_status', {}, two());
+        expect(r.isError).toBeUndefined();
+        const body = json(r);
+        expect(body).toMatchObject({ connected: true, file: null });
+        expect(body.files).toHaveLength(2);
+        expect(body.note).toContain('Several Figma files');
+    });
+
+    test('figma_status for a named file uses that file and its build', async () => {
+        const c = { ...two({ figma_status: { ok: true, result: { pages: [] } } }), expectedBuild: 'new' };
+        const body = json(await call('figma_status', { file: 'KA' }, c));
+        expect(body).toMatchObject({ connected: true, file: { fileName: 'Wallet app' }, pages: [] });
+        expect(c.calls[0]?.connId).toBe('ca');
+    });
+});
+
 describe('duplicate_screen', () => {
     test('is listed with its required args and forwards to the plugin', async () => {
         const tools = await listTools();
         const t = tools.find((x) => x.name === 'duplicate_screen');
         expect(t?.inputSchema.required).toEqual(['id', 'col', 'row', 'name']);
-        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'banner']);
+        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'banner', 'file']);
         const c = ctx({ duplicate_screen: { ok: true, result: { id: '9:9', bannerUpdated: true } } });
         expect(json(await call('duplicate_screen', { id: '1:1', col: 2, row: 0, name: 'X' }, c))).toEqual({ id: '9:9', bannerUpdated: true });
         expect(c.calls.map((x) => x.tool)).toEqual(['duplicate_screen']);
@@ -311,7 +392,7 @@ describe('board grid tools', () => {
         const tools = await listTools();
         const by = (n: string) => tools.find((t) => t.name === n);
         expect(by('create_board')?.inputSchema.required).toEqual(['name']);
-        expect(Object.keys(by('create_board')?.inputSchema.properties ?? {})).toEqual(['name', 'x', 'y', 'colWidth', 'rowHeight', 'screenW', 'screenH', 'cols', 'rows']);
+        expect(Object.keys(by('create_board')?.inputSchema.properties ?? {})).toEqual(['name', 'x', 'y', 'colWidth', 'rowHeight', 'screenW', 'screenH', 'cols', 'rows', 'file']);
         expect(by('move_screen')?.inputSchema.required).toEqual(['id', 'col', 'row']);
         expect(by('move_screen')?.inputSchema.properties).toHaveProperty('swap');
         expect(by('insert_columns')?.inputSchema.required).toEqual(['boardId', 'after']);
@@ -342,7 +423,7 @@ describe('flow tools', () => {
         const tools = await listTools();
         const by = (n: string) => tools.find((t) => t.name === n);
         expect(by('connect')?.inputSchema.required).toEqual(['from', 'to', 'label']);
-        expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId', 'exit']);
+        expect(Object.keys(by('connect')?.inputSchema.properties ?? {})).toEqual(['from', 'to', 'trigger', 'label', 'prototype', 'boardId', 'exit', 'file']);
         expect(by('reroute_flow')?.inputSchema.properties).toHaveProperty('arrowIds');
         expect(by('adopt_board')?.inputSchema.required).toEqual(['boardNodeId']);
         expect(by('adopt_board')?.inputSchema.properties).toHaveProperty('dryRun');
@@ -351,7 +432,7 @@ describe('flow tools', () => {
     test('describe_board is listed with optional boardId and width', async () => {
         const tools = await listTools();
         const t = tools.find((x) => x.name === 'describe_board');
-        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['boardId', 'width']);
+        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['boardId', 'width', 'file']);
         expect(t?.inputSchema.required ?? []).toEqual([]);
     });
 

@@ -247,8 +247,14 @@
     if (!msg || !socket || socket.readyState !== WebSocket.OPEN)
       return;
     if (msg.type === "hello") {
-      socket.send(JSON.stringify({ hello: { fileName: msg.fileName, editorType: msg.editorType, build: msg.build } }));
+      const hello = { hello: { fileName: msg.fileName, editorType: msg.editorType, build: msg.build, fileKey: msg.fileKey, docId: msg.docId } };
+      socket.send(JSON.stringify(hello));
       setState(true, `Connected · ${msg.fileName}`);
+      return;
+    }
+    if (msg.type === "activity") {
+      const activity = { activity: true };
+      socket.send(JSON.stringify(activity));
       return;
     }
     const r = msg.reply;

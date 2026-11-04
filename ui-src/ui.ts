@@ -1,4 +1,4 @@
-import type { Base64File, JsonObject, JsonValue, PluginReply, ServerMessage } from '../shared/protocol';
+import type { Base64File, ClientMessage, JsonObject, JsonValue, PluginReply, ServerMessage } from '../shared/protocol';
 import { measureHtml } from './measure';
 
 /**
@@ -11,7 +11,10 @@ type MainFile = { name: string; mime: string; bytes: Uint8Array };
 type MainReply =
     | { ok: true; result: JsonValue; logs?: string[]; images?: Uint8Array[]; files?: MainFile[] }
     | { ok: false; error: string };
-type MainMessage = { type: 'hello'; fileName: string; editorType: string; build: string } | { type: 'reply'; id: string; reply: MainReply };
+type MainMessage =
+    | { type: 'hello'; fileName: string; editorType: string; build: string; fileKey: string | null; docId: string }
+    | { type: 'activity' }
+    | { type: 'reply'; id: string; reply: MainReply };
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const dot = $('dot');
@@ -88,8 +91,14 @@ window.onmessage = (event: MessageEvent<{ pluginMessage?: MainMessage }>) => {
     const msg = event.data.pluginMessage;
     if (!msg || !socket || socket.readyState !== WebSocket.OPEN) return;
     if (msg.type === 'hello') {
-        socket.send(JSON.stringify({ hello: { fileName: msg.fileName, editorType: msg.editorType, build: msg.build } }));
+        const hello: ClientMessage = { hello: { fileName: msg.fileName, editorType: msg.editorType, build: msg.build, fileKey: msg.fileKey, docId: msg.docId } };
+        socket.send(JSON.stringify(hello));
         setState(true, `Connected · ${msg.fileName}`);
+        return;
+    }
+    if (msg.type === 'activity') {
+        const activity: ClientMessage = { activity: true };
+        socket.send(JSON.stringify(activity));
         return;
     }
     const r = msg.reply;

@@ -3,8 +3,9 @@ import { basename, extname, join } from 'node:path';
 
 import * as z from 'zod/v4';
 
-import type { JsonObject, JsonValue, PluginReply } from '../shared/protocol';
+import type { FileInfo, JsonObject, JsonValue, PluginReply } from '../shared/protocol';
 import { STALE_FIX, stalePlugin } from './build';
+import { pinOf, resolveFile, summarize, type Pin } from './files';
 import { CONFIG_FILE, loadDesignConfig, readCodeSpec } from './sync/config';
 import { isComponentOp, isTextStyleOp, isTokenOp, type SyncOp } from '../shared/design-ops';
 import type { DesignSpec } from '../shared/design-spec';
@@ -14,14 +15,16 @@ import { summarizePlan } from './sync/summary';
 import type { CodeConnectEntry, CodeConnectStore } from './store';
 
 export type ToolContext = {
-    connected(): boolean;
-    plugin(tool: string, args: JsonObject, timeoutMs: number): Promise<PluginReply>;
+    /** Every connected plugin window, one per Figma file. */
+    files(): FileInfo[];
+    /** Sends a command to the plugin window `connId` (the only one when omitted). */
+    plugin(tool: string, args: JsonObject, timeoutMs: number, connId?: string): Promise<PluginReply>;
+    /** Per agent session: the file select_file pinned. */
+    session: { pinned: Pin | null };
     store: CodeConnectStore;
     downloadDir: string;
     /** Hash of the plugin build the server expects (plugin/build.json). */
     expectedBuild?: string | null;
-    /** Hash the connected plugin reported in its hello. */
-    pluginBuild?(): string | null;
 };
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' };
@@ -32,8 +35,8 @@ type ToolSpec<S extends ObjectSchema> = {
     name: string;
     description: string;
     inputSchema: S;
-    /** Runs even when the plugin is not connected. */
-    offline?: boolean;
+    /** Runs even when no plugin is connected and picks its own file: runTool neither resolves nor strips `file`. */
+    local?: boolean;
     run(args: z.output<S>, ctx: ToolContext): Promise<ToolResult>;
 };
 
@@ -63,6 +66,10 @@ async function plugin(ctx: ToolContext, name: string, args: JsonObject, ms = tim
     return reply;
 }
 
+const fileArg = z
+    .string()
+    .describe('Which open Figma file: its fileKey, a figma.com URL, or its name. Needed only when several files run AppFlow and none is pinned with select_file.')
+    .optional();
 const nodeId = z.string().describe('Node ID such as "193:443" (a "193-443" from a URL also works). Defaults to the current selection.').optional();
 const boardIdAll = z.string().describe('Board node ID. Default: every adopted board on the current page.').optional();
 const obj = <T extends z.ZodRawShape>(shape: T) => z.strictObject(shape);
@@ -181,21 +188,50 @@ const syncArgs = (what: string) =>
         verbose: bool(VERBOSE).optional(),
     });
 
-export const TOOLS: ToolDef[] = [
+const RAW_TOOLS: ToolDef[] = [
     tool({
         name: 'figma_status',
-        description: 'Whether the AppFlow plugin is connected, plus the open file, pages and selection. Call this first.',
-        inputSchema: obj({}),
-        offline: true,
-        async run(_args, ctx) {
-            if (!ctx.connected()) {
+        description: 'Whether the AppFlow plugin is connected, plus the open file, pages and selection. Call this first. With several files open, lists them; pass file or pin one with select_file.',
+        inputSchema: obj({ file: fileArg }),
+        local: true,
+        async run(args, ctx) {
+            const files = ctx.files();
+            if (files.length === 0) {
                 return asJson({ connected: false, howToConnect: 'Open the file in the Figma desktop app and run Plugins → Development → AppFlow.' });
             }
-            const r = await plugin(ctx, 'figma_status', {});
+            const pinned = ctx.session.pinned;
+            const all = files.length > 1 ? { files: files.map(summarize) } : {};
+            const picked = resolveFile(files, args.file, pinned);
+            if (!picked.ok) return asJson({ connected: true, file: null, pinned, ...all, note: picked.error });
+            const f = picked.file;
+            const reply = await ctx.plugin('figma_status', {}, DEFAULT_TIMEOUT_MS, f.connId);
+            if (!reply.ok) throw new ToolError(reply.error);
             const expected = ctx.expectedBuild ?? null;
-            const actual = ctx.pluginBuild?.() ?? null;
-            const stale = stalePlugin(expected, actual) ? { stale: true, fix: STALE_FIX, expectedBuild: expected, pluginBuild: actual } : {};
-            return asJson({ connected: true, ...stale, ...(r.result as JsonObject) });
+            const stale = stalePlugin(expected, f.build) ? { stale: true, fix: STALE_FIX, expectedBuild: expected, pluginBuild: f.build } : {};
+            return asJson({ connected: true, ...stale, file: summarize(f), pinned, ...all, ...(reply.result as JsonObject) });
+        },
+    }),
+    tool({
+        name: 'list_files',
+        description: 'The Figma files running AppFlow right now (name, fileKey, docId, editor, last activity) and the file this session pinned.',
+        inputSchema: obj({}),
+        local: true,
+        run: async (_args, ctx) => asJson({ files: ctx.files().map(summarize), pinned: ctx.session.pinned }),
+    }),
+    tool({
+        name: 'select_file',
+        description: 'Pin the Figma file this session works on, so later calls need no file argument. A call’s own file still wins. Omit file to clear the pin.',
+        inputSchema: obj({ file: str('The fileKey, a figma.com URL, or the file name.').optional() }),
+        local: true,
+        async run(args, ctx) {
+            if (args.file === undefined) {
+                ctx.session.pinned = null;
+                return asJson({ pinned: null });
+            }
+            const picked = resolveFile(ctx.files(), args.file, null);
+            if (!picked.ok) throw new ToolError(picked.error);
+            ctx.session.pinned = pinOf(picked.file);
+            return asJson({ pinned: ctx.session.pinned, file: summarize(picked.file) });
         },
     }),
     passthrough('whoami', 'The signed-in Figma user (name, id) and the open file. Plans and seats are not visible to a plugin.', obj({})),
@@ -624,11 +660,27 @@ export const TOOLS: ToolDef[] = [
     }),
 ];
 
-/** Runs a tool, refusing with a clear message when it needs the plugin and the plugin is closed. */
+/** Adds the optional `file` argument to every tool that talks to the plugin. */
+const withFile = (def: ToolDef): ToolDef => (def.local ? def : { ...def, inputSchema: def.inputSchema.extend({ file: fileArg }) });
+
+export const TOOLS: ToolDef[] = RAW_TOOLS.map(withFile);
+
+/**
+ * Runs a tool. A plugin tool's `file` (else the session pin, else the only
+ * file) picks the plugin window; every plugin call the tool makes goes there.
+ * `file` itself is not passed on.
+ */
 export async function runTool(def: ToolDef, args: unknown, ctx: ToolContext): Promise<ToolResult> {
-    if (!def.offline && !ctx.connected()) return text(NOT_CONNECTED, true);
     try {
-        return await def.run(args, ctx);
+        if (def.local) return await def.run(args, ctx);
+        const files = ctx.files();
+        if (files.length === 0) return text(NOT_CONNECTED, true);
+        const { file, ...rest } = (args ?? {}) as { file?: string } & JsonObject;
+        const picked = resolveFile(files, file, ctx.session.pinned);
+        if (!picked.ok) return text(picked.error, true);
+        const connId = picked.file.connId;
+        const scoped: ToolContext = { ...ctx, plugin: (name, a, ms) => ctx.plugin(name, a, ms, connId) };
+        return await def.run(rest, scoped);
     } catch (error) {
         return text(error instanceof Error ? error.message : String(error), true);
     }

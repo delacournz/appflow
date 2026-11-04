@@ -14,7 +14,9 @@ Most tools take an optional `nodeId` (`193:443` or `193-443`). Without one they 
 
 | Tool | What it does locally |
 | --- | --- |
-| `figma_status` | Connection, file, pages and selection. Works when the plugin is closed. |
+| `figma_status` | Connection, file, pages and selection. Works when the plugin is closed. With several files open and none chosen, lists them. |
+| `list_files` | The Figma files running AppFlow (name, fileKey, docId, editor, last activity) and this session's pinned file. |
+| `select_file` | Pins the file this session works on. Omit `file` to clear the pin. |
 | `whoami` | The signed-in user and the file. Plans and seats are not visible to a plugin. |
 | `get_metadata` | XML outline: IDs, names, types, positions, sizes and text. |
 | `get_screenshot` | PNG of a node. |
@@ -98,7 +100,19 @@ Code runs with `documentAccess: "dynamic-page"`, so use the async APIs: `getNode
 3. In the Figma desktop app, go to Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
 4. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
 
-Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin socket. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin window reconnects within about 2 s.
+Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin sockets. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin windows reconnect within about 2 s.
+
+### Several Figma files
+
+Run AppFlow in as many files as you like; each window keeps its own connection. Every tool that talks to the plugin takes an optional `file`: a fileKey, a figma.com URL (a branch URL picks the branch) or the file name (exact, else a unique part of it). A call goes to:
+
+1. the file named by `file`;
+2. else the file this agent session pinned with `select_file`;
+3. else the only open file.
+
+With two or more files open and neither of the first two, the call fails and lists the files. It never guesses. A pin is per agent session and survives the plugin reconnecting. If the pinned file closes, calls fail until it is back or another file is pinned.
+
+The fileKey comes from `figma.fileKey`, which needs `enablePrivatePluginApi` in the manifest. The plugin also stores a `docId` in the file's shared plugin data (`appflow` / `docId`) so files can be told apart without a key. A duplicated file keeps the same docId; target it by fileKey or name. The one-shot CLI takes `--file`: `bun run scripts/call.ts figma_status --file "Wallet app"`.
 
 Environment:
 

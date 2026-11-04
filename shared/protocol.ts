@@ -21,5 +21,25 @@ export type PluginReply =
 /** server → plugin */
 export type ServerMessage = { id: string; cmd: PluginCommand };
 
-/** plugin → server */
-export type ClientMessage = { id: string; reply: PluginReply } | { hello: { fileName: string; editorType: string; build?: string } };
+/**
+ * What the plugin says about its document when it connects. `fileKey` needs
+ * `enablePrivatePluginApi`; `docId` is an id the plugin stores in the file's
+ * shared plugin data, so files without a key can still be told apart. Both
+ * are optional so older plugin builds still connect.
+ */
+export type Hello = { fileName: string; editorType: string; build?: string; fileKey?: string | null; docId?: string };
+
+/** plugin → server. `activity` marks the file as the one the user touched last. */
+export type ClientMessage = { id: string; reply: PluginReply } | { hello: Hello } | { activity: true };
+
+/** One connected plugin window, as the leader tracks it. `connId` is unique per socket. */
+export type FileInfo = {
+    connId: string;
+    fileKey: string | null;
+    docId: string;
+    fileName: string;
+    editorType: string;
+    build: string | null;
+    connectedAt: number;
+    lastActiveAt: number;
+};

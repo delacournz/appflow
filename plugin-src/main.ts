@@ -57,9 +57,41 @@ type UiMessage = { type: 'hello' } | { type: 'command'; id: string; cmd: PluginC
 
 figma.showUI(__html__, { width: 300, height: 140, themeColors: true });
 
+const randomId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * An id kept in the document, so the server can tell files apart when
+ * figma.fileKey is unavailable. A view-only file cannot store it, so it gets
+ * an id for this run only.
+ */
+function docId(): string {
+    try {
+        const stored = figma.root.getSharedPluginData('appflow', 'docId');
+        if (stored) return stored;
+        const id = randomId();
+        figma.root.setSharedPluginData('appflow', 'docId', id);
+        return id;
+    } catch {
+        return randomId();
+    }
+}
+
+const DOC_ID = docId();
+
+/** Tells the server this file is the one the user is working in, at most every 2 s. */
+let lastActivity = 0;
+function activity() {
+    const now = Date.now();
+    if (now - lastActivity < 2000) return;
+    lastActivity = now;
+    figma.ui.postMessage({ type: 'activity' });
+}
+figma.on('selectionchange', activity);
+figma.on('currentpagechange', activity);
+
 figma.ui.onmessage = async (msg: UiMessage) => {
     if (msg.type === 'hello') {
-        figma.ui.postMessage({ type: 'hello', fileName: figma.root.name, editorType: figma.editorType, build: __BUILD__ });
+        figma.ui.postMessage({ type: 'hello', fileName: figma.root.name, editorType: figma.editorType, build: __BUILD__, fileKey: figma.fileKey ?? null, docId: DOC_ID });
         return;
     }
     if (msg.type !== 'command') return;

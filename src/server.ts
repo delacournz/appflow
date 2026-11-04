@@ -29,20 +29,20 @@ const bridge = startBridge({
     async onHello(hello) {
         expectedBuild = await readExpectedBuild(BUILD_JSON);
         const build = hello.build ?? null;
-        log('file:', hello.fileName, `(${hello.editorType})`, 'build:', build ?? 'unknown');
+        log('file:', hello.fileName, `(${hello.editorType})`, 'key:', hello.fileKey ?? 'none', 'build:', build ?? 'unknown');
         if (stalePlugin(expectedBuild, build)) log(`plugin build ${build ?? 'unknown'} differs from expected ${expectedBuild}. ${STALE_FIX}`);
     },
 });
 
 const ctx: ToolContext = {
-    connected: bridge.connected,
+    files: bridge.files,
     plugin: bridge.call,
+    session: { pinned: null },
     store: new CodeConnectStore(join(HOME, 'code-connect.json')),
     downloadDir: join(HOME, 'downloads'),
     get expectedBuild() {
         return expectedBuild;
     },
-    pluginBuild: bridge.pluginBuild,
 };
 
 const handle = serveStdio(() => createServer(ctx), { onerror: (error) => log('mcp:', error.message) });
