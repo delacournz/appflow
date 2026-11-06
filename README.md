@@ -1,12 +1,96 @@
 # appflow
 
-A local MCP server plus a Figma development plugin. It exposes the Figma MCP server's tools, with the same names, against the file open in the Figma desktop app. No Figma MCP plan or Dev Mode seat needed.
+Let Claude read and edit the Figma file you have open. It lays out app flows, checks which screens are built, and keeps the file's tokens, text styles and components in sync with your code.
+
+![A flow board AppFlow built from an Expo app: screens left to right, branches below, arrows labelled with the control that triggers them](docs/images/flow-board.png)
+
+AppFlow is a local MCP server plus a Figma development plugin. It exposes the Figma MCP server's tools, with the same names, against the file open in the Figma desktop app. No Figma MCP plan or Dev Mode seat needed.
+
+## Quick start
+
+1. [Install the plugin](#1-install-the-figma-plugin) and open it in your file.
+2. [Add the server to Claude Code](#2-add-the-server-to-claude-code).
+3. Ask Claude in plain words. For example:
+   - "Build a flow board for this app's routes, onboarding first, sign-in errors below."
+   - "Which screens on this board are built? Check the code and the running app."
+   - "Sync the design tokens and text styles from code. Dry run first."
+   - "Turn the selected frame into React with Tailwind."
+
+Claude calls `figma_status` first to find the open file, then the board, sync or read tools below.
+
+## How it works
 
 ```
 agent ⇄ stdio MCP (src/server.ts) ⇄ ws://localhost:3055/plugin ⇄ plugin UI iframe ⇄ plugin main (Plugin API)
 ```
 
 The MCP side is built on the official [MCP TypeScript SDK](https://ts.sdk.modelcontextprotocol.io/v2/) (`@modelcontextprotocol/server` v2). `src/mcp.ts` registers the tools, skill resources and prompts, `src/tools.ts` defines the tools with Zod schemas, and `src/server.ts` serves them over stdio.
+
+## Setup
+
+Needs [Bun](https://bun.sh), the Figma desktop app and [Claude Code](https://claude.com/claude-code).
+
+```sh
+git clone https://github.com/delacournz/appflow.git
+cd appflow
+bun install && bun run build
+```
+
+### 1. Install the Figma plugin
+
+**Shortcut:** `bun run setup` installs, builds and adds AppFlow to Plugins → Development for you. If Figma is open it quits and reopens it, because Figma rewrites its settings on quit. Pass `--no-restart` to `bun run scripts/install-plugin.ts` to refuse instead, or `--dry-run` to print the change. A backup goes to `settings.json.appflow-backup` beside Figma's settings. Skip to step 5 below.
+
+**By hand:**
+
+1. In Figma, open **Plugins** in the menu bar.
+
+   ![Figma Plugins menu](docs/images/install-1-plugins-menu.png)
+
+2. Choose **Development → Import plugin from manifest…**
+
+   ![Import plugin from manifest](docs/images/install-2-import-manifest.png)
+
+3. Pick `manifest.json` inside this repo's `plugin/` folder and click **Open**.
+
+   ![File picker with plugin/manifest.json selected](docs/images/install-3-pick-manifest.png)
+
+4. AppFlow is now listed. You only import once; Figma remembers it.
+5. Open the file you want to work on, then **Plugins → Development → AppFlow**.
+
+   ![AppFlow in the Development submenu](docs/images/install-4-run-appflow.png)
+
+6. The AppFlow window opens. A green dot and the file name mean it is connected. **Keep this window open** while Claude works; closing it disconnects the file.
+
+   ![AppFlow window showing Connected, port 3055](docs/images/install-5-connected.png)
+
+### 2. Add the server to Claude Code
+
+From the repo root:
+
+```sh
+claude mcp add appflow -s user -- bun run "$(pwd)/src/server.ts"
+```
+
+Restart Claude Code, then check it with `/mcp` (appflow should be listed as connected) or ask "what's the Figma status?". Claude starts the server itself; you never run it by hand.
+
+Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin sockets. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin windows reconnect within about 2 s.
+
+### Several Figma files
+
+Run AppFlow in as many files as you like; each window keeps its own connection. Every tool that talks to the plugin takes an optional `file`: a fileKey, a figma.com URL (a branch URL picks the branch) or the file name (exact, else a unique part of it). A call goes to:
+
+1. the file named by `file`;
+2. else the file this agent session pinned with `select_file`;
+3. else the only open file.
+
+With two or more files open and neither of the first two, the call fails and lists the files. It never guesses. A pin is per agent session and survives the plugin reconnecting. If the pinned file closes, calls fail until it is back or another file is pinned.
+
+The fileKey comes from `figma.fileKey`, which needs `enablePrivatePluginApi` in the manifest. The plugin also stores a `docId` in the file's shared plugin data (`appflow` / `docId`) so files can be told apart without a key. A duplicated file keeps the same docId; target it by fileKey or name. The one-shot CLI takes `--file`: `bun run scripts/call.ts figma_status --file "Wallet app"`.
+
+Environment:
+
+- `APPFLOW_PORT` (default 3055): to change it, also change the port in the plugin window and in `devAllowedDomains`.
+- `APPFLOW_HOME` (default `~/.appflow`): where downloads and the Code Connect store go.
 
 ## Tools
 
@@ -91,32 +175,6 @@ These need Figma's cloud: `create_new_file`, `generate_figma_design`, `send_code
 - `generate_diagram` supports Mermaid flowcharts only.
 
 Code runs with `documentAccess: "dynamic-page"`, so use the async APIs: `getNodeByIdAsync`, `setCurrentPageAsync` and `setReactionsAsync`.
-
-## Setup
-
-1. Run `bun run setup`. It installs, builds and adds AppFlow to Figma → Plugins → Development. If Figma is open it quits and reopens it, because Figma rewrites its settings on quit. Pass `--no-restart` to `bun run scripts/install-plugin.ts` to refuse instead, or `--dry-run` to print the change. A backup goes to `settings.json.appflow-backup` beside Figma's settings. Manual route: Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
-2. Register the server with Claude Code:
-   `claude mcp add appflow -s user -- bun run ~/Documents/Projects/appflow/src/server.ts`
-3. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
-
-Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin sockets. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin windows reconnect within about 2 s.
-
-### Several Figma files
-
-Run AppFlow in as many files as you like; each window keeps its own connection. Every tool that talks to the plugin takes an optional `file`: a fileKey, a figma.com URL (a branch URL picks the branch) or the file name (exact, else a unique part of it). A call goes to:
-
-1. the file named by `file`;
-2. else the file this agent session pinned with `select_file`;
-3. else the only open file.
-
-With two or more files open and neither of the first two, the call fails and lists the files. It never guesses. A pin is per agent session and survives the plugin reconnecting. If the pinned file closes, calls fail until it is back or another file is pinned.
-
-The fileKey comes from `figma.fileKey`, which needs `enablePrivatePluginApi` in the manifest. The plugin also stores a `docId` in the file's shared plugin data (`appflow` / `docId`) so files can be told apart without a key. A duplicated file keeps the same docId; target it by fileKey or name. The one-shot CLI takes `--file`: `bun run scripts/call.ts figma_status --file "Wallet app"`.
-
-Environment:
-
-- `APPFLOW_PORT` (default 3055): to change it, also change the port in the plugin window and in `devAllowedDomains`.
-- `APPFLOW_HOME` (default `~/.appflow`): where downloads and the Code Connect store go.
 
 ## Security
 
