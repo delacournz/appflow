@@ -417,7 +417,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'adopt_board',
-        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger). Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
+        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and groups each screen into a "Screen · {name}" group with its label and route text (which also hides Figma\'s frame title). Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
         obj({
             boardNodeId: str('The board background rectangle or section.'),
             colWidth: num('Override the inferred column spacing.').optional(),
@@ -437,7 +437,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'duplicate_screen',
-        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a "Screen · …" group, clones the whole group as a sibling of the source group), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. The copy’s build badge resets to Not built. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
+        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a "Screen · …" group, clones the whole group as a sibling of the source group; otherwise groups the copy into its own "Screen · …" group, hiding Figma\'s frame title), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. The copy’s build badge resets to Not built. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
         obj({
             id: str('The screen frame to duplicate.'),
             col: z.int().describe('Target board column (0-based).'),
@@ -455,7 +455,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'group_screens',
-        'Group each adopted screen\'s label text, route text, build badge and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
+        'Group each adopted screen\'s label text, route text, build badge and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Grouping also hides the frame title Figma draws above a top-level frame. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
         obj({
             boardId: boardIdAll,
             dryRun: bool('Report what would be grouped without changing the file. Default false.').optional(),

@@ -20,6 +20,7 @@ import {
     type ScreenMeta,
 } from './flowmeta';
 import { liftOutOfGroups } from './lift';
+import { groupScreen } from './group-screens';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
 import { assignLanes, clearOfLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
@@ -620,6 +621,7 @@ export const adoptBoard: Handler = async (args) => {
             const assigned = assignScreenTexts(s.rect, texts);
             const meta: ScreenMeta = { v: 1, kind: 'screen', boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
             s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+            await groupScreen(s.node, meta);
         }
         for (const p of planned) {
             const container = p.vector.parent && 'children' in p.vector.parent ? p.vector.parent : arrowsGroup;

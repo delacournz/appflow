@@ -1,6 +1,7 @@
 import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName } from './duplicate-plan';
 import { ensureBadge } from './badge';
 import { collectScreens } from './flow';
+import { groupScreen } from './group-screens';
 import { isScreenGroupName, screenGroupName } from './screen-group';
 import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { Rect } from './rect';
@@ -193,6 +194,11 @@ export const duplicateScreen: Handler = async (args) => {
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build) await ensureBadge(copy, fresh, fresh.build, board.labelOffset);
+    if (!groupCopy) {
+        const grouping = await groupScreen(copy, fresh);
+        const made = grouping.groupId ? await sceneById(grouping.groupId) : null;
+        if (made?.type === 'GROUP') groupCopy = made;
+    }
 
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
 

@@ -45,11 +45,11 @@ Each node carries shared plugin data in the `flowbridge` namespace:
 The screen anatomy is one layer, a `Screen · {name}` group, holding:
 - the frame (393×852)
 - the label text, `Label · {name}`, 80 px above the frame
-- the route text, `Route · {name}` (the code path), 48 px above the frame, clear of the frame title Figma draws just above a frame
+- the route text, `Route · {name}` (the code path), 48 px above the frame
 
-Label and route sit above the frame in z-order. Always use absolute positions: the frame is inside a group, so `x` and `y` are relative to the group's parent. The tools handle this. Move or copy the group, never its parts. Prototype reactions are unchanged: a frame in a group is still a top-level frame for prototyping.
+Label and route sit above the frame in z-order. Always use absolute positions: the frame is inside a group, so `x` and `y` are relative to the group's parent. The tools handle this. Move or copy the group, never its parts. Prototype reactions are unchanged: a frame in a group is still a top-level frame for prototyping. The group also hides the frame title Figma draws above a top-level frame, so the label is the only name on the canvas. Figma has no setting to hide frame titles; keep every screen grouped. `adopt_board` and `duplicate_screen` group the screens they touch.
 
-Boards made before screen groups have the three layers loose on the page. Run `group_screens` once on them (try `dryRun: true` first). It is idempotent and reports screens with no label in `missingLabel`.
+Boards made before screen groups have the three layers loose on the page, with Figma's frame title showing under the route text. Run `group_screens` once on them (try `dryRun: true` first). It is idempotent and reports screens with no label in `missingLabel`.
 
 Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows group always sits above the screens.
 
