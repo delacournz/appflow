@@ -124,3 +124,17 @@ describe('assignScreenTexts offsets', () => {
         expect(assignScreenTexts(s, [text('l', 'Label · A', 60), text('r', 'Route · A', 20)])).toEqual({ labelId: null, routeId: null });
     });
 });
+
+describe('assignScreenTexts ungrouped anatomy', () => {
+    const s = { x: 1000, y: 500, width: 393, height: 852 };
+    const text = (id: string, name: string, dy: number) => ({ id, name, rect: { x: s.x, y: s.y - dy, width: 100, height: 20 } });
+    test('route at -72 with no label', () => {
+        expect(assignScreenTexts(s, [text('r', 'Route · A', 72)])).toEqual({ labelId: null, routeId: 'r' });
+    });
+    test('a route in the old label slot is not taken for the label', () => {
+        expect(assignScreenTexts(s, [text('r', 'Route · A', 72), text('b', 'Other', 72)])).toEqual({ labelId: null, routeId: 'r' });
+    });
+    test('legacy label at -72 and route at -48 still match', () => {
+        expect(assignScreenTexts(s, [text('l', 'Label · A', 72), text('r', 'Route · A', 48)])).toEqual({ labelId: 'l', routeId: 'r' });
+    });
+});

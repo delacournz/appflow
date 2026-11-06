@@ -1,8 +1,9 @@
 import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName } from './duplicate-plan';
 import { ensureBadge } from './badge';
-import { collectScreens } from './flow';
-import { groupScreen } from './group-screens';
-import { isScreenGroupName, screenGroupName } from './screen-group';
+import { collectScreens, toLocal } from './flow';
+import { isScreenGroupName, routeSlot, screenGroupName } from './screen-group';
+import { fitRoute } from './anatomy';
+import { badgeName } from './screen-status';
 import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { Rect } from './rect';
 import { fail, ok, str, type Handler } from './types';
@@ -37,6 +38,15 @@ async function loadFontsOf(text: TextNode): Promise<void> {
 async function setText(text: TextNode, value: string): Promise<void> {
     await loadFontsOf(text);
     text.characters = value;
+}
+
+/** Moves a node to an absolute top-left, whatever its parent's own offset. */
+function moveToAbs(node: SceneNode, at: { x: number; y: number }): void {
+    const parent = node.parent;
+    if (!parent) return;
+    const local = toLocal(parent, at);
+    node.x = local.x;
+    node.y = local.y;
 }
 
 function clearFlowData(root: SceneNode): void {
@@ -174,8 +184,18 @@ export const duplicateScreen: Handler = async (args) => {
         copy = src.clone();
         copy.x = src.x + dx;
         copy.y = src.y + dy;
-        label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+        label = null;
         routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+        if (routeText) {
+            moveToAbs(routeText, routeSlot(target));
+            await fitRoute(routeText, copy.width, null);
+        }
+        if (srcBadge?.type === 'GROUP') {
+            badgeCopy = srcBadge.clone();
+            badgeCopy.x = srcBadge.x + dx;
+            badgeCopy.y = srcBadge.y + dy;
+            badgeCopy.name = badgeName(name);
+        }
     }
     copy.name = frameName(name);
     clearFlowData(groupCopy ?? copy);
@@ -193,12 +213,7 @@ export const duplicateScreen: Handler = async (args) => {
         badgeId: badgeCopy?.id ?? null,
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
-    if (badgeCopy && fresh.build) await ensureBadge(copy, fresh, fresh.build, board.labelOffset);
-    if (!groupCopy) {
-        const grouping = await groupScreen(copy, fresh);
-        const made = grouping.groupId ? await sceneById(grouping.groupId) : null;
-        if (made?.type === 'GROUP') groupCopy = made;
-    }
+    if (badgeCopy && fresh.build) await ensureBadge(copy, fresh, fresh.build);
 
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
 

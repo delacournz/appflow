@@ -3,7 +3,8 @@ import { assignScreenTexts } from './adopt';
 import { collectScreens, collectTexts, groupIdOf, loadBoard, readMeta, rectOf, rerouteBoards, sceneById, type Board } from './flow';
 import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type BoardMeta, type ScreenMeta } from './flowmeta';
 import { boardBounds, cellOf, cellRect, compactPlan, planMove, shiftPlan, staleReason, type GridMeta, type Move } from './grid';
-import { shiftTargets } from './screen-group';
+import type { Rect } from './rect';
+import { badgeBelongsTo, shiftTargets } from './screen-group';
 import { fail, num, ok, str, bool, type Handler, type MainReply } from './types';
 
 type Screen = { node: FrameNode; meta: ScreenMeta };
@@ -30,9 +31,10 @@ async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: St
         const stored = readMeta(c, SCREEN_KEY, parseScreenMeta);
         if (!stored || stored.boardId !== board.node.id) continue;
         const groupId = groupIdOf(entry);
-        const label = stored.labelId ? await sceneById(stored.labelId) : null;
+        const anchorId = stored.labelId ?? stored.routeId;
+        const anchor = anchorId ? await sceneById(anchorId) : null;
         const rect = rectOf(c);
-        const reason = staleReason(board.meta, stored, rect, label ? rectOf(label) : null, stored.labelId !== null);
+        const reason = staleReason(board.meta, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
         if (!reason) {
             if ((stored.groupId ?? null) === groupId) {
                 screens.push({ node: c, meta: stored });
@@ -44,7 +46,7 @@ async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: St
             continue;
         }
         const cell = cellOf(rect, board.meta);
-        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...(await ownBadge(stored, groupId)) };
+        const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...(await ownBadge(stored, groupId, rect)) };
         writeScreen(c, meta);
         stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
         screens.push({ node: c, meta });
@@ -53,12 +55,14 @@ async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: St
 }
 
 /**
- * A hand copy of a screen keeps the original's badge id and build status. Keep them only when the badge sits in this
- * screen's own group; otherwise the copy reads as not built with no badge.
+ * A hand copy of a screen keeps the original's badge id and build status. Keep them only when the badge is this
+ * screen's own: inside its group, or (ungrouped) sitting flush with the frame's right edge just above it. Otherwise
+ * the copy reads as not built with no badge.
  */
-async function ownBadge(stored: ScreenMeta, groupId: string | null): Promise<Pick<ScreenMeta, 'badgeId' | 'build'>> {
+async function ownBadge(stored: ScreenMeta, groupId: string | null, frame: Rect): Promise<Pick<ScreenMeta, 'badgeId' | 'build'>> {
     const badge = stored.badgeId ? await sceneById(stored.badgeId) : null;
-    if (badge && groupId && badge.parent?.id === groupId) return { badgeId: stored.badgeId ?? null, build: stored.build };
+    const own = badge && (groupId ? badge.parent?.id === groupId : badgeBelongsTo(frame, rectOf(badge)));
+    if (own) return { badgeId: stored.badgeId ?? null, build: stored.build };
     return { badgeId: null, build: { status: 'not-built' } };
 }
 

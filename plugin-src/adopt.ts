@@ -98,11 +98,12 @@ export function longestSegmentMid(points: readonly Pt[]): Pt {
 }
 
 export const LABEL_OFFSETS = [80, 72] as const;
-export const ROUTE_OFFSETS = [48, 40] as const;
+export const ROUTE_OFFSETS = [72, 48, 40] as const;
 
 /**
- * A screen's label and route texts, found by position above it rather than by name. The current anatomy is label at
- * y-80 and route at y-48; boards made with y-72 and y-40 still match.
+ * A screen's label and route texts, found by position above it. The name prefix tells them apart, since the label and
+ * the route can share y-72. Ungrouped screens have only a route, at y-72. Older boards had label y-80/-72 and route
+ * y-48/-40.
  */
 export function assignScreenTexts(screen: Rect, texts: readonly { id: string; name: string; rect: Rect }[]): { labelId: string | null; routeId: string | null } {
     const find = (prefix: string, offsets: readonly number[]) =>

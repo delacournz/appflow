@@ -1,6 +1,8 @@
 import type { JsonObject } from '../shared/protocol';
 import { boardsFor, collectScreens, raiseArrows, readMeta, rectOf, sceneById, type Board } from './flow';
 import { FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type BuildStatus, type ScreenMeta } from './flowmeta';
+import { fitRoute } from './anatomy';
+import { badgeFallbackOffset } from './screen-group';
 import { BADGE_SPECS, badgeName, badgePosition, buildStatusOf, statusFromInput, type StatusInput } from './screen-status';
 import { bool, fail, ok, type Handler } from './types';
 
@@ -31,17 +33,20 @@ async function fontFor(label: SceneNode | null): Promise<FontName> {
 }
 
 /**
- * Creates or updates the screen's `Badge · {name}` pill, right-aligned with the frame on the label line, inside the
- * screen group above the label. Needs the screen group.
+ * Creates or updates the screen's `Badge · {name}` pill, right-aligned with the frame and centred on the text line
+ * above it (the route text, or the label on boards that still have one). The pill is a loose sibling of the frame, or
+ * sits in the frame's `Screen · …` group on older grouped boards.
  */
-export async function ensureBadge(frame: FrameNode, meta: ScreenMeta, build: BuildStatus, labelOffset: number): Promise<GroupNode> {
-    const group = meta.groupId ? await sceneById(meta.groupId) : null;
-    if (!group || group.type !== 'GROUP' || frame.parent?.id !== group.id) throw new Error(`${frame.name} (${frame.id}) is not in its "Screen · …" group. Run group_screens first.`);
-    const label = meta.labelId ? await sceneById(meta.labelId) : null;
+export async function ensureBadge(frame: FrameNode, meta: ScreenMeta, build: BuildStatus): Promise<GroupNode> {
+    const holder = frame.parent;
+    if (!holder || !('children' in holder) || holder.type === 'DOCUMENT') throw new Error(`${frame.name} (${frame.id}) sits in a parent that cannot hold a badge.`);
+    const [label, route] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+    const line = label ?? route;
     const spec = BADGE_SPECS[build.status];
-    const font = await fontFor(label);
+    const font = await fontFor(label ?? route);
 
     let parts = partsOf(meta.badgeId ? await sceneById(meta.badgeId) : null);
+    const created = !parts;
     if (!parts) {
         const text = figma.createText();
         text.fontName = font;
@@ -50,9 +55,9 @@ export async function ensureBadge(frame: FrameNode, meta: ScreenMeta, build: Bui
         text.characters = spec.text;
         const pill = figma.createRectangle();
         pill.cornerRadius = HEIGHT / 2;
-        group.appendChild(pill);
-        group.appendChild(text);
-        const g = figma.group([pill, text], group);
+        holder.appendChild(pill);
+        holder.appendChild(text);
+        const g = figma.group([pill, text], holder);
         parts = { group: g, pill, text };
     }
     const { pill, text } = parts;
@@ -63,16 +68,16 @@ export async function ensureBadge(frame: FrameNode, meta: ScreenMeta, build: Bui
     const width = Math.ceil(text.width) + PAD_X * 2;
     pill.resize(width, HEIGHT);
 
-    const at = badgePosition(rectOf(frame), label ? rectOf(label) : null, labelOffset, { width, height: HEIGHT });
-    const origin = rectOf(group);
-    const local = { x: group.x + (at.x - origin.x), y: group.y + (at.y - origin.y) };
-    pill.x = local.x;
-    pill.y = local.y;
-    text.x = local.x + PAD_X;
-    text.y = local.y + (HEIGHT - text.height) / 2;
+    const at = badgePosition(rectOf(frame), line ? rectOf(line) : null, badgeFallbackOffset(HEIGHT), { width, height: HEIGHT });
+    const now = rectOf(pill);
+    pill.x += at.x - now.x;
+    pill.y += at.y - now.y;
+    text.x = pill.x + PAD_X;
+    text.y = pill.y + (HEIGHT - text.height) / 2;
 
+    if (route?.type === 'TEXT') await fitRoute(route, frame.width, width);
     parts.group.name = badgeName(frame.name);
-    group.appendChild(parts.group);
+    if (created || parts.group.parent?.id !== holder.id) holder.insertChild(Math.min(holder.children.indexOf(frame) + 1, holder.children.length), parts.group);
     return parts.group;
 }
 
@@ -116,7 +121,7 @@ export const setScreenStatus: Handler = async (args) => {
             const board = boards.get(meta.boardId) ?? (await boardsFor({ boardId: meta.boardId }))[0];
             if (!board) throw new Error(`The board ${meta.boardId} is gone.`);
             boards.set(meta.boardId, board);
-            const badge = await ensureBadge(frame, meta, status.value, board.meta.labelOffset);
+            const badge = await ensureBadge(frame, meta, status.value);
             writeScreen(frame, { ...meta, build: status.value, badgeId: badge.id });
             done.push({ id: frame.id, name: frame.name, status: status.value.status, badgeId: badge.id });
         } catch (error) {
@@ -137,13 +142,9 @@ export const badgeScreens: Handler = async (args) => {
     for (const board of boards) {
         const parent = board.node.parent;
         if (!parent || !('children' in parent)) continue;
-        for (const { frame, group } of collectScreens(parent.children)) {
+        for (const { frame } of collectScreens(parent.children)) {
             const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
             if (!meta || meta.boardId !== board.node.id) continue;
-            if (!group || meta.groupId !== group.id) {
-                skipped.push({ id: frame.id, name: frame.name, reason: 'Not in its "Screen · …" group. Run group_screens first.' });
-                continue;
-            }
             const has = partsOf(meta.badgeId ? await sceneById(meta.badgeId) : null);
             const build = buildStatusOf(meta.build);
             const row = { id: frame.id, name: frame.name, status: build.status };
@@ -151,7 +152,7 @@ export const badgeScreens: Handler = async (args) => {
                 (has ? refreshed : added).push(row);
                 continue;
             }
-            const badge = await ensureBadge(frame, meta, build, board.meta.labelOffset);
+            const badge = await ensureBadge(frame, meta, build);
             writeScreen(frame, { ...meta, build, badgeId: badge.id });
             (has ? refreshed : added).push({ ...row, badgeId: badge.id });
         }

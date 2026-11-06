@@ -22,7 +22,7 @@ Only `set_screen_status` changes a badge. Never edit badges with `use_figma`, an
 1. Call `figma_status`, then `describe_board`.
 2. Work from `screens[]`. Each entry has `{ id, name, route, status, verifiedAt }`.
 3. Scope the run: every screen, or only the screens or routes the user named. If the user just built something, check those screens first.
-4. If `issues` says a screen has no build badge, run `badge_screens`. If a screen is not grouped, run `group_screens` first.
+4. If `issues` says a screen has no build badge, run `badge_screens`.
 
 ### 2. Check each screen
 

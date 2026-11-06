@@ -9,9 +9,9 @@ A flow board should read like a sentence: start at the top left, follow the main
 
 ## Workflow
 
-Use the tools in this order. Don't draw arrows or move screens with `use_figma` on a managed board. The tools keep the screens, labels, arrows and prototype in step.
+Use the tools in this order. Don't draw arrows or move screens with `use_figma` on a managed board. The tools keep the screens, route texts, arrows and prototype in step.
 
-1. **Get a board.** On an existing hand-built board, run `adopt_board` with `dryRun: true`, check the unmatched list, then run it for real. For a new flow, use `create_board`. On an older adopted board, run `group_screens` once.
+1. **Get a board.** On an existing hand-built board, run `adopt_board` with `dryRun: true`, check the unmatched list, then run it for real. For a new flow, use `create_board`. On an older adopted board whose screens sit in `Screen · …` groups, run `ungroup_screens` once.
 2. **Read it.** `describe_board` prints the grid as text, with one cell per screen, and lists every arrow with its trigger.
 3. **Propose before you build.** Write the target layout as an ASCII grid in the same format and confirm it with the user before you move anything. Example:
 
@@ -23,10 +23,10 @@ Use the tools in this order. Don't draw arrows or move screens with `use_figma` 
    ```
 
 4. **Place screens.**
-   - `move_screen` moves a screen into a cell, together with its label and route text, and reroutes its arrows. Use `swap: true` to trade two cells.
+   - `move_screen` moves a screen into a cell, together with its route text and badge, and reroutes its arrows. Use `swap: true` to trade two cells.
    - `insert_columns` or `insert_rows` make room, and `compact_board` closes up gaps.
    - `duplicate_screen` adds a copy of a screen for another state. It can also change the screen's banner.
-   - Never copy a screen in Figma by hand. A hand copy keeps the original's flow data and points at the wrong label.
+   - Never copy a screen in Figma by hand. A hand copy keeps the original's flow data and points at the wrong route text and badge.
 5. **Connect.**
    - `connect({ from, to, trigger, label })` draws the arrow from the triggering control and points the trigger's prototype at the target.
    - Leave out `trigger` only for automatic transitions (a webhook, a timer, a redirect).
@@ -39,17 +39,19 @@ Use the tools in this order. Don't draw arrows or move screens with `use_figma` 
 Each node carries shared plugin data in the `flowbridge` namespace:
 
 - **`board`** on the board background rectangle holds the grid (origin, column width, row height, screen size), the arrows group and the arrow style.
-- **`screen`** on each screen frame holds `boardId`, `col`, `row`, `labelId`, `routeId` and `groupId` (the `Screen · {name}` group, or null).
+- **`screen`** on each screen frame holds `boardId`, `col`, `row`, `labelId` (null: screens have no label text), `routeId`, `badgeId` and `groupId` (null: screens are not grouped).
 - **`arrow`** on each `Flow · A → B · label` group holds `from`, `to`, `trigger`, `label`, `mode` (`trigger` or `auto`), `exit`, and the vector, dot and label ids.
 
-The screen anatomy is one layer, a `Screen · {name}` group, holding:
-- the frame (393×852)
-- the label text, `Label · {name}`, 80 px above the frame
-- the route text, `Route · {name}` (the code path), 48 px above the frame
+Screens are **top-level frames** (393×852). Figma prototyping needs this: flow starting points and Play fail on a grouped frame, and prototype reactions cannot be set on one. Figma draws its own title above each frame, and that title is the screen name. There is no label text.
 
-Label and route sit above the frame in z-order. Always use absolute positions: the frame is inside a group, so `x` and `y` are relative to the group's parent. The tools handle this. Move or copy the group, never its parts. Prototype reactions are unchanged: a frame in a group is still a top-level frame for prototyping. The group also hides the frame title Figma draws above a top-level frame, so the label is the only name on the canvas. Figma has no setting to hide frame titles; keep every screen grouped. `adopt_board` and `duplicate_screen` group the screens they touch.
+Each screen is three loose siblings on the page (or in a section):
+- the frame, named after the screen
+- the route text, `Route · {name}` (the code path), at the frame's left edge, 72 px above the frame (clear of Figma's frame title)
+- the build badge, `Badge · {name}`, a pill right-aligned with the frame and centred on the route line
 
-Boards made before screen groups have the three layers loose on the page, with Figma's frame title showing under the route text. Run `group_screens` once on them (try `dryRun: true` first). It is idempotent and reports screens with no label in `missingLabel`.
+Use absolute positions. The tools move the frame, route text and badge together, so never move one of them by hand. `adopt_board` and `duplicate_screen` leave screens ungrouped.
+
+Boards made while screens were grouped have `Screen · {name}` groups and `Label · {name}` texts. Run `ungroup_screens` once on them (try `dryRun: true` first). It moves each frame out of its group, deletes the label text (`keepLabels: true` keeps it), moves the route text and badge to the slots above, and is idempotent. Do not use `group_screens` unless the user asks for groups: it breaks prototype Play and starting points.
 
 Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows group always sits above the screens.
 
@@ -59,8 +61,8 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 2. **Arrows point right, down or up. Never left.** No segment of an arrow may move left, not even a short jog into a gutter.
 3. **Branches go straight down.** A failure, an alternate outcome or a retry goes in the same column directly under its source screen. A second branch from the same screen goes in the next row down, or in the next column to the right.
 4. **Overlays and entry points may go straight up.** A sheet or modal that opens over a screen, or a banner screen that leads into a step, sits directly above its target.
-5. **A screen with an inbound arrow sits right of, or directly above or below, its source.** If a target would be to the left, move the target, don't bend the arrow. Move the screen's label and route text with it.
-6. **Never route an arrow through a screen or its label.** Vertical arrows into a screen enter its top edge on the right side (about 340 px into a 393 px frame), clear of the label. Horizontal arrows enter the left edge.
+5. **A screen with an inbound arrow sits right of, or directly above or below, its source.** If a target would be to the left, move the target, don't bend the arrow. Move the screen's route text and badge with it.
+6. **Never route an arrow through a screen or its label.** Vertical arrows into a screen enter its top edge on the right side (about 340 px into a 393 px frame), clear of the route text. Horizontal arrows enter the left edge.
 7. **Arrows don't cross.** If two must, reorder their start points so they don't. When they can't be separated, cross once, at right angles.
 8. **Labels sit on top of lines,** centred on a straight segment, and above every vector in z-order.
 9. **Start an arrow at the control that triggers it.** When a button, row, tab or link causes the move, put the start dot just outside that control's edge (about 10 px, so it doesn't blend into the fill) and route from there: across to the gutter, then up or down, then into the target. Only an automatic transition (a timer, a webhook, a redirect) starts from the screen's edge. Keep arrow groups above the screens in layer order so start dots stay visible.
@@ -68,7 +70,7 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 
 ## Grid
 
-- Use a fixed grid: one column per screen (screen width + a 300 px gutter) and one row per screen height + about 260 px for labels.
+- Use a fixed grid: one column per screen (screen width + a 300 px gutter) and one row per screen height + about 260 px for the route text and arrows.
 - Start the main path in the top-left cell. Put entry points (where the user arrives from) in the first column.
 - When a branch needs room, push the later columns right. Grow the board to fit. Don't squeeze a screen into a gap on the left.
 - After moving screens, close up any empty rows and columns the move leaves behind.

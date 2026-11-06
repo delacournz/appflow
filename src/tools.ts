@@ -417,7 +417,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'adopt_board',
-        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and groups each screen into a "Screen · {name}" group with its label and route text (which also hides Figma\'s frame title). Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
+        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and records each screen frame. Screens stay top-level frames (never grouped) so prototype Play and flow starting points work; Figma\'s own frame title is the screen name, so there is no label text. A "Route · {name}" text above the frame and a "Badge · {name}" pill are loose siblings. Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
         obj({
             boardNodeId: str('The board background rectangle or section.'),
             colWidth: num('Override the inferred column spacing.').optional(),
@@ -429,7 +429,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'describe_board',
-        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, screens, arrows, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), each prefixed with its build mark (✓ built, ~ drift, · not built); screens lists { id, name, col, row, route, status, verifiedAt } for the verify-built skill; arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale label meta, two screens in one cell, arrows with missing endpoints arrows pointing left, screens with no build badge and built screens with no route text. Without boardId it covers every adopted board on the current page.',
+        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, screens, arrows, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), each prefixed with its build mark (✓ built, ~ drift, · not built); screens lists { id, name, col, row, route, status, verifiedAt } for the verify-built skill; arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale screen meta, two screens in one cell, arrows with missing endpoints arrows pointing left, screens with no build badge and built screens with no route text. Without boardId it covers every adopted board on the current page.',
         obj({
             boardId: boardIdAll,
             width: num('Characters per grid cell before a screen name is truncated. Default 16.').optional(),
@@ -437,12 +437,12 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'duplicate_screen',
-        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the frame with its label and route text (when the source is in a "Screen · …" group, clones the whole group as a sibling of the source group; otherwise groups the copy into its own "Screen · …" group, hiding Figma\'s frame title), names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. The copy’s build badge resets to Not built. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
+        'Duplicate a screen frame of an adopted flow board into a free grid cell (col, row). Clones the top-level frame with its route text and build badge as loose siblings (no label text; Figma\'s frame title is the name). A source still in a legacy "Screen · …" group clones the whole group instead; run ungroup_screens first. Names them, writes fresh flowbridge data on the copy, keeps prototype reactions, and grows the board background to fit. Refuses an occupied cell. The copy’s build badge resets to Not built. With banner, updates the first KycEntryRow (or ListGroup.Item*) row in the copy: title, description and optionally its prefix icon component.',
         obj({
             id: str('The screen frame to duplicate.'),
             col: z.int().describe('Target board column (0-based).'),
             row: z.int().describe('Target board row (0-based).'),
-            name: str('Name for the new screen and its label text.'),
+            name: str('Name for the new screen (its frame name, shown as Figma\'s frame title) and its route and badge layers.'),
             route: str('Route text for the copy. Defaults to the original route text.').optional(),
             banner: obj({
                 title: str(),
@@ -455,7 +455,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'group_screens',
-        'Group each adopted screen\'s label text, route text, build badge and frame into one "Screen · {name}" layer (label and route above the frame, group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Grouping also hides the frame title Figma draws above a top-level frame. Run once on boards made before screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
+        'Legacy: WARNING, grouped screens are not top-level frames, so this BREAKS prototype Play and flow starting points ("Can only set flow starting point that is a top level frame") and prototype reactions on the frames. Prefer ungroup_screens; only use this if the user explicitly wants groups. Groups each adopted screen\'s label text, route text, build badge and frame into one "Screen · {name}" layer (group kept where the frame was, arrows kept above). Idempotent: a screen already in an exact screen group is only recorded. Stores groupId in the screen data so move_screen, insert_*, compact_board and duplicate_screen move or clone the whole group. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, grouped, skipped, missingLabel: [frame ids with no label text], details: [{ frameId, name, status, groupId, reason? }] }.',
         obj({
             boardId: boardIdAll,
             dryRun: bool('Report what would be grouped without changing the file. Default false.').optional(),
@@ -463,8 +463,18 @@ const RAW_TOOLS: ToolDef[] = [
         120_000,
     ),
     passthrough(
+        'ungroup_screens',
+        'Make every adopted screen a top-level frame again, so prototype Play and flow starting points work. For each screen in a "Screen · …" group: moves the frame, route text and badge out to the group\'s parent at the group\'s index (absolute positions kept, arrows kept above, empty group deleted), deletes the "Label · …" text unless keepLabels (Figma\'s own frame title is the name), moves the route text to 72 px above the frame at its left edge, right-aligns the badge with the frame centred on that line, and rewrites the screen data with labelId null and groupId null. Idempotent: already ungrouped screens only get route and badge positions normalised. Run once on boards made with screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, ungrouped, already, skipped, labelsRemoved, details: [{ frameId, name, status: \'ungrouped\' | \'already\' | \'skipped\', labelRemoved, reason? }] }.',
+        obj({
+            boardId: boardIdAll,
+            dryRun: bool('Report what would change without editing the file. Default false.').optional(),
+            keepLabels: bool('Keep the "Label · …" text instead of deleting it. Default false.').optional(),
+        }),
+        120_000,
+    ),
+    passthrough(
         'set_screen_status',
-        'Record whether screens are built in code and show it as a "Badge · {name}" pill (Built green, Drift amber, Not built grey) inside each "Screen · …" group, right-aligned with the frame on the label line. Follow skill://appflow/verify-built/SKILL.md first: only mark built after comparing the route\'s code and the running app with the frame. built needs confidence ("runtime" when checked in the running app, "static" when only the code was compared); drift needs notes listing what differs. Batch every screen into one call. Screens must be grouped (run group_screens). Returns { updated: [{ id, name, status, badgeId }], errors: [{ id, error }] }.',
+        'Record whether screens are built in code and show it as a "Badge · {name}" pill (Built green, Drift amber, Not built grey) as a loose sibling of the screen frame, right-aligned with the frame and centred on the route text line above it. Follow skill://appflow/verify-built/SKILL.md first: only mark built after comparing the route\'s code and the running app with the frame. built needs confidence ("runtime" when checked in the running app, "static" when only the code was compared); drift needs notes listing what differs. Batch every screen into one call. Works on top-level (ungrouped) screens. Returns { updated: [{ id, name, status, badgeId }], errors: [{ id, error }] }.',
         obj({
             screens: z.array(
                 obj({
@@ -480,7 +490,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'badge_screens',
-        'Add or refresh the build badge on every adopted, grouped screen, showing its stored status (Not built when none). Idempotent; run once on existing boards and after group_screens. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, skipped: [{ id, name, reason }] }.',
+        'Add or refresh the build badge on every adopted screen, showing its stored status (Not built when none). Idempotent; run once on existing boards. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, skipped: [{ id, name, reason }] }.',
         obj({
             boardId: boardIdAll,
             dryRun: bool('Report what would change without editing the file. Default false.').optional(),
@@ -504,7 +514,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'move_screen',
-        'Move an adopted screen to a grid cell, taking its label and route texts with it, and update its stored cell. Refuses an occupied cell unless swap is true (the two screens then trade cells). Grows the board background when the cell is outside it, then reroutes the board’s arrows. Screens whose stored data was copied by duplicating a frame in Figma are repaired from their position and reported in stale. Returns { boardId, moved: [{id, name, from, to}], stale, board, reroute }.',
+        'Move an adopted screen to a grid cell, taking its route text and badge with it, and update its stored cell. Refuses an occupied cell unless swap is true (the two screens then trade cells). Grows the board background when the cell is outside it, then reroutes the board’s arrows. Screens whose stored data was copied by duplicating a frame in Figma are repaired from their position and reported in stale. Returns { boardId, moved: [{id, name, from, to}], stale, board, reroute }.',
         obj({
             id: str('Screen frame ID.'),
             col: num('Target column, 0-based.'),
@@ -515,7 +525,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'insert_columns',
-        'Make room for new columns: every screen with a column greater than `after` (and its label and route texts) moves `count` columns right, the board grows, and arrows are rerouted. Use after: -1 to insert before the first column. Returns { boardId, moved, stale, board, reroute }.',
+        'Make room for new columns: every screen with a column greater than `after` (and its route text and badge) moves `count` columns right, the board grows, and arrows are rerouted. Use after: -1 to insert before the first column. Returns { boardId, moved, stale, board, reroute }.',
         obj({
             boardId: str('Board node ID.'),
             after: num('Insert after this column (0-based). -1 inserts before the first.'),
@@ -525,7 +535,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'insert_rows',
-        'Make room for new rows: every screen with a row greater than `after` (and its label and route texts) moves `count` rows down, the board grows, and arrows are rerouted. Use after: -1 to insert before the first row. Returns { boardId, moved, stale, board, reroute }.',
+        'Make room for new rows: every screen with a row greater than `after` (and its route text and badge) moves `count` rows down, the board grows, and arrows are rerouted. Use after: -1 to insert before the first row. Returns { boardId, moved, stale, board, reroute }.',
         obj({
             boardId: str('Board node ID.'),
             after: num('Insert after this row (0-based). -1 inserts before the first.'),

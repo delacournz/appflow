@@ -958,7 +958,7 @@ ${logs.join(`
     return at;
   }
   var LABEL_OFFSETS = [80, 72];
-  var ROUTE_OFFSETS = [48, 40];
+  var ROUTE_OFFSETS = [72, 48, 40];
   function assignScreenTexts(screen, texts) {
     const find = (prefix, offsets) => texts.find((t) => t.name.startsWith(prefix) && Math.abs(t.rect.x - screen.x) <= 2 && offsets.some((o) => Math.abs(t.rect.y - (screen.y - o)) <= 4))?.id ?? null;
     return { labelId: find("Label ·", LABEL_OFFSETS), routeId: find("Route ·", ROUTE_OFFSETS) };
@@ -1151,31 +1151,6 @@ ${logs.join(`
     return { reactions: out, replaced: true };
   }
 
-  // plugin-src/lift.ts
-  function lift(frame) {
-    const group = frame.parent;
-    const host = group?.parent;
-    if (group?.type !== "GROUP" || !host?.insertChild || !group.insertChild || !group.children || !host.children)
-      return null;
-    const index = group.children.indexOf(frame);
-    host.insertChild(host.children.indexOf(group) + 1, frame);
-    return () => group.insertChild?.(index, frame);
-  }
-  async function liftOutOfGroups(frames, work) {
-    const restores = [];
-    try {
-      for (const f of new Set(frames)) {
-        const r = lift(f);
-        if (r)
-          restores.push(r);
-      }
-      return await work();
-    } finally {
-      for (const r of restores.reverse())
-        r();
-    }
-  }
-
   // plugin-src/screen-status.ts
   var hex2 = (h) => ({ r: parseInt(h.slice(1, 3), 16) / 255, g: parseInt(h.slice(3, 5), 16) / 255, b: parseInt(h.slice(5, 7), 16) / 255 });
   var BADGE_SPECS = {
@@ -1245,81 +1220,61 @@ ${logs.join(`
     ];
     return [s.groupId, ...loose];
   }
+  var ROUTE_ABOVE = 72;
+  var LINE_HEIGHT = 28;
+  var routeSlot = (frame) => ({ x: frame.x, y: frame.y - ROUTE_ABOVE });
+  var badgeFallbackOffset = (badgeHeight) => ROUTE_ABOVE - (LINE_HEIGHT - badgeHeight) / 2;
+  var SLOT_TOLERANCE = 2;
+  function badgeBelongsTo(frame, badge) {
+    const flush = Math.abs(badge.x + badge.width - (frame.x + frame.width)) <= SLOT_TOLERANCE;
+    const above = badge.y + badge.height <= frame.y + SLOT_TOLERANCE && badge.y >= frame.y - ROUTE_ABOVE - LINE_HEIGHT;
+    return flush && above;
+  }
+  function planUngroup(c) {
+    if (c.keepLabels)
+      return { moveOut: c.inScreenGroup, removeLabelId: null, labelId: c.labelId };
+    return { moveOut: c.inScreenGroup, removeLabelId: c.labelId, labelId: null };
+  }
+  var ROUTE_BADGE_GAP = 12;
+  var routeWidth = (frameWidth, badgeWidth) => badgeWidth === null ? frameWidth : Math.max(1, frameWidth - badgeWidth - ROUTE_BADGE_GAP);
 
-  // plugin-src/group-screens.ts
-  async function groupScreen(frame, meta, dryRun = false) {
-    const [label, route, badge] = await Promise.all([
-      meta.labelId ? sceneById(meta.labelId) : null,
-      meta.routeId ? sceneById(meta.routeId) : null,
-      meta.badgeId ? sceneById(meta.badgeId) : null
-    ]);
-    const base = { frameId: frame.id, name: frame.name, missingLabel: !label };
-    const holder = frame.parent;
-    if (!holder || !("children" in holder)) {
-      return { ...base, status: "skipped", groupId: null, reason: `${frame.name} sits in a ${frame.parent?.type ?? "missing"} parent that cannot hold a group.` };
-    }
-    const plan = planGrouping({
-      frameId: frame.id,
-      frameName: frame.name,
-      labelId: label?.id ?? null,
-      routeId: route?.id ?? null,
-      badgeId: badge?.id ?? null,
-      parent: { id: holder.id, type: holder.type, name: "name" in holder ? holder.name : "", childIds: holder.children.map((k) => k.id) }
-    });
-    if (plan.kind === "conflict")
-      return { ...base, status: "skipped", groupId: null, reason: plan.reason };
-    if (plan.kind === "already") {
-      if (!dryRun && meta.groupId !== plan.groupId)
-        frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, plan.groupId)));
-      return { ...base, status: "already", groupId: plan.groupId };
-    }
-    if (dryRun)
-      return { ...base, status: "grouped", groupId: null };
-    const nodes = plan.memberIds.map((id) => [frame, label, route, badge].find((n) => n?.id === id)).filter((n) => !!n);
-    const group = figma.group(nodes, holder);
-    group.name = plan.name;
-    for (const n of nodes)
-      group.appendChild(n);
-    holder.insertChild(plan.index, group);
-    frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, group.id)));
-    return { ...base, status: "grouped", groupId: group.id };
+  // plugin-src/anatomy.ts
+  async function fitRoute(route, frameWidth, badgeWidth) {
+    if (route.characters.length)
+      for (const f of route.getRangeAllFontNames(0, route.characters.length))
+        await figma.loadFontAsync(f);
+    else if (route.fontName !== figma.mixed)
+      await figma.loadFontAsync(route.fontName);
+    route.textAutoResize = "HEIGHT";
+    route.resize(routeWidth(frameWidth, badgeWidth), route.height);
+    route.maxLines = 1;
+    route.textTruncation = "ENDING";
   }
-  async function groupBoard(board, dryRun, missingLabel) {
-    const parent = board.node.parent;
-    if (!parent || !("children" in parent))
-      return [];
-    const out = [];
-    for (const { frame } of collectScreens(parent.children)) {
-      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
-      if (!meta || meta.boardId !== board.node.id)
-        continue;
-      const { missingLabel: noLabel, ...detail } = await groupScreen(frame, meta, dryRun);
-      if (noLabel)
-        missingLabel.push(frame.id);
-      out.push(detail);
-    }
-    if (!dryRun)
-      raiseArrows(board);
-    return out;
+
+  // plugin-src/lift.ts
+  function lift(frame) {
+    const group = frame.parent;
+    const host = group?.parent;
+    if (group?.type !== "GROUP" || !host?.insertChild || !group.insertChild || !group.children || !host.children)
+      return null;
+    const index = group.children.indexOf(frame);
+    host.insertChild(host.children.indexOf(group) + 1, frame);
+    return () => group.insertChild?.(index, frame);
   }
-  var groupScreens = async (args) => {
-    const dryRun = bool(args, "dryRun", false);
-    const boards = await boardsFor(args);
-    if (!boards.length)
-      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
-    const missingLabel = [];
-    const details = [];
-    for (const b of boards)
-      details.push(...await groupBoard(b, dryRun, missingLabel));
-    return ok({
-      dryRun,
-      boards: boards.map((b) => b.node.id),
-      grouped: details.filter((d) => d.status === "grouped").length,
-      skipped: details.filter((d) => d.status !== "grouped").length,
-      missingLabel,
-      details
-    });
-  };
+  async function liftOutOfGroups(frames, work) {
+    const restores = [];
+    try {
+      for (const f of new Set(frames)) {
+        const r = lift(f);
+        if (r)
+          restores.push(r);
+      }
+      return await work();
+    } finally {
+      for (const r of restores.reverse())
+        r();
+    }
+  }
 
   // plugin-src/route.ts
   var ENTRY_OFFSET = 340;
@@ -2056,7 +2011,9 @@ ${logs.join(`
         const assigned = assignScreenTexts(s.rect, texts);
         const meta = { v: 1, kind: "screen", boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
         s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
-        await groupScreen(s.node, meta);
+        const routeNode = assigned.routeId ? await sceneById(assigned.routeId) : null;
+        if (routeNode?.type === "TEXT")
+          await fitRoute(routeNode, s.node.width, null);
       }
       for (const p of planned) {
         const container = p.vector.parent && "children" in p.vector.parent ? p.vector.parent : arrowsGroup;
@@ -2146,14 +2103,16 @@ ${logs.join(`
       return FONT;
     }
   }
-  async function ensureBadge(frame, meta, build, labelOffset) {
-    const group = meta.groupId ? await sceneById(meta.groupId) : null;
-    if (!group || group.type !== "GROUP" || frame.parent?.id !== group.id)
-      throw new Error(`${frame.name} (${frame.id}) is not in its "Screen · …" group. Run group_screens first.`);
-    const label = meta.labelId ? await sceneById(meta.labelId) : null;
+  async function ensureBadge(frame, meta, build) {
+    const holder = frame.parent;
+    if (!holder || !("children" in holder) || holder.type === "DOCUMENT")
+      throw new Error(`${frame.name} (${frame.id}) sits in a parent that cannot hold a badge.`);
+    const [label, route] = await Promise.all([meta.labelId ? sceneById(meta.labelId) : null, meta.routeId ? sceneById(meta.routeId) : null]);
+    const line = label ?? route;
     const spec = BADGE_SPECS[build.status];
-    const font = await fontFor(label);
+    const font = await fontFor(label ?? route);
     let parts = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
+    const created = !parts;
     if (!parts) {
       const text = figma.createText();
       text.fontName = font;
@@ -2162,9 +2121,9 @@ ${logs.join(`
       text.characters = spec.text;
       const pill = figma.createRectangle();
       pill.cornerRadius = HEIGHT / 2;
-      group.appendChild(pill);
-      group.appendChild(text);
-      const g = figma.group([pill, text], group);
+      holder.appendChild(pill);
+      holder.appendChild(text);
+      const g = figma.group([pill, text], holder);
       parts = { group: g, pill, text };
     }
     const { pill, text } = parts;
@@ -2174,15 +2133,17 @@ ${logs.join(`
     pill.fills = [{ type: "SOLID", color: spec.fill }];
     const width = Math.ceil(text.width) + PAD_X * 2;
     pill.resize(width, HEIGHT);
-    const at = badgePosition(rectOf(frame), label ? rectOf(label) : null, labelOffset, { width, height: HEIGHT });
-    const origin = rectOf(group);
-    const local = { x: group.x + (at.x - origin.x), y: group.y + (at.y - origin.y) };
-    pill.x = local.x;
-    pill.y = local.y;
-    text.x = local.x + PAD_X;
-    text.y = local.y + (HEIGHT - text.height) / 2;
+    const at = badgePosition(rectOf(frame), line ? rectOf(line) : null, badgeFallbackOffset(HEIGHT), { width, height: HEIGHT });
+    const now = rectOf(pill);
+    pill.x += at.x - now.x;
+    pill.y += at.y - now.y;
+    text.x = pill.x + PAD_X;
+    text.y = pill.y + (HEIGHT - text.height) / 2;
+    if (route?.type === "TEXT")
+      await fitRoute(route, frame.width, width);
     parts.group.name = badgeName(frame.name);
-    group.appendChild(parts.group);
+    if (created || parts.group.parent?.id !== holder.id)
+      holder.insertChild(Math.min(holder.children.indexOf(frame) + 1, holder.children.length), parts.group);
     return parts.group;
   }
   async function screenFrame(id) {
@@ -2227,7 +2188,7 @@ ${logs.join(`
         if (!board)
           throw new Error(`The board ${meta.boardId} is gone.`);
         boards.set(meta.boardId, board);
-        const badge = await ensureBadge(frame, meta, status.value, board.meta.labelOffset);
+        const badge = await ensureBadge(frame, meta, status.value);
         writeScreen(frame, { ...meta, build: status.value, badgeId: badge.id });
         done.push({ id: frame.id, name: frame.name, status: status.value.status, badgeId: badge.id });
       } catch (error) {
@@ -2250,14 +2211,10 @@ ${logs.join(`
       const parent = board.node.parent;
       if (!parent || !("children" in parent))
         continue;
-      for (const { frame, group } of collectScreens(parent.children)) {
+      for (const { frame } of collectScreens(parent.children)) {
         const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
         if (!meta || meta.boardId !== board.node.id)
           continue;
-        if (!group || meta.groupId !== group.id) {
-          skipped.push({ id: frame.id, name: frame.name, reason: 'Not in its "Screen · …" group. Run group_screens first.' });
-          continue;
-        }
         const has = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
         const build = buildStatusOf(meta.build);
         const row = { id: frame.id, name: frame.name, status: build.status };
@@ -2265,7 +2222,7 @@ ${logs.join(`
           (has ? refreshed : added).push(row);
           continue;
         }
-        const badge = await ensureBadge(frame, meta, build, board.meta.labelOffset);
+        const badge = await ensureBadge(frame, meta, build);
         writeScreen(frame, { ...meta, build, badgeId: badge.id });
         (has ? refreshed : added).push({ ...row, badgeId: badge.id });
       }
@@ -2911,6 +2868,14 @@ ${body}
     await loadFontsOf(text);
     text.characters = value;
   }
+  function moveToAbs(node, at) {
+    const parent = node.parent;
+    if (!parent)
+      return;
+    const local = toLocal(parent, at);
+    node.x = local.x;
+    node.y = local.y;
+  }
   function clearFlowData(root) {
     const nodes = "findAll" in root ? [root, ...root.findAll()] : [root];
     for (const n of nodes) {
@@ -3061,8 +3026,18 @@ ${body}
       copy = src.clone();
       copy.x = src.x + dx;
       copy.y = src.y + dy;
-      label = await cloneText(meta.labelId, dx, dy, labelName(name), name);
+      label = null;
       routeText = await cloneText(meta.routeId, dx, dy, routeName(name), route ?? null);
+      if (routeText) {
+        moveToAbs(routeText, routeSlot(target));
+        await fitRoute(routeText, copy.width, null);
+      }
+      if (srcBadge?.type === "GROUP") {
+        badgeCopy = srcBadge.clone();
+        badgeCopy.x = srcBadge.x + dx;
+        badgeCopy.y = srcBadge.y + dy;
+        badgeCopy.name = badgeName(name);
+      }
     }
     copy.name = frameName(name);
     clearFlowData(groupCopy ?? copy);
@@ -3080,13 +3055,7 @@ ${body}
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build)
-      await ensureBadge(copy, fresh, fresh.build, board.labelOffset);
-    if (!groupCopy) {
-      const grouping = await groupScreen(copy, fresh);
-      const made = grouping.groupId ? await sceneById2(grouping.groupId) : null;
-      if (made?.type === "GROUP")
-        groupCopy = made;
-    }
+      await ensureBadge(copy, fresh, fresh.build);
     const bannerUpdated = banner ? await updateBanner(copy, banner) : false;
     const bounds = rectOf2(boardNode);
     const grown = growBounds(bounds, [target, ...[label, routeText].flatMap((t) => t ? [rectOf2(t)] : [])], board.margin);
@@ -3983,6 +3952,154 @@ ${body}
     return ok(spec);
   };
 
+  // plugin-src/group-screens.ts
+  async function groupScreen(frame, meta, dryRun = false) {
+    const [label, route, badge] = await Promise.all([
+      meta.labelId ? sceneById(meta.labelId) : null,
+      meta.routeId ? sceneById(meta.routeId) : null,
+      meta.badgeId ? sceneById(meta.badgeId) : null
+    ]);
+    const base = { frameId: frame.id, name: frame.name, missingLabel: !label };
+    const holder = frame.parent;
+    if (!holder || !("children" in holder)) {
+      return { ...base, status: "skipped", groupId: null, reason: `${frame.name} sits in a ${frame.parent?.type ?? "missing"} parent that cannot hold a group.` };
+    }
+    const plan = planGrouping({
+      frameId: frame.id,
+      frameName: frame.name,
+      labelId: label?.id ?? null,
+      routeId: route?.id ?? null,
+      badgeId: badge?.id ?? null,
+      parent: { id: holder.id, type: holder.type, name: "name" in holder ? holder.name : "", childIds: holder.children.map((k) => k.id) }
+    });
+    if (plan.kind === "conflict")
+      return { ...base, status: "skipped", groupId: null, reason: plan.reason };
+    if (plan.kind === "already") {
+      if (!dryRun && meta.groupId !== plan.groupId)
+        frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, plan.groupId)));
+      return { ...base, status: "already", groupId: plan.groupId };
+    }
+    if (dryRun)
+      return { ...base, status: "grouped", groupId: null };
+    const nodes = plan.memberIds.map((id) => [frame, label, route, badge].find((n) => n?.id === id)).filter((n) => !!n);
+    const group = figma.group(nodes, holder);
+    group.name = plan.name;
+    for (const n of nodes)
+      group.appendChild(n);
+    holder.insertChild(plan.index, group);
+    frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(upgradeScreenMeta(meta, group.id)));
+    return { ...base, status: "grouped", groupId: group.id };
+  }
+  async function groupBoard(board, dryRun, missingLabel) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const out = [];
+    for (const { frame } of collectScreens(parent.children)) {
+      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+      if (!meta || meta.boardId !== board.node.id)
+        continue;
+      const { missingLabel: noLabel, ...detail } = await groupScreen(frame, meta, dryRun);
+      if (noLabel)
+        missingLabel.push(frame.id);
+      out.push(detail);
+    }
+    if (!dryRun)
+      raiseArrows(board);
+    return out;
+  }
+  var groupScreens = async (args) => {
+    const dryRun = bool(args, "dryRun", false);
+    const boards = await boardsFor(args);
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    const missingLabel = [];
+    const details = [];
+    for (const b of boards)
+      details.push(...await groupBoard(b, dryRun, missingLabel));
+    return ok({
+      dryRun,
+      boards: boards.map((b) => b.node.id),
+      grouped: details.filter((d) => d.status === "grouped").length,
+      skipped: details.filter((d) => d.status !== "grouped").length,
+      missingLabel,
+      details
+    });
+  };
+  function moveToAbs2(node, at) {
+    const parent = node.parent;
+    if (!parent)
+      return;
+    const local = toLocal(parent, at);
+    node.x = local.x;
+    node.y = local.y;
+  }
+  async function ungroupScreen(frame, stored, group, keepLabels, dryRun = false) {
+    const plan = planUngroup({ inScreenGroup: !!group, labelId: stored.labelId, keepLabels });
+    const base = { frameId: frame.id, name: frame.name, labelRemoved: !!plan.removeLabelId };
+    if (dryRun)
+      return { ...base, status: group || plan.removeLabelId ? "ungrouped" : "already" };
+    const route = stored.routeId ? await sceneById(stored.routeId) : null;
+    const label = plan.removeLabelId ? await sceneById(plan.removeLabelId) : null;
+    if (label)
+      label.remove();
+    if (group) {
+      const host = group.parent;
+      if (!host || !("children" in host))
+        return { ...base, status: "skipped", labelRemoved: !!label, reason: `${frame.name} sits in a ${group.parent?.type ?? "missing"} parent that cannot hold loose screens.` };
+      const absolute = new Map(group.children.map((k) => [k.id, { x: rectOf(k).x, y: rectOf(k).y }]));
+      let at = host.children.indexOf(group);
+      for (const k of [...group.children]) {
+        host.insertChild(at++, k);
+        const was = absolute.get(k.id);
+        if (was)
+          moveToAbs2(k, was);
+      }
+      if (!group.removed)
+        group.remove();
+    }
+    if (route && route.type === "TEXT") {
+      moveToAbs2(route, routeSlot(rectOf(frame)));
+      await fitRoute(route, frame.width, null);
+    }
+    const meta = { ...upgradeScreenMeta(stored, null), labelId: plan.labelId };
+    frame.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+    const badge = meta.badgeId ? await sceneById(meta.badgeId) : null;
+    if (badge)
+      await ensureBadge(frame, meta, buildStatusOf(meta.build));
+    return { ...base, status: group || label ? "ungrouped" : "already", labelRemoved: !!label };
+  }
+  var ungroupScreens = async (args) => {
+    const dryRun = bool(args, "dryRun", false);
+    const keepLabels = bool(args, "keepLabels", false);
+    const boards = await boardsFor(args);
+    if (!boards.length)
+      return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    const details = [];
+    for (const board of boards) {
+      const parent = board.node.parent;
+      if (!parent || !("children" in parent))
+        continue;
+      for (const { frame, group } of collectScreens(parent.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (!meta || meta.boardId !== board.node.id)
+          continue;
+        details.push(await ungroupScreen(frame, meta, group, keepLabels, dryRun));
+      }
+      if (!dryRun)
+        raiseArrows(board);
+    }
+    return ok({
+      dryRun,
+      boards: boards.map((b) => b.node.id),
+      ungrouped: details.filter((d) => d.status === "ungrouped").length,
+      already: details.filter((d) => d.status === "already").length,
+      skipped: details.filter((d) => d.status === "skipped").length,
+      labelsRemoved: details.filter((d) => d.labelRemoved).length,
+      details
+    });
+  };
+
   // plugin-src/grid.ts
   function cellRect2(meta, col, row) {
     return { x: meta.originX + col * meta.colWidth, y: meta.originY + row * meta.rowHeight, width: meta.screenW, height: meta.screenH };
@@ -4064,9 +4181,10 @@ ${body}
       if (!stored || stored.boardId !== board.node.id)
         continue;
       const groupId = groupIdOf(entry);
-      const label = stored.labelId ? await sceneById(stored.labelId) : null;
+      const anchorId = stored.labelId ?? stored.routeId;
+      const anchor = anchorId ? await sceneById(anchorId) : null;
       const rect = rectOf(c);
-      const reason = staleReason(board.meta, stored, rect, label ? rectOf(label) : null, stored.labelId !== null);
+      const reason = staleReason(board.meta, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
       if (!reason) {
         if ((stored.groupId ?? null) === groupId) {
           screens.push({ node: c, meta: stored });
@@ -4078,16 +4196,17 @@ ${body}
         continue;
       }
       const cell = cellOf(rect, board.meta);
-      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...await ownBadge(stored, groupId) };
+      const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...await ownBadge(stored, groupId, rect) };
       writeScreen2(c, meta);
       stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
       screens.push({ node: c, meta });
     }
     return { screens, stale };
   }
-  async function ownBadge(stored, groupId) {
+  async function ownBadge(stored, groupId, frame) {
     const badge = stored.badgeId ? await sceneById(stored.badgeId) : null;
-    if (badge && groupId && badge.parent?.id === groupId)
+    const own = badge && (groupId ? badge.parent?.id === groupId : badgeBelongsTo(frame, rectOf(badge)));
+    if (own)
       return { badgeId: stored.badgeId ?? null, build: stored.build };
     return { badgeId: null, build: { status: "not-built" } };
   }
@@ -4333,6 +4452,7 @@ ${body}
     compact_board: compactBoard,
     duplicate_screen: duplicateScreen,
     group_screens: groupScreens,
+    ungroup_screens: ungroupScreens,
     set_screen_status: setScreenStatus,
     badge_screens: badgeScreens,
     export_design_system: exportDesignSystem,
@@ -4365,7 +4485,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "72b67248", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "327d5a50", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -4373,7 +4493,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"72b67248"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"327d5a50"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { parseScreenMeta, type ScreenMeta } from './flowmeta';
-import { isScreenGroupName, planGrouping, screenGroupName, screenNames, shiftTargets, upgradeScreenMeta, type GroupCandidate } from './screen-group';
+import { badgeBelongsTo, badgeFallbackOffset, isScreenGroupName, planGrouping, planUngroup, routeSlot, routeWidth, screenGroupName, screenNames, shiftTargets, upgradeScreenMeta, type GroupCandidate } from './screen-group';
 
 const candidate = (over: Partial<GroupCandidate> = {}): GroupCandidate => ({
     frameId: 'f',
@@ -110,4 +110,48 @@ describe('badges', () => {
     test('ungrouped screens move the badge too', () => {
         expect(shiftTargets({ frameId: 'f', groupId: null, frameParentId: 'page', labelId: null, labelParentId: null, routeId: null, routeParentId: null, badgeId: 'b', badgeParentId: 'page' })).toEqual(['f', 'b']);
     });
+});
+
+describe('ungrouped anatomy', () => {
+    const frame = { x: 1000, y: 500, width: 393, height: 852 };
+    test('route slot is the old label line, 72 above the frame at its x', () => {
+        expect(routeSlot(frame)).toEqual({ x: 1000, y: 428 });
+    });
+    test('badge fallback centres a 20 high pill on the 28 high line', () => {
+        expect(badgeFallbackOffset(20)).toBe(68);
+    });
+    test('ungrouped screens without a label move frame, route and badge', () => {
+        expect(shiftTargets({ frameId: 'f', groupId: null, frameParentId: 'page', labelId: null, labelParentId: null, routeId: 'r', routeParentId: 'page', badgeId: 'b', badgeParentId: 'page' })).toEqual(['f', 'r', 'b']);
+    });
+});
+
+describe('planUngroup', () => {
+    test('a grouped screen moves out and loses its label', () => {
+        expect(planUngroup({ inScreenGroup: true, labelId: 'l', keepLabels: false })).toEqual({ moveOut: true, removeLabelId: 'l', labelId: null });
+    });
+    test('keepLabels keeps the label and its id', () => {
+        expect(planUngroup({ inScreenGroup: true, labelId: 'l', keepLabels: true })).toEqual({ moveOut: true, removeLabelId: null, labelId: 'l' });
+    });
+    test('an ungrouped screen does not move but still drops a stray label', () => {
+        expect(planUngroup({ inScreenGroup: false, labelId: 'l', keepLabels: false })).toEqual({ moveOut: false, removeLabelId: 'l', labelId: null });
+    });
+    test('idempotent on a clean ungrouped screen', () => {
+        expect(planUngroup({ inScreenGroup: false, labelId: null, keepLabels: false })).toEqual({ moveOut: false, removeLabelId: null, labelId: null });
+    });
+});
+
+describe('badgeBelongsTo', () => {
+    const frame = { x: 1000, y: 500, width: 393, height: 852 };
+    test('right-aligned pill on the line above the frame', () => {
+        expect(badgeBelongsTo(frame, { x: 1393 - 60, y: 428, width: 60, height: 20 })).toBe(true);
+    });
+    test('another screen\'s pill does not', () => {
+        expect(badgeBelongsTo(frame, { x: 1393 + 700 - 60, y: 428, width: 60, height: 20 })).toBe(false);
+        expect(badgeBelongsTo(frame, { x: 1393 - 60, y: 428 + 1112, width: 60, height: 20 })).toBe(false);
+    });
+});
+
+describe('routeWidth', () => {
+    test('full frame width without a badge', () => expect(routeWidth(393, null)).toBe(393));
+    test('stops 12 short of the badge', () => expect(routeWidth(393, 60)).toBe(321));
 });

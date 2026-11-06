@@ -13,7 +13,7 @@ import { callTool, type ToolContext } from './tools';
 type Call = { tool: string; args: JsonObject; timeoutMs: number; connId?: string };
 type Content = { type: string; text?: string; data?: string; mimeType?: string };
 type ToolResult = { content: Content[]; isError?: boolean };
-type ListedTool = { name: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } };
+type ListedTool = { name: string; description?: string; inputSchema: { required?: string[]; properties?: Record<string, unknown> } };
 
 let dir: string;
 const clients = new Map<ToolContext, Promise<Client>>();
@@ -148,6 +148,17 @@ describe('protocol', () => {
         const content = (await mc.readResource({ uri })).contents[0];
         expect(content && 'text' in content ? content.text : '').toContain('set_screen_status');
         expect(promptText(await mc.getPrompt({ name: 'verify_built' }))).toContain('set_screen_status');
+    });
+
+    test('ungrouped screens: ungroup_screens exists and the layout skill says screens are top-level', async () => {
+        const mc = await client();
+        const tools = await listTools();
+        expect(tools.map((t) => t.name)).toContain('ungroup_screens');
+        expect(tools.find((t) => t.name === 'group_screens')?.description ?? '').toContain('prototype');
+        const content = (await mc.readResource({ uri: 'skill://appflow/flow-layout/SKILL.md' })).contents[0];
+        const text = content && 'text' in content ? content.text : '';
+        expect(text).toContain('top-level');
+        expect(text).toContain('ungroup_screens');
     });
 
     test('sync from code: instructions, skill resource and prompt', async () => {

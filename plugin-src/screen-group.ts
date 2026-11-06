@@ -1,5 +1,6 @@
 /** Pure helpers for `Screen · {name}` groups. No `figma` global. */
 import type { ScreenMeta } from './flowmeta';
+import type { Rect } from './rect';
 import { badgeName } from './screen-status';
 
 const PREFIX = 'Screen · ';
@@ -67,3 +68,40 @@ export function shiftTargets(s: ShiftInput): string[] {
     ];
     return [s.groupId as string, ...loose];
 }
+
+/** Screens are top-level frames so prototyping works. The route text sits this far above the frame, clear of Figma's frame title. */
+export const ROUTE_ABOVE = 72;
+/** Height of the line the route text and the badge share above the frame. */
+export const LINE_HEIGHT = 28;
+
+/** Absolute top-left of a screen's route text: the frame's x, `ROUTE_ABOVE` above it. */
+export const routeSlot = (frame: Rect): { x: number; y: number } => ({ x: frame.x, y: frame.y - ROUTE_ABOVE });
+
+/** Distance above the frame for a badge with no route text to centre on: centred on the shared line. */
+export const badgeFallbackOffset = (badgeHeight: number): number => ROUTE_ABOVE - (LINE_HEIGHT - badgeHeight) / 2;
+
+const SLOT_TOLERANCE = 2;
+
+/**
+ * Whether a badge sits where this frame's own badge would: right edge flush with the frame, just above it.
+ * A hand copy of a screen keeps the original's badge id, so loose badges are told apart by position.
+ */
+export function badgeBelongsTo(frame: Rect, badge: Rect): boolean {
+    const flush = Math.abs(badge.x + badge.width - (frame.x + frame.width)) <= SLOT_TOLERANCE;
+    const above = badge.y + badge.height <= frame.y + SLOT_TOLERANCE && badge.y >= frame.y - ROUTE_ABOVE - LINE_HEIGHT;
+    return flush && above;
+}
+
+export type UngroupCandidate = { inScreenGroup: boolean; labelId: string | null; keepLabels: boolean };
+export type UngroupPlan = { moveOut: boolean; removeLabelId: string | null; labelId: string | null };
+
+/** What ungrouping a screen needs: move it out of its group, and drop the label text unless asked to keep it. */
+export function planUngroup(c: UngroupCandidate): UngroupPlan {
+    if (c.keepLabels) return { moveOut: c.inScreenGroup, removeLabelId: null, labelId: c.labelId };
+    return { moveOut: c.inScreenGroup, removeLabelId: c.labelId, labelId: null };
+}
+
+export const ROUTE_BADGE_GAP = 12;
+
+/** Width of the route text: the frame's width less the badge and a gap, so a long route never runs under the badge. */
+export const routeWidth = (frameWidth: number, badgeWidth: number | null): number => (badgeWidth === null ? frameWidth : Math.max(1, frameWidth - badgeWidth - ROUTE_BADGE_GAP));

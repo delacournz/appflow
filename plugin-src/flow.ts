@@ -19,8 +19,8 @@ import {
     type ReactionLike,
     type ScreenMeta,
 } from './flowmeta';
+import { fitRoute } from './anatomy';
 import { liftOutOfGroups } from './lift';
-import { groupScreen } from './group-screens';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
 import { assignLanes, clearOfLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
@@ -50,7 +50,7 @@ export function rectOf(n: SceneNode): Rect {
 }
 
 /** Converts an absolute point to the coordinate space children of `parent` use. */
-function toLocal(parent: BaseNode, p: Pt): Pt {
+export function toLocal(parent: BaseNode, p: Pt): Pt {
     let a: BaseNode | null = parent;
     while (a && (a.type === 'GROUP' || a.type === 'BOOLEAN_OPERATION')) a = a.parent;
     if (!a || a.type === 'PAGE' || a.type === 'DOCUMENT' || !('absoluteTransform' in a)) return p;
@@ -623,7 +623,8 @@ export const adoptBoard: Handler = async (args) => {
             const assigned = assignScreenTexts(s.rect, texts);
             const meta: ScreenMeta = { v: 1, kind: 'screen', boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
             s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
-            await groupScreen(s.node, meta);
+            const routeNode = assigned.routeId ? await sceneById(assigned.routeId) : null;
+            if (routeNode?.type === 'TEXT') await fitRoute(routeNode, s.node.width, null);
         }
         for (const p of planned) {
             const container = p.vector.parent && 'children' in p.vector.parent ? p.vector.parent : arrowsGroup;

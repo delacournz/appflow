@@ -10,7 +10,7 @@ import { describeBoard } from './describe';
 import { duplicateScreen } from './duplicate';
 import { applyDesignOps } from './design-apply';
 import { exportDesignSystem } from './design-export';
-import { groupScreens } from './group-screens';
+import { groupScreens, ungroupScreens } from './group-screens';
 import { errorText } from './nodes';
 import { compactBoard, createBoard, insertColumns, insertRows, moveScreen } from './gridtools';
 import { fail, type Handler, type MainReply } from './types';
@@ -45,6 +45,7 @@ const handlers: Record<string, Handler> = {
     compact_board: compactBoard,
     duplicate_screen: duplicateScreen,
     group_screens: groupScreens,
+    ungroup_screens: ungroupScreens,
     set_screen_status: setScreenStatus,
     badge_screens: badgeScreens,
     export_design_system: exportDesignSystem,
