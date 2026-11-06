@@ -1448,8 +1448,11 @@ ${logs.join(`
         const ty = midY(target);
         const sx = right(source);
         if (exit === "bottom" && target.y >= bottom(source)) {
-          const x = clamp(source.x + ENTRY_OFFSET + off, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
-          return done("elbow", [{ x, y: bottom(source) }, { x, y: ty + off }, { x: tx, y: ty + off }]);
+          const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
+          const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
+          const y = fan && fan.count > 1 ? ty : ty + off;
+          const r = done("elbow", [{ x, y: bottom(source) }, { x, y }, { x: tx, y }]);
+          return { ...r, labelAnchor: { x: (x + tx) / 2, y } };
         }
         if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
           const y = midY(source);
@@ -1550,9 +1553,13 @@ ${logs.join(`
     const first = items.map((it) => routeArrow({ ...it.ends, gutter, lane: 0 }));
     const fans = fanIndex(items.flatMap((it, i) => {
       const r = first[i];
-      if (!r.ok || r.kind !== "trigger" && r.kind !== "gutter")
+      if (!r.ok)
         return [];
       const s = it.ends.source;
+      if (r.kind === "elbow")
+        return [{ id: it.id, group: `bottom:${s.x}:${s.y}`, targetY: it.ends.target.y + it.ends.target.height / 2 }];
+      if (r.kind !== "trigger" && r.kind !== "gutter")
+        return [];
       const startY = r.points[0].y;
       const targetY = it.ends.target.y + it.ends.target.height / 2;
       return targetY >= startY ? [{ id: it.id, group: `${s.x}:${s.y}:${gutterKey(s, it.ends.target)}`, targetY }] : [];
@@ -4358,7 +4365,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "d9b4f53f", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "72b67248", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -4366,7 +4373,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"d9b4f53f"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"72b67248"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

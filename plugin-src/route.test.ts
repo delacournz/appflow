@@ -179,7 +179,38 @@ describe('routeArrow', () => {
             { x: s.x + 340, y: t.y + H / 2 },
             { x: t.x, y: t.y + H / 2 },
         ]);
-        expect(r.labelAnchor.x).toBe(s.x + 340);
+        // The label sits on the leg entering the target, so arrows that share a drop keep their labels apart.
+        expect(r.labelAnchor).toEqual({ x: (s.x + 340 + t.x) / 2, y: t.y + H / 2 });
+    });
+
+    test('exit bottom fan: each arrow drops in its own lane, the highest target rightmost, so the drops never cross', () => {
+        const s = screen(0, 0);
+        const targets = [screen(1, 2), screen(1, 3), screen(1, 4)];
+        const routes = targets.map((t, index) =>
+            must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0, exit: 'bottom', fan: { index, count: 3 } })),
+        );
+        const xs = routes.map((r) => (r.points[0] as Pt).x);
+        expect(new Set(xs).size).toBe(3);
+        expect(xs[0]).toBe(s.x + 340);
+        expect(xs[0] as number).toBeGreaterThan(xs[1] as number);
+        expect(xs[1] as number).toBeGreaterThan(xs[2] as number);
+        for (const r of routes) {
+            expect(r.kind).toBe('elbow');
+            expect(orthogonal(r.points)).toBe(true);
+            expect(noLeft(r.points)).toBe(true);
+            expect((r.points[0] as Pt).x).toBeGreaterThan(s.x);
+        }
+        const labelYs = routes.map((r) => r.labelAnchor.y);
+        expect(labelYs).toEqual(targets.map((t) => t.y + H / 2));
+    });
+
+    test('fanIndex groups bottom-exit elbows from one source', () => {
+        const fans = fanIndex([
+            { id: 'low', group: 'bottom:a', targetY: 300 },
+            { id: 'high', group: 'bottom:a', targetY: 100 },
+        ]);
+        expect(fans.get('high')).toEqual({ index: 0, count: 2 });
+        expect(fans.get('low')).toEqual({ index: 1, count: 2 });
     });
 
     test('exit bottom is ignored when the target is not below the source', () => {

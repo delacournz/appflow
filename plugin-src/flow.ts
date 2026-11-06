@@ -102,8 +102,10 @@ function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[]): 
     const fans = fanIndex(
         items.flatMap((it, i) => {
             const r = first[i] as ReturnType<typeof routeArrow>;
-            if (!r.ok || (r.kind !== 'trigger' && r.kind !== 'gutter')) return [];
+            if (!r.ok) return [];
             const s = it.ends.source;
+            if (r.kind === 'elbow') return [{ id: it.id, group: `bottom:${s.x}:${s.y}`, targetY: it.ends.target.y + it.ends.target.height / 2 }];
+            if (r.kind !== 'trigger' && r.kind !== 'gutter') return [];
             const startY = (r.points[0] as Pt).y;
             const targetY = it.ends.target.y + it.ends.target.height / 2;
             return targetY >= startY ? [{ id: it.id, group: `${s.x}:${s.y}:${gutterKey(s, it.ends.target)}`, targetY }] : [];

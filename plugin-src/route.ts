@@ -164,8 +164,13 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             const ty = midY(target);
             const sx = right(source);
             if (exit === 'bottom' && target.y >= bottom(source)) {
-                const x = clamp(source.x + ENTRY_OFFSET + off, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
-                return done('elbow', [{ x, y: bottom(source) }, { x, y: ty + off }, { x: tx, y: ty + off }]);
+                // Fanned drops step left from the highest target's lane, so a lower drop never crosses a higher turn.
+                const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
+                const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
+                const y = fan && fan.count > 1 ? ty : ty + off;
+                const r = done('elbow', [{ x, y: bottom(source) }, { x, y }, { x: tx, y }]);
+                // The label sits on the leg entering the target, so drops that run side by side keep their labels apart.
+                return { ...r, labelAnchor: { x: (x + tx) / 2, y } };
             }
             if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
                 const y = midY(source);
