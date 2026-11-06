@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "build": "bun run scripts/build.ts",
+    "setup": "bun install && bun run build && bun run scripts/install-plugin.ts",
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p plugin-src/tsconfig.json --noEmit && tsc -p ui-src/tsconfig.json --noEmit"
   },

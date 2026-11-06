@@ -94,11 +94,10 @@ Code runs with `documentAccess: "dynamic-page"`, so use the async APIs: `getNode
 
 ## Setup
 
-1. Run `bun install && bun run build`.
+1. Run `bun run setup`. It installs, builds and adds AppFlow to Figma → Plugins → Development. If Figma is open it quits and reopens it, because Figma rewrites its settings on quit. Pass `--no-restart` to `bun run scripts/install-plugin.ts` to refuse instead, or `--dry-run` to print the change. A backup goes to `settings.json.appflow-backup` beside Figma's settings. Manual route: Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
 2. Register the server with Claude Code:
    `claude mcp add appflow -s user -- bun run ~/Documents/Projects/appflow/src/server.ts`
-3. In the Figma desktop app, go to Plugins → Development → Import plugin from manifest… and pick `plugin/manifest.json`.
-4. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
+3. Open the file, then run Plugins → Development → **AppFlow**. Leave the window open. A green dot means it is connected.
 
 Several agent sessions can run the server at once. The first one to bind the port is the leader and holds the plugin sockets. The others connect to it on `/peer` and relay their calls through it. When the leader exits, a follower takes the port and the plugin windows reconnect within about 2 s.
 
