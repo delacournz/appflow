@@ -538,6 +538,19 @@ describe('same-row arrows across occupied cells and merged fan-in', () => {
             expect(run([['again', cellAt(17, 5), t1], ['setup', cellAt(16, 4), t2]])).toEqual([]);
         });
 
+        test('live board at pitch 1704: two merged groups into stacked targets keep their trunks apart even when other groups tie the global pick (15788 / 5480)', () => {
+            const sc = (x: number, y: number): Rect => ({ x, y, width: W, height: H });
+            const at: Record<string, Rect> = {
+                a7694: sc(6980, 5510), a6316: sc(8684, 2174), a7704: sc(8684, 5510), a7771: sc(6980, 6622),
+                a15095: sc(29132, 9958), a14930: sc(29132, 8846), a15694: sc(29132, 7734), a14593: sc(29132, 6622), a15510: sc(27428, 6622),
+            };
+            const pairs: [string, string, string][] = [['8450', 'a7694', 'a6316'], ['8455', 'a7694', 'a7704'], ['8460', 'a7771', 'a6316'], ['8465', 'a7771', 'a7704'], ['15270', 'a15095', 'a14930'], ['15788', 'a15694', 'a14593'], ['5460', 'a15510', 'a14593'], ['5480', 'a15510', 'a14930']];
+            const screens = Object.values(at);
+            const plans = planRoutes({ gutter: 1704 - W, limits: pairs.map(() => undefined), screens, rowGap: PITCH_Y - H }, pairs.map(([id, s, t]) => ({ id, ends: ends(at[s] as Rect, at[t] as Rect) })));
+            const shapes = pairs.map(([id, s, t]) => ({ id, points: ((plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route).points, label: null, from: key(at[s] as Rect), to: key(at[t] as Rect) }));
+            expect(lintArrows(shapes, [], screens.map((r) => ({ id: key(r), rect: r }))).issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen')).toEqual([]);
+        });
+
         test('trunks of two targets in one column do not share a vertical when one arrow starts at the other entry height (Trusted devices)', () => {
             const t1 = cellAt(17, 4);
             const t2 = cellAt(17, 6);
