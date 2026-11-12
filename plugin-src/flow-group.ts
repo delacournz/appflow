@@ -119,6 +119,8 @@ export type BoundaryInput = {
     base: { colWidth: number; rowHeight: number; screenW: number; screenH: number };
     /** Part of the base gap kept free for arrow lanes and labels. */
     laneBand: number;
+    /** Extra bands measured from the drawn boxes (see gap-fix.ts); added on top of the planned triggers, before the no-tear repair. */
+    bonus?: BoundaryExtras;
 };
 
 export type BoundaryExtras = { colExtra: Band[]; rowExtra: Band[] };
@@ -296,7 +298,10 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
         return cur;
     };
 
-    return { colExtra: untear(colAxis, bandsOf(colAxis)), rowExtra: untear(rowAxis, bandsOf(rowAxis)) };
+    return {
+        colExtra: untear(colAxis, [...bandsOf(colAxis), ...(input.bonus?.colExtra ?? [])]),
+        rowExtra: untear(rowAxis, [...bandsOf(rowAxis), ...(input.bonus?.rowExtra ?? [])]),
+    };
 }
 
 export type ConflictGroup = { id: string; parentId?: string; box: Rect; title: Rect; strokeWeight?: number };

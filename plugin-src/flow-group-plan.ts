@@ -184,7 +184,7 @@ export type CellScreen = { id: string; col: number; row: number };
  * and labels (the router never leaves it). Rows keep the base gap less `ROUTE_TOP`, because the lower screen's route
  * text already sits in that gap and `boundaryExtras` counts it separately.
  */
-export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): BoundaryExtras {
+export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid, bonus?: BoundaryExtras): BoundaryExtras {
     const owner = new Map<string, string>();
     for (const g of groups) for (const id of g.screenIds) if (!owner.has(id)) owner.set(id, g.id);
     const cellOf = new Map(screens.map((s) => [s.id, { col: s.col, row: s.row }]));
@@ -199,8 +199,8 @@ export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readon
     if (!boundary.some((b) => b.cells.length)) return { colExtra: [], rowExtra: [] };
     const colGap = base.colWidth - base.screenW;
     const rowGap = base.rowHeight - base.screenH;
-    const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap });
-    const rows = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) });
+    const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap, ...(bonus ? { bonus } : {}) });
+    const rows = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP), ...(bonus ? { bonus } : {}) });
     return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
 }
 
