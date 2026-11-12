@@ -115,3 +115,19 @@ describe('pairLooseParts', () => {
         expect(r.unpaired).toEqual([{ vectorId: 'v1', reason: 'no-label' }]);
     });
 });
+
+import { planConsolidation, restoreDelta } from './arrow-adopt';
+
+describe('planConsolidation', () => {
+    test('moves every child of the extra containers into the first, and empties them', () => {
+        const plan = planConsolidation([{ id: 'A', childIds: ['a1'] }, { id: 'B', childIds: ['b1', 'b2'] }, { id: 'C', childIds: [] }]);
+        expect(plan).toEqual({ target: 'A', moves: [{ nodeId: 'b1', fromContainer: 'B' }, { nodeId: 'b2', fromContainer: 'B' }], emptied: ['B', 'C'] });
+    });
+    test('one container (the second run) plans nothing', () => {
+        expect(planConsolidation([{ id: 'A', childIds: ['a1'] }])).toEqual({ target: 'A', moves: [], emptied: [] });
+        expect(planConsolidation([])).toBeNull();
+    });
+    test('restoreDelta brings a node back to where it was', () => {
+        expect(restoreDelta({ x: 100, y: 50 }, { x: 40, y: 80 })).toEqual({ x: 60, y: -30 });
+    });
+});

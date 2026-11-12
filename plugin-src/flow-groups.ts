@@ -31,6 +31,8 @@ import {
 import {
     extrasMoves,
     groupBoundaryExtras,
+    internalArrowRects,
+    sameBoxes,
     hexToRgb,
     holderIndex,
     holderName,
@@ -204,11 +206,13 @@ async function paintGroup(holder: FrameNode, g: LoadedGroup, fit: FittedBox): Pr
     text.lineHeight = { unit: 'PIXELS', value: titleLineOf(style.titleSize) };
     text.fills = [{ type: 'SOLID', color: hexToRgb(style.titleColor) }];
     text.textAlignHorizontal = 'LEFT';
-    text.textAutoResize = 'HEIGHT';
     text.textTruncation = 'ENDING';
     text.maxLines = 1;
-    text.layoutGrow = 1;
     if (text.characters !== name) text.characters = name;
+    // A FILL/HUG text child with HEIGHT auto-resize collapses to 0 width in a fixed bar, so pin an explicit width.
+    text.layoutGrow = 0;
+    text.textAutoResize = 'NONE';
+    text.resize(Math.max(1, fit.box.width - TITLE_PAD_X * 2), titleLineOf(style.titleSize));
     text.name = name;
     const at = { x: fit.box.x, y: fit.box.y - height };
     place(holder, bar, at);
@@ -282,10 +286,15 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     await snapBadges(screens);
     const prints = new Map<string, Footprint>();
     for (const s of screens) prints.set(s.node.id, await footprintOf(s));
-    const membersOf = (g: LoadedGroup): Rect[] => g.meta.screenIds.flatMap((id) => {
-        const p = prints.get(id);
-        return p ? [p.content] : [];
-    });
+    const arrowRects = await internalArrowsOf(board);
+    const inside = internalArrowRects(groups.map(recOf), arrowRects);
+    const membersOf = (g: LoadedGroup): Rect[] => [
+        ...g.meta.screenIds.flatMap((id) => {
+            const p = prints.get(id);
+            return p ? [p.content] : [];
+        }),
+        ...(inside.get(g.id) ?? []),
+    ];
 
     const fitted = new Map<string, FittedBox>();
     const children = groups.filter((g) => g.meta.parentId);
@@ -343,12 +352,43 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, boxes, summary };
 }
 
-/** Refit, grow the background, redraw every arrow. The tail of every group tool. */
+/** Each arrow's ends and the rects of its label and line, for boxes that must wrap arrows running inside them. */
+async function internalArrowsOf(board: Board): Promise<{ from: string; to: string; rects: Rect[] }[]> {
+    const out: { from: string; to: string; rects: Rect[] }[] = [];
+    for (const a of listArrows(board)) {
+        const nodes = await Promise.all([sceneById(a.meta.labelId), sceneById(a.meta.vectorId)]);
+        out.push({ from: a.meta.from, to: a.meta.to, rects: nodes.flatMap((n) => (n ? [rectOf(n)] : [])) });
+    }
+    return out;
+}
+
+/**
+ * After arrows were rerouted, refit again: boxes now wrap the labels that landed inside them, and the conflict check sees the
+ * final label positions. Repeats (reroute, refit) until the boxes stop changing, at most 3 times. Returns the last fit.
+ */
+async function settleBoard(board: Board, screens: Screen[], first: RefitResult, reroute: JsonObject): Promise<{ fit: RefitResult; reroute: JsonObject; passes: number }> {
+    let fit = first;
+    let last = reroute;
+    let passes = 0;
+    while (fit.active && passes < 3) {
+        const again = await refitGroups(board, screens);
+        passes++;
+        const stable = sameBoxes(fit.boxes, again.boxes);
+        fit = again;
+        if (stable) break;
+        await resizeBoard(board, screens, false, fit.extent);
+        last = await rerouteBoards([board]);
+    }
+    return { fit, reroute: last, passes };
+}
+
+/** Refit, grow the background, redraw every arrow, then settle. The tail of every group tool. */
 async function syncBoard(board: Board, screens: Screen[], opts: { releaseExtras?: boolean } = {}): Promise<{ fit: RefitResult; size: { width: number; height: number }; reroute: JsonObject }> {
-    const fit = await refitGroups(board, screens, opts);
-    const size = await resizeBoard(board, screens, false, fit.extent);
-    const reroute = await rerouteBoards([board]);
-    return { fit, size, reroute };
+    const first = await refitGroups(board, screens, opts);
+    const size = await resizeBoard(board, screens, false, first.extent);
+    const rerouted = await rerouteBoards([board]);
+    const { fit, reroute } = await settleBoard(board, screens, first, rerouted);
+    return { fit, size: await resizeBoard(board, screens, false, fit.extent), reroute };
 }
 
 const rerouteBrief = (r: JsonObject): JsonObject => ({ rerouted: r.rerouted ?? 0, errors: r.errors ?? [], warnings: r.warnings ?? [] });
@@ -630,14 +670,23 @@ export async function joinAndRefit(boardId: string, screenId: string, groupId: s
 export const rerouteFlowWithGroups: Handler = async (args) => {
     const boards = await boardsFor(args);
     const fits: JsonObject[] = [];
+    const first = new Map<string, RefitResult>();
     for (const board of boards) {
         if (!(await loadGroups(board)).length) continue;
         const { screens } = await loadScreens(board);
         const fit = await refitGroups(board, screens);
         await resizeBoard(board, screens, false, fit.extent);
-        fits.push({ boardId: board.node.id, ...fit.summary });
+        first.set(board.node.id, fit);
     }
     const reply = await rerouteFlow(args);
+    for (const board of boards) {
+        const fit0 = first.get(board.node.id);
+        if (!fit0) continue;
+        const { screens } = await loadScreens(board);
+        const settled = await settleBoard(board, screens, fit0, {});
+        await resizeBoard(board, screens, false, settled.fit.extent);
+        fits.push({ boardId: board.node.id, settlePasses: settled.passes, ...settled.fit.summary });
+    }
     if (!reply.ok || !fits.length || typeof reply.result !== 'object' || reply.result === null || Array.isArray(reply.result)) return reply;
     return ok({ ...reply.result, groups: fits });
 };
@@ -653,12 +702,13 @@ export const connectWithGroups: Handler = async (args) => {
     const board = await loadBoard(boardId);
     if (!(await loadGroups(board)).length) return reply;
     const { screens } = await loadScreens(board);
-    const fit = await refitGroups(board, screens);
+    let fit = await refitGroups(board, screens);
     let reroute: JsonObject | null = null;
     if (fit.extrasChanged) {
         await resizeBoard(board, screens, false, fit.extent);
         reroute = await rerouteBoards([board]);
     }
+    fit = (await settleBoard(board, screens, fit, {})).fit;
     return ok({ ...reply.result, groups: fit.summary, ...(reroute ? { reroute: rerouteBrief(reroute) } : {}) }, { logs: reply.logs });
 };
 

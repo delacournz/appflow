@@ -3,6 +3,7 @@ import { boundaryExtras, type BoundaryExtras } from './flow-group';
 import { GROUP_CLEAR, ROUTE_TOP } from './flow-group';
 import type { Move } from './grid';
 import type { GroupStyle } from './flowmeta';
+import type { Rect } from './rect';
 import { cleanExtras, trackStart, type Extras, type ExtrasInput } from './tracks';
 
 /** The group fields the rules need. A group's `screenIds` are its own screens only; a child's screens are not repeated on its parent. */
@@ -247,3 +248,29 @@ export function hexToRgb(hex: string): { r: number; g: number; b: number } {
 export const holderName = (boardName: string): string => `Flow groups · ${boardName}`;
 export const rectName = (name: string): string => `Group · ${name}`;
 export const titleName = (name: string): string => `Group title · ${name}`;
+
+export type InternalArrow = { from: string; to: string; rects: readonly Rect[] };
+
+/**
+ * Rects (arrow labels and lines) a group's box must wrap: those of arrows whose BOTH ends are screens of the group or of
+ * its children. Arrows that cross a box edge are not included; their labels belong in the gap between boxes.
+ */
+export function internalArrowRects(groups: readonly GroupRec[], arrows: readonly InternalArrow[]): Map<string, Rect[]> {
+    const out = new Map<string, Rect[]>();
+    for (const g of groups) {
+        const family = new Set([...g.screenIds, ...groups.filter((k) => k.parentId === g.id).flatMap((k) => k.screenIds)]);
+        const rects = arrows.filter((a) => family.has(a.from) && family.has(a.to)).flatMap((a) => [...a.rects]);
+        if (rects.length) out.set(g.id, rects);
+    }
+    return out;
+}
+
+const sameRect = (a: Rect, b: Rect): boolean => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+
+/** Whether two fits drew the same boxes and title bars (so rerouting again cannot move any label's obstacles). */
+export function sameBoxes(a: readonly { id: string; box: Rect; title: Rect }[], b: readonly { id: string; box: Rect; title: Rect }[]): boolean {
+    return a.length === b.length && a.every((x) => {
+        const y = b.find((k) => k.id === x.id);
+        return !!y && sameRect(x.box, y.box) && sameRect(x.title, y.title);
+    });
+}

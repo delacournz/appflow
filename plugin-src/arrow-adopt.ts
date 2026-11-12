@@ -144,3 +144,24 @@ export function resolveArrowEnds(
     if (to.screen.id === from.screen.id) return { ok: false, reason: 'same-screen' };
     return { ok: true, from: from.screen, to: to.screen, fromHow: from.kind, toHow: to.kind, stale: from.offset > EXACT || to.offset > EXACT };
 }
+
+export type ContainerRef = { id: string; childIds: readonly string[] };
+export type Consolidation = { target: string; moves: { nodeId: string; fromContainer: string }[]; emptied: string[] };
+
+/**
+ * Plans folding extra arrow containers into the first (the one the board stores). Every child of every later container moves
+ * to the first; those containers are then empty and can go. With a single container nothing moves, so a re-run does nothing.
+ */
+export function planConsolidation(containers: readonly ContainerRef[]): Consolidation | null {
+    const [target, ...extra] = containers;
+    if (!target) return null;
+    const rest = extra.filter((c) => c.id !== target.id);
+    return {
+        target: target.id,
+        moves: rest.flatMap((c) => c.childIds.map((nodeId) => ({ nodeId, fromContainer: c.id }))),
+        emptied: rest.map((c) => c.id),
+    };
+}
+
+/** The x/y change that puts a reparented node back at its absolute position. */
+export const restoreDelta = (before: Pt, after: Pt): Pt => ({ x: before.x - after.x, y: before.y - after.y });
