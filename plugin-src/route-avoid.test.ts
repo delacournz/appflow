@@ -451,4 +451,29 @@ describe('same-row arrows across occupied cells and merged fan-in', () => {
         const joinYs = pairs.slice(0, 3).map(([id]) => { const p = routeOf(plans, id); return (p[p.length - 3] as Pt).y; });
         expect(joinYs).toEqual([...joinYs].sort((p, q) => p - q));
     });
+
+    test('trunks of two targets in one column get separate lanes, the lower target nearest the column', () => {
+        const A = cellAt(5, 0);
+        const B = cellAt(5, 3);
+        const pairs: [string, Rect, Rect][] = [
+            ['a3', cellAt(4, 3), A],
+            ['a4', cellAt(4, 4), A],
+            ['b2', cellAt(4, 2), B],
+            ['b4', cellAt(4, 4), B],
+        ];
+        const tall: Rect[] = [];
+        for (let c = 0; c <= 11; c++) for (let r = 0; r <= 4; r++) tall.push(cellAt(c, r));
+        const plans = planRoutes({ gutter: PITCH_X - W, limits: pairs.map(() => undefined), screens: tall, rowGap: PITCH_Y - H }, pairs.map(([id, s, t]) => ({ id, ends: ends(s, t) })));
+        const trunk = (id: string) => {
+            const p = ((plans.find((q) => q.id === id) as (typeof plans)[number]).route as Route).points;
+            return (p[p.length - 2] as Pt).x;
+        };
+        expect(trunk('a3')).toBe(trunk('a4'));
+        expect(trunk('b2')).toBe(trunk('b4'));
+        expect(trunk('b2') - trunk('a3')).toBeGreaterThanOrEqual(24);
+        expect(trunk('b2')).toBeLessThan(B.x);
+        const shapes = pairs.map(([id, s, t]) => ({ id, points: ((plans.find((q) => q.id === id) as (typeof plans)[number]).route as Route).points, label: null, from: `${s.x}:${s.y}`, to: `${t.x}:${t.y}` }));
+        const issues = lintArrows(shapes, [], tall.map((r) => ({ id: `${r.x}:${r.y}`, rect: r }))).issues;
+        expect(issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen')).toEqual([]);
+    });
 });
