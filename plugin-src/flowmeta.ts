@@ -23,6 +23,14 @@ export type BoardMeta = {
     colExtra?: Extras;
     /** Extra px added before row `at`, for the columns `from`..`to` only (cumulative). Absent = uniform rows. */
     rowExtra?: Extras;
+    /**
+     * 'uniform' (default): one column pitch and one row pitch for the whole board; `colWidth`/`rowHeight` are the effective
+     * pitch and no extras apply. 'banded': base pitch plus per-region extras.
+     */
+    spacing?: 'uniform' | 'banded';
+    /** The pitch without group needs (uniform spacing only); `colWidth`/`rowHeight` are base plus the largest need. */
+    baseColWidth?: number;
+    baseRowHeight?: number;
     /** Extra room measured from the drawn group boxes (gap-fix.ts), added to the planned extras; kept so refits do not undo it. */
     gapExtra?: { colExtra: Extras; rowExtra: Extras };
     screenW: number;
@@ -145,6 +153,8 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
         if (clean.length) meta[k] = clean;
         else delete meta[k];
     }
+    if (o.spacing !== undefined && o.spacing !== 'uniform' && o.spacing !== 'banded') delete meta.spacing;
+    for (const k of ['baseColWidth', 'baseRowHeight'] as const) if (o[k] !== undefined && !(isNum(o[k]) && (o[k] as number) > 0)) delete meta[k];
     const gap = o.gapExtra;
     if (gap !== undefined) {
         const clean = (v: unknown) => (isObj(v) || Array.isArray(v) ? cleanExtras(v as ExtrasInput) : []);

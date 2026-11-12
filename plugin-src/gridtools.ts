@@ -165,6 +165,7 @@ export const createBoard: Handler = async (args) => {
 
     const meta: BoardMeta = { v: 1, kind: 'board', ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
     bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    bg.locked = true;
 
     return ok({
         boardId: bg.id,

@@ -1,5 +1,5 @@
 /** Pure planning for flow group tools: membership and nesting rules, extras moves, z-order. No `figma` global. */
-import { boundaryExtras, type BoundaryExtras } from './flow-group';
+import { boundaryExtras, boundaryNeeds, type BoundaryExtras, type BoundaryInput } from './flow-group';
 import { GROUP_CLEAR, ROUTE_TOP } from './flow-group';
 import type { Move } from './grid';
 import type { GroupStyle } from './flowmeta';
@@ -185,6 +185,21 @@ export type CellScreen = { id: string; col: number; row: number };
  * text already sits in that gap and `boundaryExtras` counts it separately.
  */
 export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid, bonus?: BoundaryExtras): BoundaryExtras {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs) return { colExtra: [], rowExtra: [] };
+    const cols = boundaryExtras({ ...inputs.cols, ...(bonus ? { bonus } : {}) });
+    const rows = boundaryExtras({ ...inputs.rows, ...(bonus ? { bonus } : {}) });
+    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+}
+
+/** What a uniform grid must add to the base pitch so every boundary fits: the largest column and row need. */
+export function groupBoundaryNeeds(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): { col: number; row: number } {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs) return { col: 0, row: 0 };
+    return { col: boundaryNeeds(inputs.cols).col, row: boundaryNeeds(inputs.rows).row };
+}
+
+function boundaryInputs(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): { cols: BoundaryInput; rows: BoundaryInput } | null {
     const owner = new Map<string, string>();
     for (const g of groups) for (const id of g.screenIds) if (!owner.has(id)) owner.set(id, g.id);
     const cellOf = new Map(screens.map((s) => [s.id, { col: s.col, row: s.row }]));
@@ -196,12 +211,13 @@ export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readon
         ...(g.style ? { metrics: { padding: g.style.padding, strokeWeight: g.style.strokeWeight, titleSize: g.style.titleSize } } : {}),
     }));
     const ungrouped = screens.filter((s) => !owner.has(s.id)).map((s) => cellOf.get(s.id) as { col: number; row: number });
-    if (!boundary.some((b) => b.cells.length)) return { colExtra: [], rowExtra: [] };
+    if (!boundary.some((b) => b.cells.length)) return null;
     const colGap = base.colWidth - base.screenW;
     const rowGap = base.rowHeight - base.screenH;
-    const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap, ...(bonus ? { bonus } : {}) });
-    const rows = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP), ...(bonus ? { bonus } : {}) });
-    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+    return {
+        cols: { groups: boundary, ungrouped, base, laneBand: colGap },
+        rows: { groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) },
+    };
 }
 
 export const sameExtras = (a: ExtrasInput | undefined, b: ExtrasInput | undefined): boolean => {

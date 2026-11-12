@@ -6,6 +6,7 @@ import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type ScreenMeta
 import type { JsonObject } from '../shared/protocol';
 import { boardBounds, cellOf, cellRect, staleReason, type ExtrasPair, type Move } from './grid';
 import type { Rect } from './rect';
+import { uniformFields, type Pitch, type Spacing } from './pitch';
 import { badgeBelongsTo, badgeFallbackOffset, shiftTargets } from './screen-group';
 
 /** Board plumbing shared by the grid tools and the flow group refit. Kept apart from both so neither imports the other. */
@@ -197,5 +198,32 @@ export function applyExtras(board: Board, extras: ExtrasPair): void {
 export function setGapExtra(board: Board, gap: ExtrasPair | null): void {
     const { gapExtra: _drop, ...rest } = board.meta;
     board.meta = { ...rest, ...(gap && (gap.colExtra.length || gap.rowExtra.length) ? { gapExtra: gap } : {}) };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+}
+
+/**
+ * Switches the board to a pitch: uniform spacing stores the effective pitch with its base and drops every band; a board with
+ * nothing to add (`keepBase` false) goes back to the plain base pitch with no stored base. Callers move the screens after.
+ */
+export function applyPitch(board: Board, base: Pitch, effective: Pitch, keepBase: boolean): void {
+    const { colExtra: _c, rowExtra: _r, gapExtra: _g, baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = keepBase
+        ? { ...rest, ...uniformFields(base, effective) }
+        : { ...rest, colWidth: base.colWidth, rowHeight: base.rowHeight, spacing: 'uniform' };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+}
+
+/** Back to banded spacing: the base pitch is the pitch again and the stored base goes away. Extras are applied by the caller. */
+export function applyBanded(board: Board): boolean {
+    const { baseColWidth, baseRowHeight, ...rest } = board.meta;
+    const had = baseColWidth !== undefined || baseRowHeight !== undefined || board.meta.spacing !== 'banded';
+    board.meta = { ...rest, colWidth: baseColWidth ?? board.meta.colWidth, rowHeight: baseRowHeight ?? board.meta.rowHeight, spacing: 'banded' };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return had;
+}
+
+/** Sets the spacing mode on the board. The next refit converts the pitch, bands and screen positions. */
+export function setSpacing(board: Board, mode: Spacing): void {
+    board.meta = { ...board.meta, spacing: mode };
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
 }
