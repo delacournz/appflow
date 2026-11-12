@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { cellRect, type GridMeta } from './grid';
-import { BOARD_GRID, cellOfIn, cellRectIn, gridOfScreen, migrateToGrouped, onGrid, type LayoutGrid, type MigrateScreen } from './layout-grid';
+import { BOARD_GRID, cellOfIn, cellRectIn, gridOfScreen, migrateToGrouped, nearestFreeCell, onGrid, type LayoutGrid, type MigrateScreen } from './layout-grid';
 
 const SIZE = { width: 393, height: 852 };
 const board = { originX: 164, originY: 2174, colWidth: 700, rowHeight: 1112 };
@@ -95,14 +95,93 @@ describe('migrateToGrouped: a banded board moves zero screens', () => {
         for (const g of result.grids) expect([g.colWidth, g.rowHeight]).toEqual([700, 1112]);
     });
 
-    test('a screen that is not on its grid pitch is reported, not silently moved', () => {
-        const off = [...screens, { id: 'odd', flowGroupId: 'A', x: cell(0, 0).x + 350, y: cell(0, 0).y }];
-        expect(migrateToGrouped(board, off, groups).offGrid).toEqual(['odd']);
+    test('a group screen off the pitch is snapped once to the nearest free cell and reported', () => {
+        const off = [...screens, { id: 'odd', flowGroupId: 'A', x: cell(0, 0).x + 350 + 700 * 10, y: cell(0, 0).y }];
+        const r = migrateToGrouped(board, off, groups);
+        expect(r.offGrid).toEqual([]);
+        expect(r.moves).toHaveLength(1);
+        expect(r.moves[0]).toMatchObject({ id: 'odd', from: { x: cell(0, 0).x + 350 + 7000 }, to: { x: cell(0, 0).x + 7700 } });
+    });
+
+    test('nothing moves when every screen is on the pitch', () => {
+        expect(migrateToGrouped(board, screens, groups).moves).toEqual([]);
     });
 
     test('a group with no direct screens gets no grid; a screen naming a missing group is on the board grid', () => {
         const r = migrateToGrouped(board, [mk('x', 0, 0, 'Z'), mk('y', 1, 0, 'P')], [{ id: 'P' }, { id: 'Empty' }]);
         expect(r.grids.map((g) => g.id).sort()).toEqual([BOARD_GRID, 'P'].sort());
         expect(r.cells.get('x')?.layoutId).toBe(BOARD_GRID);
+    });
+});
+
+describe('migrateToGrouped: snap once (live Auth group)', () => {
+    const live = { originX: 164, originY: 2174, colWidth: 700, rowHeight: 1112 };
+    const pos: [string, number, number][] = [
+        ['2019:6239', 164, 2174],
+        ['2019:6316', 4104, 2174],
+        ['2019:6326', 164, 3286],
+        ['2019:6389', 4104, 3286],
+        ['2019:6914', 6904, 2174],
+        ['2019:6931', 6904, 3286],
+        ['2019:7410', 864, 2174],
+        ['2019:7704', 4104, 7846],
+        ['2019:7781', 864, 3286],
+        ['2019:7858', 4804, 2174],
+        ['2019:7883', 4804, 3286],
+        ['2019:7908', 6204, 7846],
+        ['2019:7934', 5504, 3286],
+        ['2019:7978', 5504, 6122],
+        ['2019:8022', 6204, 6122],
+        ['2019:8069', 6204, 3286],
+    ];
+    const screens: MigrateScreen[] = pos.map(([id, x, y]) => ({ id, flowGroupId: 'AUTH', x, y }));
+    const m = migrateToGrouped(live, screens, [{ id: 'AUTH' }]);
+    const at = (id: string) => m.moves.find((v) => v.id === id);
+
+    test('one grid at the top-left member; the 12 shifted members snap, the 4 on the pitch stay', () => {
+        expect(m.grids).toEqual([{ id: 'AUTH', originX: 164, originY: 2174, colWidth: 700, rowHeight: 1112 }]);
+        expect(m.moves).toHaveLength(12);
+        expect(m.moves.map((v) => v.id).sort()).toEqual(['2019:6316', '2019:6389', '2019:6914', '2019:6931', '2019:7704', '2019:7858', '2019:7883', '2019:7908', '2019:7934', '2019:7978', '2019:8022', '2019:8069']);
+        expect(m.offGrid).toEqual([]);
+    });
+
+    test('the 440px class snaps right by 260 in x, keeping its row', () => {
+        for (const id of ['2019:6316', '2019:6389', '2019:6914', '2019:6931', '2019:7858', '2019:7883', '2019:7934', '2019:8069']) {
+            const v = at(id);
+            expect((v?.to.x ?? 0) - (v?.from.x ?? 0)).toBe(260);
+            expect(v?.to.y).toBe(v?.from.y);
+        }
+    });
+
+    test('the lower classes snap to the nearest row: row 3 down 500, row 4 up 112', () => {
+        expect(at('2019:7978')).toMatchObject({ from: { x: 5504, y: 6122 }, to: { x: 5764, y: 6622 } });
+        expect(at('2019:7704')).toMatchObject({ from: { x: 4104, y: 7846 }, to: { x: 4364, y: 7734 } });
+    });
+
+    test('every screen ends on its grid in its own cell, and no two share one', () => {
+        const grid = m.grids[0] as LayoutGrid;
+        const seen = new Set<string>();
+        for (const s of screens) {
+            const cell = m.cells.get(s.id) as { layoutId: string; col: number; row: number };
+            const r = cellRectIn(grid, cell.col, cell.row, SIZE);
+            expect(onGrid(grid, r)).toBe(true);
+            const moved = at(s.id);
+            expect(r).toMatchObject({ x: moved ? moved.to.x : s.x, y: moved ? moved.to.y : s.y });
+            expect(seen.has(`${cell.col},${cell.row}`)).toBe(false);
+            seen.add(`${cell.col},${cell.row}`);
+        }
+    });
+});
+
+describe('nearestFreeCell', () => {
+    const grid: LayoutGrid = { id: 'g', originX: 0, originY: 0, colWidth: 700, rowHeight: 1112 };
+
+    test('a tie goes right, then down', () => {
+        expect(nearestFreeCell(grid, { x: 350, y: 0 }, new Set())).toEqual({ col: 1, row: 0 });
+        expect(nearestFreeCell(grid, { x: 0, y: 556 }, new Set())).toEqual({ col: 0, row: 1 });
+    });
+
+    test('never an occupied cell: the next nearest is taken', () => {
+        expect(nearestFreeCell(grid, { x: 350, y: 0 }, new Set(['1,0']))).toEqual({ col: 0, row: 0 });
     });
 });

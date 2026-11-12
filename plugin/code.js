@@ -1709,6 +1709,27 @@ ${logs.join(`
       return boardGrid(board);
     return { id: group.id, originX: group.layout.originX, originY: group.layout.originY, colWidth: board.colWidth, rowHeight: board.rowHeight };
   }
+  var SNAP_RADIUS = 8;
+  var onPitch = (d, pitch) => Math.abs(d - Math.round(d / pitch) * pitch) <= POS_TOLERANCE;
+  function mainClass(members, board) {
+    const first = [...members].sort((a, b) => a.y - b.y || a.x - b.x)[0];
+    return members.filter((m) => onPitch(m.x - first.x, board.colWidth) && onPitch(m.y - first.y, board.rowHeight));
+  }
+  function nearestFreeCell(grid, at, taken) {
+    const near = { col: Math.round((at.x - grid.originX) / grid.colWidth), row: Math.round((at.y - grid.originY) / grid.rowHeight) };
+    let best = null;
+    for (let col = Math.max(0, near.col - SNAP_RADIUS);col <= near.col + SNAP_RADIUS; col++) {
+      for (let row = Math.max(0, near.row - SNAP_RADIUS);row <= near.row + SNAP_RADIUS; row++) {
+        if (taken.has(`${col},${row}`))
+          continue;
+        const d = Math.hypot(grid.originX + col * grid.colWidth - at.x, grid.originY + row * grid.rowHeight - at.y);
+        const better = !best || d < best.d - 0.000001 || Math.abs(d - best.d) <= 0.000001 && (col > best.col || col === best.col && row > best.row);
+        if (better)
+          best = { col, row, d };
+      }
+    }
+    return best ? { col: best.col, row: best.row } : { col: Math.max(0, near.col), row: Math.max(0, near.row) };
+  }
   function migrateToGrouped(board, screens, groups) {
     const known = new Set(groups.map((g) => g.id));
     const layoutOf = (s) => s.flowGroupId && known.has(s.flowGroupId) ? s.flowGroupId : BOARD_GRID;
@@ -1717,7 +1738,8 @@ ${logs.join(`
       const members = screens.filter((s) => layoutOf(s) === g.id);
       if (!members.length)
         continue;
-      grids.push({ id: g.id, originX: Math.min(...members.map((m) => m.x)), originY: Math.min(...members.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
+      const main = mainClass(members, board);
+      grids.push({ id: g.id, originX: Math.min(...main.map((m) => m.x)), originY: Math.min(...main.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
     }
     const loose = screens.filter((s) => layoutOf(s) === BOARD_GRID);
     if (loose.length) {
@@ -1726,15 +1748,31 @@ ${logs.join(`
       grids.push(fits ? atBoard : { ...atBoard, originX: Math.min(...loose.map((s) => s.x)), originY: Math.min(...loose.map((s) => s.y)) });
     }
     const cells = new Map;
-    const offGrid = [];
+    const moves = [];
+    const taken = new Map;
+    const off = [];
     for (const s of screens) {
       const layoutId = layoutOf(s);
       const grid = grids.find((g) => g.id === layoutId);
-      cells.set(s.id, { layoutId, ...cellOfIn(grid, s) });
-      if (!onGrid(grid, s))
-        offGrid.push(s.id);
+      if (!onGrid(grid, s)) {
+        off.push(s);
+        continue;
+      }
+      const cell = cellOfIn(grid, s);
+      cells.set(s.id, { layoutId, ...cell });
+      taken.set(layoutId, (taken.get(layoutId) ?? new Set).add(`${cell.col},${cell.row}`));
     }
-    return { grids, cells, offGrid };
+    for (const s of [...off].sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : 1))) {
+      const layoutId = layoutOf(s);
+      const grid = grids.find((g) => g.id === layoutId);
+      const used = taken.get(layoutId) ?? new Set;
+      const cell = nearestFreeCell(grid, s, used);
+      used.add(`${cell.col},${cell.row}`);
+      taken.set(layoutId, used);
+      cells.set(s.id, { layoutId, ...cell });
+      moves.push({ id: s.id, layoutId, ...cell, from: { x: s.x, y: s.y }, to: { x: grid.originX + cell.col * grid.colWidth, y: grid.originY + cell.row * grid.rowHeight } });
+    }
+    return { grids, cells, moves, offGrid: [] };
   }
 
   // plugin-src/grid-plan.ts
@@ -3540,7 +3578,8 @@ ${logs.join(`
       dryRun,
       from: spacingOf(board.meta),
       grids: plan.grids.map((g) => ({ id: g.id, ...g.id === BOARD_GRID ? {} : { name: groups.find((x) => x.id === g.id)?.meta.name ?? g.id }, originX: g.originX, originY: g.originY })),
-      screensMoved: 0,
+      screensMoved: plan.moves.length,
+      moves: plan.moves.map((m) => ({ id: m.id, name: screens.find((s) => s.node.id === m.id)?.node.name ?? m.id, from: { ...m.from }, to: { ...m.to }, cell: { layoutId: m.layoutId, col: m.col, row: m.row } })),
       offGrid: plan.offGrid.map((id) => ({ id, name: screens.find((s) => s.node.id === id)?.node.name ?? id }))
     };
     if (dryRun)
@@ -3562,6 +3601,11 @@ ${logs.join(`
       const cell = plan.cells.get(s.node.id);
       if (!cell)
         continue;
+      const move = plan.moves.find((m) => m.id === s.node.id);
+      if (move) {
+        const have = rectOf(s.node);
+        await shiftScreen(s, move.to.x - have.x, move.to.y - have.y);
+      }
       s.meta = { ...s.meta, ...cell };
       writeScreen(s.node, s.meta);
     }
@@ -8902,7 +8946,7 @@ ${v.grid}`).join(`
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "943aaf64", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "dafd06d5", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8910,7 +8954,7 @@ ${v.grid}`).join(`
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"943aaf64"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"dafd06d5"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
