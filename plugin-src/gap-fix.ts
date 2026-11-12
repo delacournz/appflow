@@ -16,7 +16,8 @@ export const CONTENT_GAP = 2 * GROUP_CLEAR;
 /** A group's box plus title bar, or one ungrouped screen's footprint, with the grid cells it occupies. */
 export type Block = { id: string; rect: Rect; cells: readonly Cell[]; grouped: boolean; parentId?: string };
 
-export type Deficits = { colExtra: Band[]; rowExtra: Band[] };
+/** `colExtra`/`rowExtra` are banded fixes; `uniform` is the same need as growth of the whole-grid pitch (per boundary step). */
+export type Deficits = { colExtra: Band[]; rowExtra: Band[]; uniform: { col: number; row: number } };
 
 const right = (r: Rect) => r.x + r.width;
 const bottom = (r: Rect) => r.y + r.height;
@@ -38,6 +39,7 @@ const wanted = (a: Block, b: Block): number | null => {
  */
 export function gapDeficits(blocks: readonly Block[]): Deficits {
     const need = new Map<string, Band>();
+    const uniform = { col: 0, row: 0 };
     const raise = (axis: 'c' | 'r', at: number, from: number, to: number, px: number) => {
         const key = `${axis}:${at}:${from}:${to}`;
         const prev = need.get(key);
@@ -57,6 +59,7 @@ export function gapDeficits(blocks: readonly Block[]): Deficits {
                 if (have >= gap || span(upper.cells, 'row')[1] >= r0) continue;
                 const [c0, c1] = span(lower.cells, 'col');
                 raise('r', r0, c0, c1, Math.ceil(gap - have));
+                uniform.row = Math.max(uniform.row, Math.ceil((gap - have) / (r0 - span(upper.cells, 'row')[1])));
             } else if (overlapY > 0) {
                 const [left, rightB] = a.rect.x <= b.rect.x ? [a, b] : [b, a];
                 const have = rightB.rect.x - right(left.rect);
@@ -64,14 +67,15 @@ export function gapDeficits(blocks: readonly Block[]): Deficits {
                 if (have >= gap || span(left.cells, 'col')[1] >= c0) continue;
                 const [r0, r1] = span(rightB.cells, 'row');
                 raise('c', c0, r0, r1, Math.ceil(gap - have));
+                uniform.col = Math.max(uniform.col, Math.ceil((gap - have) / (c0 - span(left.cells, 'col')[1])));
             }
         }
     }
     const pick = (axis: 'c' | 'r') => cleanExtras([...need].filter(([k]) => k.startsWith(axis)).map(([, v]) => v));
-    return { colExtra: pick('c'), rowExtra: pick('r') };
+    return { colExtra: pick('c'), rowExtra: pick('r'), uniform };
 }
 
 /** Bands added together: overlapping bands on one track sum, which is how extras accumulate. */
 export const addBands = (a: readonly Band[], b: readonly Band[]): Band[] => cleanExtras([...a, ...b]);
 
-export const hasDeficits = (d: Deficits): boolean => d.colExtra.length > 0 || d.rowExtra.length > 0;
+export const hasDeficits = (d: Deficits): boolean => d.colExtra.length > 0 || d.rowExtra.length > 0 || d.uniform.col > 0 || d.uniform.row > 0;

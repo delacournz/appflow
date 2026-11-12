@@ -17,7 +17,7 @@ describe('gapDeficits', () => {
     test('live case: the upper box grew from internal arrows and touches the lower title bar (zero gap)', () => {
         const device = block('device', r(11632, 5678, 3537, 2000), cells(16, 20, 3, 6));
         const kyc = block('kyc', r(7000, 7678, 9000, 3000), cells(11, 25, 8, 12));
-        expect(gapDeficits([device, kyc])).toEqual({ colExtra: [], rowExtra: [{ at: 8, from: 11, to: 25, px: GROUP_GAP }] });
+        expect(gapDeficits([device, kyc])).toEqual({ colExtra: [], rowExtra: [{ at: 8, from: 11, to: 25, px: GROUP_GAP }], uniform: { col: 0, row: GROUP_GAP / 2 } });
     });
 
     test('a gap that is already wide enough needs nothing', () => {
@@ -35,7 +35,7 @@ describe('gapDeficits', () => {
     test('side by side: the right block gets a column band over its rows', () => {
         const a = block('a', r(0, 0, 1000, 1000), cells(0, 1, 0, 2));
         const b = block('b', r(1050, 0, 1000, 1000), cells(2, 3, 0, 2));
-        expect(gapDeficits([a, b])).toEqual({ colExtra: [{ at: 2, from: 0, to: 2, px: GROUP_GAP - 50 }], rowExtra: [] });
+        expect(gapDeficits([a, b])).toEqual({ colExtra: [{ at: 2, from: 0, to: 2, px: GROUP_GAP - 50 }], rowExtra: [], uniform: { col: GROUP_GAP - 50, row: 0 } });
     });
 
     test('overlapping boxes are separated by the smaller overlap, gap plus overlap', () => {
@@ -50,6 +50,12 @@ describe('gapDeficits', () => {
         expect(gapDeficits([g, u]).rowExtra).toEqual([{ at: 2, from: 0, to: 0, px: CONTENT_GAP - 40 }]);
         const u2 = block('u2', r(0, 1050, 393, 852), [{ col: 0, row: 2 }], { grouped: false });
         expect(hasDeficits(gapDeficits([u, u2]))).toBe(false);
+    });
+
+    test('uniform need is per boundary step: a pair two rows apart needs half as much pitch', () => {
+        const a = block('a', r(0, 0, 1000, 1000), cells(0, 1, 0, 0));
+        const b = block('b', r(0, 1000, 1000, 1000), cells(0, 1, 2, 2));
+        expect(gapDeficits([a, b]).uniform).toEqual({ col: 0, row: GROUP_GAP / 2 });
     });
 
     test('parent and child are not neighbours; diagonal pairs are skipped', () => {

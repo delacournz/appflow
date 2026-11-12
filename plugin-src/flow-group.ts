@@ -156,6 +156,18 @@ const inRange = (r: Range, col: number, row: number): boolean => col >= r.c0 && 
  * Groups that end before the boundary are never touched: nothing of theirs moves.
  */
 export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
+    return planBoundary(input).extras;
+}
+
+/**
+ * The largest extra any single boundary needs, per axis: what a uniform grid must add to its pitch. Read off the trigger
+ * bands before the no-tear repair (a uniform grid cannot tear) and before any `bonus`.
+ */
+export function boundaryNeeds(input: BoundaryInput): { col: number; row: number } {
+    return planBoundary(input).need;
+}
+
+function planBoundary(input: BoundaryInput): { extras: BoundaryExtras; need: { col: number; row: number } } {
     const { groups, ungrouped, base, laneBand } = input;
     const ranges = new Map<string, Range>();
     for (const g of groups) {
@@ -175,7 +187,7 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
     const allRanges = [...ranges.values()];
     const cols = [...allRanges.flatMap((r) => [r.c0, r.c1]), ...ungrouped.map((c) => c.col)];
     const rows = [...allRanges.flatMap((r) => [r.r0, r.r1]), ...ungrouped.map((c) => c.row)];
-    if (!cols.length) return { colExtra: [], rowExtra: [] };
+    if (!cols.length) return { extras: { colExtra: [], rowExtra: [] }, need: { col: 0, row: 0 } };
     const [minC, maxC, minR, maxR] = [Math.min(...cols), Math.max(...cols), Math.min(...rows), Math.max(...rows)];
 
     const metricsOf = (g: BoundaryGroup): BoxMetrics => g.metrics ?? defaultMetrics(!!g.parentId);
@@ -298,9 +310,14 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
         return cur;
     };
 
+    const [colPrimary, rowPrimary] = [bandsOf(colAxis), bandsOf(rowAxis)];
+    const biggest = (bands: readonly Band[]) => Math.max(0, ...bands.map((b) => b.px));
     return {
-        colExtra: untear(colAxis, [...bandsOf(colAxis), ...(input.bonus?.colExtra ?? [])]),
-        rowExtra: untear(rowAxis, [...bandsOf(rowAxis), ...(input.bonus?.rowExtra ?? [])]),
+        extras: {
+            colExtra: untear(colAxis, [...colPrimary, ...(input.bonus?.colExtra ?? [])]),
+            rowExtra: untear(rowAxis, [...rowPrimary, ...(input.bonus?.rowExtra ?? [])]),
+        },
+        need: { col: biggest(colPrimary), row: biggest(rowPrimary) },
     };
 }
 
