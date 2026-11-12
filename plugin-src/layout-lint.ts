@@ -8,7 +8,7 @@ import type { ConflictContent, ConflictGroup } from './flow-group';
 import { footprintOf, loadGroups } from './flow-groups';
 import { orderPath } from './flowlint';
 import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type OrphanBadgeIssue, type TitleText } from './group-lint';
-import { lintPrototype, type ProtoReaction } from './prototype-lint';
+import { lintPrototype, type ProtoArrow, type ProtoReaction } from './prototype-lint';
 import { titleTextRect } from './route-avoid';
 import type { ReactionLike } from './flowmeta';
 
@@ -45,6 +45,15 @@ async function prototypeIssues(board: Board): Promise<{ issues: LayoutIssue[]; c
     const shown = boardScreens(board);
     const screens = await Promise.all(shown.map(async (s) => ({ id: s.id, name: (await sceneById(s.id))?.name ?? s.id })));
     const reactions: ProtoReaction[] = [];
+    const ancestry = (n: SceneNode, stopId: string): string[] => {
+        const names: string[] = [];
+        let p: BaseNode | null = n.parent;
+        while (p && p.id !== stopId && p.type !== 'PAGE' && p.type !== 'DOCUMENT') {
+            names.push(p.name);
+            p = p.parent;
+        }
+        return names;
+    };
     for (const s of shown) {
         const root = await sceneById(s.id);
         if (!root) continue;
@@ -52,18 +61,31 @@ async function prototypeIssues(board: Board): Promise<{ issues: LayoutIssue[]; c
         for (const n of nodes) {
             if (!('reactions' in n)) continue;
             for (const r of n.reactions as unknown as ReactionLike[]) {
-                for (const a of [...(r.action ? [r.action] : []), ...(r.actions ?? [])]) {
+                const list = r.actions && r.actions.length ? r.actions : r.action ? [r.action] : [];
+                for (const a of list) {
                     if (a.type === 'NODE' && a.navigation === 'NAVIGATE' && typeof a.destinationId === 'string') {
-                        reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? 'NONE', destinationId: a.destinationId });
+                        reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? 'NONE', destinationId: a.destinationId, nodeName: n.name, ancestorNames: ancestry(n, s.id) });
                     }
                 }
             }
         }
     }
-    const arrows = listArrows(board).map((a) => ({ id: a.group.id, from: a.meta.from, to: a.meta.to, trigger: a.meta.trigger }));
-    const issues = lintPrototype(screens, arrows, reactions);
+    const arrows: ProtoArrow[] = [];
+    for (const a of listArrows(board)) {
+        const trig = a.meta.trigger ? await sceneById(a.meta.trigger) : null;
+        arrows.push({
+            id: a.group.id,
+            from: a.meta.from,
+            to: a.meta.to,
+            trigger: a.meta.trigger,
+            label: a.meta.label,
+            ...(trig ? { triggerName: trig.name, triggerAncestorNames: [trig.name, ...ancestry(trig, a.meta.from)] } : {}),
+        });
+    }
+    const { issues, exemptCount } = lintPrototype(screens, arrows, reactions);
     const counts: Record<string, number> = {};
     for (const i of issues) counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    if (exemptCount) counts.exemptCount = exemptCount;
     return { issues, counts };
 }
 
