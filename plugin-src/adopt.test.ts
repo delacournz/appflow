@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assignScreenTexts, distanceToRect, inferGrid, longestSegmentMid, matchScreenAt, matchTrigger, modeOf, nearestUnclaimed } from './adopt';
+import { assignScreenTexts, distanceToRect, extrasFor, inferGrid, longestSegmentMid, matchScreenAt, matchTrigger, modeOf, nearestUnclaimed } from './adopt';
 import type { Rect } from './route';
 
 const W = 393;
@@ -136,5 +136,36 @@ describe('assignScreenTexts ungrouped anatomy', () => {
     });
     test('legacy label at -72 and route at -48 still match', () => {
         expect(assignScreenTexts(s, [text('l', 'Label · A', 72), text('r', 'Route · A', 48)])).toEqual({ labelId: 'l', routeId: 'r' });
+    });
+});
+
+describe('inferGrid extras', () => {
+    const at = (x: number, y: number): Rect => ({ x, y, width: W, height: H });
+    test('uniform boards report no extras', () => {
+        const g = inferGrid([cell(0, 0), cell(1, 0), cell(2, 0), cell(0, 1)]);
+        expect(g.colExtra).toBeUndefined();
+        expect(g.rowExtra).toBeUndefined();
+    });
+    test('a wider column boundary becomes a column extra and the base stays the common spacing', () => {
+        const g = inferGrid([at(0, 0), at(700, 0), at(1400, 0), at(2400, 0), at(3100, 0)]);
+        expect(g.colWidth).toBe(700);
+        expect(g.colExtra).toEqual({ 3: 300 });
+        expect(g.rowExtra).toBeUndefined();
+    });
+    test('a taller row boundary becomes a row extra', () => {
+        const g = inferGrid([at(0, 0), at(0, 1112), at(0, 2224), at(0, 3636), at(0, 4748)]);
+        expect(g.rowHeight).toBe(1112);
+        expect(g.rowExtra).toEqual({ 3: 300 });
+    });
+    test('a missing column is not mistaken for an extra', () => {
+        expect(inferGrid([at(0, 0), at(700, 0), at(2100, 0)]).colExtra).toBeUndefined();
+    });
+});
+
+describe('extrasFor', () => {
+    test('recomputes against an overridden base', () => {
+        const screens: Rect[] = [{ x: 0, y: 0, width: W, height: H }, { x: 1000, y: 0, width: W, height: H }];
+        expect(extrasFor(screens, 700, 1112)).toEqual({ colExtra: { 1: 300 } });
+        expect(extrasFor(screens, 1000, 1112)).toEqual({});
     });
 });

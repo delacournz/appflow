@@ -75,6 +75,18 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 - When a branch needs room, push the later columns right. Grow the board to fit. Don't squeeze a screen into a gap on the left.
 - After moving screens, close up any empty rows and columns the move leaves behind.
 
+## Groups
+
+Wrap related screens (a feature, a sub-flow such as "Passkeys" or "Device signing") in a labelled box so the board reads when zoomed out. Group when 2+ screens form a named unit; do not box every screen.
+
+- `create_flow_group { name, screenIds | cells }` (defaults to the selection), `update_flow_group { groupId, name?, add?, remove?, parentId?, style? }`, `delete_flow_group { groupId }` (screens stay). `move_screen` and `duplicate_screen` take `group` to join or leave one; a duplicate joins its source's group.
+- Spacing and refit are automatic. Boundaries between groups are widened for the title and stroke, screens shift to make room, and every box refits when screens are added, moved or removed, then arrows reroute. Never hand-size or hand-move a box, never edit the gaps yourself.
+- Never draw boxes by hand and never use `group_screens` for this (it breaks prototype Play). Screens stay top-level frames.
+- Arrow lines may cross a box stroke. A box and its title never cross screens, route text, badges, arrow labels or other boxes.
+- One level of nesting: a child group sits fully inside a parent (`parentId`). A child of a child is rejected.
+- Old hand-drawn boxes and Section Heading instances: run `adopt_flow_groups` (dry run first) to turn them into real groups.
+- Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds). `describe_board` shows the group tree and flags empty or stale groups.
+
 ## Back navigation, loops and states
 
 The rules cover forward flow. When a screen returns the user to an earlier step (Back, Start again, Try again), or the same screen appears in a different state:
@@ -85,7 +97,7 @@ The rules cover forward flow. When a screen returns the user to an earlier step 
 
 ## Checklist before you finish
 
-1. Run `lint_flow_layout` on the page or the board. Fix every `points-left` and `runs-left` issue by moving screens with `move_screen`, then run it again.
+1. Run `lint_flow_layout` on the page or the board. Fix every `points-left` and `runs-left` issue by moving screens with `move_screen`, and every `layoutIssues` entry by fixing group membership with `update_flow_group` (boxes refit themselves), then run it again.
 2. Run `describe_board` and fix every item under `issues`: stale screen data, two screens in one cell, missing endpoints.
 3. Take one screenshot of the board region (`get_screenshot` with `nodeIds` or `region`). Check that nothing sits on a label, that no two arrows share an arrowhead, that crossings happen only where they can't be avoided, and that the main path is a single row.
 4. Report which screens moved, any arrow you could not make point forwards, and any crossing that remains.

@@ -113,3 +113,61 @@ describe('build status', () => {
         expect(out.issues).toEqual(['In-app browser: no build badge (run badge_screens)', 'In-app browser: marked built but has no route text']);
     });
 });
+
+describe('flow groups', () => {
+    const box = { x: 0, y: 0, width: 10, height: 10 };
+    const withGroups = (groups: NonNullable<BoardInput['groups']>, screens = base.screens): BoardInput => ({ ...base, screens, groups });
+
+    test('lists groups with member names and draws the tree', () => {
+        const screens = [at('a', 'Welcome', 0, 0, { flowGroupId: 'g1' }), at('b', 'Verify your ID', 1, 0, { flowGroupId: 'g2' }), at('c', 'In-app browser', 1, 1)];
+        const out = renderBoard(
+            withGroups(
+                [
+                    { id: 'g1', name: 'Account', screenIds: ['a'], box, visible: true },
+                    { id: 'g2', name: 'Passkeys', parentId: 'g1', screenIds: ['b'], box, visible: true },
+                ],
+                screens,
+            ),
+            10,
+        );
+        expect(out.groups).toEqual([
+            { id: 'g1', name: 'Account', parentId: null, screens: ['Welcome'], box },
+            { id: 'g2', name: 'Passkeys', parentId: 'g1', screens: ['Verify your ID'], box },
+        ]);
+        expect(out.groupTree).toBe('Account (g1): Welcome\n  Passkeys (g2): Verify your ID');
+        expect(out.issues).toEqual([]);
+    });
+
+    test('no groups gives empty output', () => {
+        const out = renderBoard(base, 10);
+        expect(out.groups).toEqual([]);
+        expect(out.groupTree).toBe('');
+    });
+
+    test('flags empty, hidden and stale groups', () => {
+        const screens = [at('a', 'Welcome', 0, 0, { flowGroupId: 'g1' }), at('b', 'Verify your ID', 1, 0), at('c', 'In-app browser', 1, 1)];
+        const out = renderBoard(
+            withGroups(
+                [
+                    { id: 'g1', name: 'Stale', screenIds: ['a', 'zz', 'b'], box, visible: true },
+                    { id: 'g2', name: 'Empty', screenIds: [], box, visible: false },
+                    { id: 'g3', name: 'Hidden', screenIds: ['c'], box, visible: false },
+                    { id: 'g4', name: 'Orphan', parentId: 'nope', screenIds: [], box, visible: true },
+                ],
+                screens,
+            ),
+            10,
+        );
+        const text = out.issues.join('\n');
+        expect(text).toContain('Group "Stale" lists zz, which is not a screen on this board');
+        expect(text).toContain('Group "Stale" lists Verify your ID, whose flow group is not it');
+        expect(text).toContain('Group "Empty" has no screens');
+        expect(text).toContain('Group "Hidden" is hidden but has screens');
+        expect(text).toContain('Group "Orphan" has a missing parent nope');
+    });
+
+    test('flags a screen pointing at a missing group', () => {
+        const out = renderBoard(withGroups([], [at('a', 'Welcome', 0, 0, { flowGroupId: 'gone' }), ...base.screens.slice(1)]), 10);
+        expect(out.issues.join('\n')).toContain('Welcome: flow group gone no longer exists');
+    });
+});

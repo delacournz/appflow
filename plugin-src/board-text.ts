@@ -1,4 +1,5 @@
 import { cellOfRect, type ArrowMeta, type BoardMeta, type BuildState } from './flowmeta';
+import type { Rect } from './rect';
 import { statusMark } from './screen-status';
 
 /** Pure text renderer for an adopted flow board. No `figma` global. */
@@ -17,6 +18,8 @@ export type BoardScreen = {
     route?: string | null;
     verifiedAt?: string | null;
     hasBadge?: boolean;
+    /** The innermost flow group (id of its rect), when any. */
+    flowGroupId?: string | null;
 };
 
 export type ScreenStatusRow = { id: string; name: string; col: number; row: number; route: string | null; status: BuildState; verifiedAt: string | null };
@@ -30,12 +33,17 @@ export type BoardArrow = {
     exit: ArrowMeta['exit'];
 };
 
+export type BoardGroup = { id: string; name: string; parentId?: string; screenIds: string[]; box: Rect; visible: boolean };
+
+export type GroupRow = { id: string; name: string; parentId: string | null; screens: string[]; box: Rect };
+
 export type BoardInput = {
     boardId: string;
     name: string;
-    meta: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight'>;
+    meta: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra'>;
     screens: BoardScreen[];
     arrows: BoardArrow[];
+    groups?: BoardGroup[];
 };
 
 export type BoardDescription = {
@@ -46,6 +54,9 @@ export type BoardDescription = {
     grid: string;
     screens: ScreenStatusRow[];
     arrows: string[];
+    groups: GroupRow[];
+    /** Indented flow group tree, one line per group; empty without groups. */
+    groupTree: string;
     issues: string[];
 };
 
@@ -80,6 +91,35 @@ function statusRows(screens: readonly BoardScreen[]): ScreenStatusRow[] {
     return [...screens]
         .sort((a, b) => a.row - b.row || a.col - b.col)
         .map((s) => ({ id: s.id, name: s.name, col: s.col, row: s.row, route: s.route ?? null, status: s.status ?? 'not-built', verifiedAt: s.verifiedAt ?? null }));
+}
+
+function renderGroups(groups: readonly BoardGroup[], screens: readonly BoardScreen[]): { rows: GroupRow[]; tree: string; issues: string[] } {
+    const names = new Map(screens.map((s) => [s.id, s.name]));
+    const byId = new Map(groups.map((g) => [g.id, g]));
+    const issues: string[] = [];
+    const rows: GroupRow[] = groups.map((g) => ({ id: g.id, name: g.name, parentId: g.parentId ?? null, screens: g.screenIds.flatMap((id) => names.get(id) ?? []), box: g.box }));
+    const hasKids = new Set(groups.flatMap((g) => (g.parentId ? [g.parentId] : [])));
+    for (const g of groups) {
+        for (const id of g.screenIds) {
+            const s = screens.find((x) => x.id === id);
+            if (!s) issues.push(`Group "${g.name}" lists ${id}, which is not a screen on this board`);
+            else if ((s.flowGroupId ?? null) !== g.id) issues.push(`Group "${g.name}" lists ${s.name}, whose flow group is not it`);
+        }
+        if (!g.screenIds.length && !hasKids.has(g.id)) issues.push(`Group "${g.name}" has no screens`);
+        else if (!g.visible) issues.push(`Group "${g.name}" is hidden but has screens`);
+        if (g.parentId && !byId.has(g.parentId)) issues.push(`Group "${g.name}" has a missing parent ${g.parentId}`);
+    }
+    for (const s of screens) if (s.flowGroupId && !byId.has(s.flowGroupId)) issues.push(`${s.name}: flow group ${s.flowGroupId} no longer exists`);
+    const line = (g: BoardGroup, depth: number): string => {
+        const members = rows.find((r) => r.id === g.id)?.screens.join(', ') ?? '';
+        return `${'  '.repeat(depth)}${g.name} (${g.id})${members ? `: ${members}` : ''}`;
+    };
+    const lines: string[] = [];
+    for (const g of groups.filter((x) => !x.parentId || !byId.has(x.parentId))) {
+        lines.push(line(g, 0));
+        for (const k of groups.filter((x) => x.parentId === g.id)) lines.push(line(k, 1));
+    }
+    return { rows, tree: lines.join('\n'), issues };
 }
 
 export function renderBoard(input: BoardInput, width = 16): BoardDescription {
@@ -124,5 +164,8 @@ export function renderBoard(input: BoardInput, width = 16): BoardDescription {
         if (from && to && to.col < from.col) issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
     }
 
-    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, issues };
+    const g = renderGroups(input.groups ?? [], screens);
+    issues.push(...g.issues);
+
+    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, groups: g.rows, groupTree: g.tree, issues };
 }

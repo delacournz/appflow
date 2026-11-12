@@ -1,10 +1,11 @@
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { assignScreenTexts, inferGrid, longestSegmentMid, matchScreenAt, matchTrigger, modeOf, nearestUnclaimed, type TriggerCandidate } from './adopt';
+import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchScreenAt, matchTrigger, modeOf, nearestUnclaimed, type TriggerCandidate } from './adopt';
 import { classifyArrow, orderPath } from './flowlint';
 import {
     ARROW_KEY,
     BOARD_KEY,
     FLOW_NAMESPACE,
+    GROUP_LAYER_KEY,
     SCREEN_KEY,
     arrowGroupName,
     cellOfRect,
@@ -23,7 +24,10 @@ import { fitRoute } from './anatomy';
 import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
-import { assignLanes, clearOfLanes, type Exit, fanIndex, gutterKey, routeArrow, type Pt, type Rect, type Route } from './route';
+import { extraBetween, trackOf } from './tracks';
+import { type Exit, type Pt, type Rect, type Route } from './route';
+import { clearLabel, labelObstacles, type GroupObstacle } from './route-avoid';
+import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
 
 const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
@@ -72,7 +76,7 @@ export async function loadBoard(boardId: string): Promise<Board> {
     return { node, meta, arrows: arrows as SceneNode & ChildrenMixin };
 }
 
-function listArrows(board: Board): ArrowEntry[] {
+export function listArrows(board: Board): ArrowEntry[] {
     const out: ArrowEntry[] = [];
     for (const c of board.arrows.children) {
         if (c.type !== 'GROUP') continue;
@@ -82,9 +86,19 @@ function listArrows(board: Board): ArrowEntry[] {
     return out;
 }
 
+/** The base gap between screen columns. Widened boundaries (extras) do not change it: lanes stay in the base gap. */
 const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
 
-type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
+/**
+ * Where labels must stop for an arrow whose source-to-target span crosses a widened column boundary: the end of the
+ * base gutter beside the source. Undefined when no extra lies in the span, so uniform boards behave as before.
+ */
+function labelLimitOf(meta: BoardMeta, ends: { source: Rect; target: Rect }): number | undefined {
+    if (!meta.colExtra) return undefined;
+    const from = trackOf(ends.source.x - meta.originX, meta.colWidth, meta.colExtra);
+    const to = trackOf(ends.target.x - meta.originX, meta.colWidth, meta.colExtra);
+    return extraBetween(meta.colExtra, from, to) > 0 ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
+}
 
 async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
     const [from, to] = await Promise.all([sceneById(meta.from), sceneById(meta.to)]);
@@ -93,51 +107,19 @@ async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
     return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig, exit: meta.exit ?? 'side' };
 }
 
-type Plan = { id: string; route: Route | null; error: string | null };
-
-/** Routes arrows in the order given, giving each its own lane when it shares a corridor with an earlier one. */
-function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[]): Plan[] {
-    const gutter = gutterOf(meta);
-    const first = items.map((it) => routeArrow({ ...it.ends, gutter, lane: 0 }));
-    const fans = fanIndex(
-        items.flatMap((it, i) => {
-            const r = first[i] as ReturnType<typeof routeArrow>;
-            if (!r.ok) return [];
-            const s = it.ends.source;
-            if (r.kind === 'elbow') return [{ id: it.id, group: `bottom:${s.x}:${s.y}`, targetY: it.ends.target.y + it.ends.target.height / 2 }];
-            if (r.kind !== 'trigger' && r.kind !== 'gutter') return [];
-            const startY = (r.points[0] as Pt).y;
-            const targetY = it.ends.target.y + it.ends.target.height / 2;
-            return targetY >= startY ? [{ id: it.id, group: `${s.x}:${s.y}:${gutterKey(s, it.ends.target)}`, targetY }] : [];
-        }),
-    );
-    const lanes = assignLanes(
-        items.map((it, i) => {
-            const r = first[i] as ReturnType<typeof routeArrow>;
-            const ys = r.ok ? r.points.map((p) => p.y) : [0];
-            const shared = r.ok && r.kind !== 'straight' && r.kind !== 'elbow' && !fans.has(it.id);
-            return { key: shared ? gutterKey(it.ends.source, it.ends.target) : `solo:${it.id}`, yMin: Math.min(...ys), yMax: Math.max(...ys) };
-        }),
-    );
-    const routes = items.map((it, i) => {
-        const lane = lanes[i] as number;
-        const fan = fans.get(it.id);
-        return fan ? routeArrow({ ...it.ends, gutter, lane: 0, fan }) : lane === 0 ? (first[i] as ReturnType<typeof routeArrow>) : routeArrow({ ...it.ends, gutter, lane });
-    });
-    // A straight arrow out of the same screen edge as a fan keeps its label right of the fan's vertical lanes.
-    const edgeOf = (e: Endpoints) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
-    const fanLanes = new Map<string, number[]>();
-    items.forEach((it, i) => {
-        const r = routes[i] as ReturnType<typeof routeArrow>;
-        if (r.ok && fans.has(it.id)) fanLanes.set(edgeOf(it.ends), [...(fanLanes.get(edgeOf(it.ends)) ?? []), (r.points[1] as Pt).x]);
-    });
-    return items.map((it, i) => {
-        const r = routes[i] as ReturnType<typeof routeArrow>;
-        if (!r.ok) return { id: it.id, route: null, error: r.error };
-        const route = r.kind === 'straight' ? clearOfLanes(r, fanLanes.get(edgeOf(it.ends)) ?? []) : r;
-        return { id: it.id, route, error: null };
-    });
+/** Plans the board's arrows. `groups` are the board's group boxes and titles; without them the plan is the plain one. */
+function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = []): Plan[] {
+    return planRoutesPure({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => g.box) }, items);
 }
+
+type GroupObstacleLoader = (board: Board) => Promise<GroupObstacle[]>;
+let loadGroupObstacles: GroupObstacleLoader | null = null;
+
+/** flow-groups.ts registers how to read a board's group boxes (it imports this module, so it cannot be imported here). */
+export function setGroupObstacleLoader(loader: GroupObstacleLoader): void {
+    loadGroupObstacles = loader;
+}
+const obstaclesOf = async (board: Board): Promise<GroupObstacle[]> => (loadGroupObstacles ? loadGroupObstacles(board) : []);
 
 async function paintFor(style: Style): Promise<SolidPaint> {
     const paint: SolidPaint = { type: 'SOLID', color: style.color };
@@ -254,10 +236,17 @@ async function partsOf(meta: ArrowMeta): Promise<{ vector: VectorNode; dot: Elli
     return { vector, dot, label };
 }
 
-async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: FrameNode }, route: Route, style: Style): Promise<void> {
+/** Draws a route. With group obstacles, the label is re-centred clear of box strokes and titles; returns why when it cannot be. */
+async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: FrameNode }, route: Route, style: Style, groups: readonly GroupObstacle[] = []): Promise<string | null> {
     await writeVector(parts.vector, route.points, style);
     centre(parts.dot, route.dot);
-    centre(parts.label, route.labelAnchor);
+    if (!groups.length) {
+        centre(parts.label, route.labelAnchor);
+        return null;
+    }
+    const placed = clearLabel(route, { width: parts.label.width, height: parts.label.height }, labelObstacles(groups));
+    centre(parts.label, placed.ok ? placed.anchor : route.labelAnchor);
+    return placed.ok ? null : placed.blocked;
 }
 
 export type ScreenNode = { frame: FrameNode; group: GroupNode | null };
@@ -342,7 +331,8 @@ export const connect: Handler = async (args) => {
     const ends: Endpoints = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false, exit };
 
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => (o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []));
-    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }]);
+    const groups = await obstaclesOf(board);
+    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }], groups);
     const mine = plans[plans.length - 1] as Plan;
     if (!mine.route) return fail(mine.error ?? 'Could not route the arrow.');
     const route = mine.route;
@@ -359,7 +349,7 @@ export const connect: Handler = async (args) => {
         await setLabelText(parts.label, label);
         parts.vector.name = `Arrow · ${label}`;
     }
-    await applyRoute(parts, route, style);
+    const blocked = await applyRoute(parts, route, style, groups);
 
     const meta: ArrowMeta = {
         v: 1,
@@ -400,6 +390,7 @@ export const connect: Handler = async (args) => {
         prototypeUpdated,
         backwards: route.backwards,
         updated: !!match,
+        ...(blocked ? { warnings: [`label overlaps a group box: ${blocked}`] } : {}),
     });
 };
 
@@ -426,7 +417,8 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
             if (!o.ends) deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
         }
         const live = ordered.flatMap((o) => (o.ends ? [{ entry: o.entry, ends: o.ends }] : []));
-        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })));
+        const groups = await obstaclesOf(board);
+        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
         for (const [i, l] of live.entries()) {
             const plan = plans[i] as Plan;
             if (only && !only.has(l.entry.group.id)) continue;
@@ -440,7 +432,8 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
                 errors.push({ arrowGroupId: l.entry.group.id, error: 'vector, dot or label is missing from the arrow group' });
                 continue;
             }
-            await applyRoute(parts, plan.route, board.meta.arrowStyle);
+            const blocked = await applyRoute(parts, plan.route, board.meta.arrowStyle, groups);
+            if (blocked) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
             rerouted.push(l.entry.group.id);
             if (plan.route.backwards) backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
         }
@@ -505,7 +498,7 @@ export const adoptBoard: Handler = async (args) => {
     }
     const arrowsGroup = groups[0] as SceneNode & ChildrenMixin;
 
-    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id));
+    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
     const found = collectScreens(siblings).filter((c) => {
         const r = rectOf(c.frame);
         return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
@@ -521,6 +514,7 @@ export const adoptBoard: Handler = async (args) => {
     const grid = inferGrid(screenRects.map((s) => s.rect));
     const colWidth = typeof args.colWidth === 'number' ? args.colWidth : grid.colWidth;
     const rowHeight = typeof args.rowHeight === 'number' ? args.rowHeight : grid.rowHeight;
+    const extras = colWidth === grid.colWidth && rowHeight === grid.rowHeight ? { colExtra: grid.colExtra, rowExtra: grid.rowExtra } : extrasFor(screenRects.map((s) => s.rect), colWidth, rowHeight);
 
     const texts = collectTexts(siblings).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const style = readStyle(groups);
@@ -531,6 +525,8 @@ export const adoptBoard: Handler = async (args) => {
         originY: grid.originY,
         colWidth,
         rowHeight,
+        ...(extras.colExtra ? { colExtra: extras.colExtra } : {}),
+        ...(extras.rowExtra ? { rowExtra: extras.rowExtra } : {}),
         screenW: grid.screenW,
         screenH: grid.screenH,
         labelOffset: 80,
@@ -660,7 +656,7 @@ export const adoptBoard: Handler = async (args) => {
     return ok({
         boardId: boardNode.id,
         dryRun,
-        grid: { originX: boardMeta.originX, originY: boardMeta.originY, colWidth, rowHeight, screenW: boardMeta.screenW, screenH: boardMeta.screenH },
+        grid: { originX: boardMeta.originX, originY: boardMeta.originY, colWidth, rowHeight, ...(extras.colExtra ? { colExtra: extras.colExtra } : {}), ...(extras.rowExtra ? { rowExtra: extras.rowExtra } : {}), screenW: boardMeta.screenW, screenH: boardMeta.screenH },
         arrowStyle: style as unknown as JsonObject,
         screens: screenRects.length,
         arrowsAdopted: planned.length,

@@ -6,6 +6,7 @@ import {
     destinationsOf,
     parseArrowMeta,
     parseBoardMeta,
+    parseGroupMeta,
     parseScreenMeta,
     setNavigateTarget,
     stableArrowOrder,
@@ -132,5 +133,47 @@ describe('destinationsOf', () => {
             { trigger: { type: 'ON_PRESS' }, actions: [{ type: 'NODE', destinationId: 'a', navigation: 'NAVIGATE' }, { type: 'NODE', destinationId: null }] },
         ];
         expect(destinationsOf(reactions)).toEqual(['a', 'b']);
+    });
+});
+
+describe('board extras', () => {
+    const base = { v: 1, kind: 'board', originX: 0, originY: 0, colWidth: 700, rowHeight: 1112, screenW: 393, screenH: 852, labelOffset: 80, margin: 80, headingId: null, arrowsGroupId: 'a', arrowStyle: { strokeVariableId: null, color: { r: 0, g: 0, b: 0 }, weight: 2, cornerRadius: 20 } };
+    test('old boards without extras parse unchanged', () => {
+        const m = parseBoardMeta(JSON.stringify(base));
+        expect(m?.colExtra).toBeUndefined();
+        expect(m?.rowExtra).toBeUndefined();
+    });
+    test('extras round-trip and junk is dropped', () => {
+        const m = parseBoardMeta(JSON.stringify({ ...base, colExtra: { 2: 100, 3: -1 }, rowExtra: 'x' }));
+        expect(m?.colExtra).toEqual({ 2: 100 });
+        expect(m?.rowExtra).toBeUndefined();
+    });
+    test('cellOfRect reads widened boundaries', () => {
+        expect(cellOfRect({ x: 1500, y: 0 }, { ...base, colExtra: { 2: 100 } })).toEqual({ col: 2, row: 0 });
+        expect(cellOfRect({ x: 1400, y: 0 }, base)).toEqual({ col: 2, row: 0 });
+    });
+});
+
+describe('flow group meta', () => {
+    const ok = { boardId: 'b', name: 'Passkeys', screenIds: ['1:1', '1:2', '1:1'], rectId: 'r', titleId: 't', style: { color: '#FFFFFF', strokeWeight: 4, titleSize: 96 } };
+    test('round-trips, dedupes screen ids and keeps parentId', () => {
+        const m = parseGroupMeta(JSON.stringify({ ...ok, parentId: 'p' }));
+        expect(m?.screenIds).toEqual(['1:1', '1:2']);
+        expect(m?.parentId).toBe('p');
+        expect(parseGroupMeta(JSON.stringify(ok))?.parentId).toBeUndefined();
+    });
+    test('rejects malformed data', () => {
+        expect(parseGroupMeta('')).toBeNull();
+        expect(parseGroupMeta('nope')).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, screenIds: [1] }))).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, color: 'white' } }))).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, titleSize: 0 } }))).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, parentId: 3 }))).toBeNull();
+    });
+    test('screen meta accepts flowGroupId and rejects a non-string', () => {
+        const s = { v: 1, kind: 'screen', boardId: 'b', col: 0, row: 0, labelId: null, routeId: null };
+        expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: 'g' }))?.flowGroupId).toBe('g');
+        expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: null }))).not.toBeNull();
+        expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: 5 }))).toBeNull();
     });
 });

@@ -1,7 +1,8 @@
 /** Pure board-grid maths for the grid tools. No `figma` global. */
 import { cellOfRect, type BoardMeta } from './flowmeta';
+import { compactExtras, shiftExtras, trackStart, type Extras } from './tracks';
 
-export type GridMeta = Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'screenW' | 'screenH' | 'labelOffset' | 'margin'>;
+export type GridMeta = Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra' | 'screenW' | 'screenH' | 'labelOffset' | 'margin'>;
 export type Cell = { col: number; row: number };
 export type CellScreen = { id: string; col: number; row: number };
 export type Move = { id: string; from: Cell; to: Cell };
@@ -12,7 +13,7 @@ const key = (col: number, row: number) => `${col},${row}`;
 
 /** The frame rect of a screen sitting in a grid cell. */
 export function cellRect(meta: GridMeta, col: number, row: number): Bounds {
-    return { x: meta.originX + col * meta.colWidth, y: meta.originY + row * meta.rowHeight, width: meta.screenW, height: meta.screenH };
+    return { x: meta.originX + trackStart(col, meta.colWidth, meta.colExtra), y: meta.originY + trackStart(row, meta.rowHeight, meta.rowExtra), width: meta.screenW, height: meta.screenH };
 }
 
 /** The grid cell nearest a frame's top-left corner. */
@@ -58,6 +59,20 @@ export function compactPlan(screens: readonly CellScreen[]): Move[] {
     return out;
 }
 
+export type ExtrasPair = { colExtra: Extras; rowExtra: Extras };
+
+/** The extras after an insert_columns / insert_rows of `count` tracks after `after`. */
+export function shiftedExtras(meta: Pick<GridMeta, 'colExtra' | 'rowExtra'>, axis: 'col' | 'row', after: number, count: number): ExtrasPair {
+    const colExtra = meta.colExtra ?? {};
+    const rowExtra = meta.rowExtra ?? {};
+    return axis === 'col' ? { colExtra: shiftExtras(colExtra, after, count), rowExtra } : { colExtra, rowExtra: shiftExtras(rowExtra, after, count) };
+}
+
+/** The extras after compact_board: boundaries follow the tracks screens actually use. */
+export function compactedExtras(meta: Pick<GridMeta, 'colExtra' | 'rowExtra'>, screens: readonly CellScreen[]): ExtrasPair {
+    return { colExtra: compactExtras(meta.colExtra ?? {}, screens.map((s) => s.col)), rowExtra: compactExtras(meta.rowExtra ?? {}, screens.map((s) => s.row)) };
+}
+
 export type MovePlan = { ok: true; moves: Move[] } | { ok: false; error: string };
 
 /** Plans moving one screen to a cell, refusing an occupied cell unless `swap` trades the two screens. */
@@ -80,8 +95,8 @@ export function boardBounds(meta: GridMeta, screens: readonly { col: number; row
     return {
         x: meta.originX - meta.margin,
         y: meta.originY - meta.labelOffset - meta.margin,
-        width: maxCol * meta.colWidth + meta.screenW + 2 * meta.margin,
-        height: maxRow * meta.rowHeight + meta.labelOffset + meta.screenH + 2 * meta.margin,
+        width: trackStart(maxCol, meta.colWidth, meta.colExtra) + meta.screenW + 2 * meta.margin,
+        height: trackStart(maxRow, meta.rowHeight, meta.rowExtra) + meta.labelOffset + meta.screenH + 2 * meta.margin,
     };
 }
 

@@ -1,8 +1,9 @@
 /** Pure matching heuristics for adopting an existing flow board. No `figma` global. */
 
 import type { Pt, Rect } from './route';
+import { extrasFromPositions, type Extras } from './tracks';
 
-export type Grid = { originX: number; originY: number; colWidth: number; rowHeight: number; screenW: number; screenH: number };
+export type Grid = { originX: number; originY: number; colWidth: number; rowHeight: number; colExtra?: Extras; rowExtra?: Extras; screenW: number; screenH: number };
 
 export const DEFAULT_GUTTER = 307;
 export const DEFAULT_ROW_GAP = 260;
@@ -26,7 +27,19 @@ const distinct = (values: number[], tolerance: number): number[] => {
 
 const gaps = (positions: number[]): number[] => positions.slice(1).map((p, i) => p - (positions[i] as number));
 
-/** Column width and row height are the most common spacing between screen origins. */
+/** Extras for boundaries wider than `colWidth` / `rowHeight`, read off the screens' origins. Empty maps are omitted. */
+export function extrasFor(screens: readonly Rect[], colWidth: number, rowHeight: number): { colExtra?: Extras; rowExtra?: Extras } {
+    const xs = distinct(screens.map((s) => s.x), 4);
+    const ys = distinct(screens.map((s) => s.y), 4);
+    const colExtra = extrasFromPositions(xs, colWidth);
+    const rowExtra = extrasFromPositions(ys, rowHeight);
+    return { ...(Object.keys(colExtra).length ? { colExtra } : {}), ...(Object.keys(rowExtra).length ? { rowExtra } : {}) };
+}
+
+/**
+ * Column width and row height are the most common spacing between screen origins. Boundaries noticeably wider than
+ * that are recorded as extras (see tracks.ts), so a board with group gutters keeps its base spacing.
+ */
 export function inferGrid(screens: readonly Rect[]): Grid {
     const screenW = modeOf(screens.map((s) => s.width), 1) ?? 393;
     const screenH = modeOf(screens.map((s) => s.height), 1) ?? 852;
@@ -34,7 +47,8 @@ export function inferGrid(screens: readonly Rect[]): Grid {
     const ys = distinct(screens.map((s) => s.y), 4);
     const colWidth = modeOf(gaps(xs), 4) ?? screenW + DEFAULT_GUTTER;
     const rowHeight = modeOf(gaps(ys), 4) ?? screenH + DEFAULT_ROW_GAP;
-    return { originX: xs[0] ?? 0, originY: ys[0] ?? 0, colWidth: Math.round(colWidth), rowHeight: Math.round(rowHeight), screenW, screenH };
+    const base = { colWidth: Math.round(colWidth), rowHeight: Math.round(rowHeight) };
+    return { originX: xs[0] ?? 0, originY: ys[0] ?? 0, ...base, ...extrasFor(screens, base.colWidth, base.rowHeight), screenW, screenH };
 }
 
 export function distanceToRect(p: Pt, r: Rect): number {

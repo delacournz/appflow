@@ -1,4 +1,7 @@
 import type { JsonObject } from '../shared/protocol';
+import { loadBoard, readMeta } from './flow';
+import { BOARD_KEY, parseBoardMeta } from './flowmeta';
+import { boardLayoutLint } from './layout-lint';
 import { isScene, requireNode, walk } from './nodes';
 import { type Handler, num, ok, str } from './types';
 
@@ -78,11 +81,24 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
             issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0] as Pt, to: abs[abs.length - 1] as Pt });
         }
     }
+    const layoutIssues: JsonObject[] = [];
+    const counts: Record<string, number> = {};
+    const boardNodes = 'children' in root ? [root, ...root.children].filter((n) => readMeta(n, BOARD_KEY, parseBoardMeta)) : [];
+    for (const n of boardNodes) {
+        const r = await boardLayoutLint(await loadBoard(n.id));
+        if (!r) continue;
+        layoutIssues.push(...r.issues.map((i) => ({ boardId: r.boardId, ...i })));
+        for (const [k, v] of Object.entries(r.counts)) counts[k] = (counts[k] ?? 0) + v;
+    }
     return ok({
         checked,
-        passed: issues.length === 0,
+        passed: issues.length === 0 && layoutIssues.length === 0,
         issues,
-        fix: issues.length
+        layoutIssues,
+        counts,
+        fix: layoutIssues.length
+            ? 'Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines.'
+            : issues.length
             ? 'Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up.'
             : null,
     });

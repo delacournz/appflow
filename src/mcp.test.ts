@@ -391,7 +391,7 @@ describe('duplicate_screen', () => {
         const tools = await listTools();
         const t = tools.find((x) => x.name === 'duplicate_screen');
         expect(t?.inputSchema.required).toEqual(['id', 'col', 'row', 'name']);
-        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'banner', 'file']);
+        expect(Object.keys(t?.inputSchema.properties ?? {})).toEqual(['id', 'col', 'row', 'name', 'route', 'group', 'banner', 'file']);
         const c = ctx({ duplicate_screen: { ok: true, result: { id: '9:9', bannerUpdated: true } } });
         expect(json(await call('duplicate_screen', { id: '1:1', col: 2, row: 0, name: 'X' }, c))).toEqual({ id: '9:9', bannerUpdated: true });
         expect(c.calls.map((x) => x.tool)).toEqual(['duplicate_screen']);
@@ -609,5 +609,43 @@ describe('design sync', () => {
         const c = ctx({ export_design_system: { ok: true, result: { collections: 'x' } } });
         const r = await call('diff_design_system', { projectRoot: project, verbose: true }, c);
         expect(r.isError).toBe(true);
+    });
+});
+
+describe('flow group tools', () => {
+    test('are listed with their args and group_screens points at them', async () => {
+        const tools = await listTools();
+        const by = (n: string) => tools.find((t) => t.name === n);
+        expect(by('create_flow_group')?.inputSchema.required).toEqual(['name']);
+        expect(by('update_flow_group')?.inputSchema.required).toEqual(['groupId']);
+        expect(by('delete_flow_group')?.inputSchema.required).toEqual(['groupId']);
+        for (const k of ['screenIds', 'cells', 'parentId', 'style', 'dryRun', 'boardId']) expect(by('create_flow_group')?.inputSchema.properties).toHaveProperty(k);
+        for (const k of ['add', 'remove', 'parentId', 'style']) expect(by('update_flow_group')?.inputSchema.properties).toHaveProperty(k);
+        expect(by('duplicate_screen')?.inputSchema.properties).toHaveProperty('group');
+        expect(by('move_screen')?.inputSchema.properties).toHaveProperty('group');
+        expect(by('group_screens')?.description ?? '').toContain('create_flow_group');
+        expect(by('lint_flow_layout')?.description ?? '').toContain('group-crosses-content');
+        expect(by('describe_board')?.description ?? '').toContain('groupTree');
+    });
+
+    test('instructions and the layout skill teach flow groups', async () => {
+        const mc = await client();
+        expect(mc.getInstructions()).toContain('create_flow_group');
+        const content = (await mc.readResource({ uri: 'skill://appflow/flow-layout/SKILL.md' })).contents[0];
+        const text = content && 'text' in content ? content.text : '';
+        for (const k of ['create_flow_group', 'adopt_flow_groups', 'lint_flow_layout']) expect(text).toContain(k);
+    });
+
+    test('pass arguments through to the plugin, null parentId included', async () => {
+        const c = ctx({
+            create_flow_group: { ok: true, result: { groupId: '7:1' } },
+            update_flow_group: { ok: true, result: { groupId: '7:1' } },
+            delete_flow_group: { ok: true, result: { deleted: '7:1' } },
+        });
+        expect(json(await call('create_flow_group', { name: 'Passkeys', screenIds: ['1:1'], style: { color: '#FF0000' } }, c))).toEqual({ groupId: '7:1' });
+        await call('update_flow_group', { groupId: '7:1', parentId: null, add: ['1:2'] }, c);
+        await call('delete_flow_group', { groupId: '7:1' }, c);
+        expect(c.calls.map((x) => x.tool)).toEqual(['create_flow_group', 'update_flow_group', 'delete_flow_group']);
+        expect(c.calls[1]?.args).toEqual({ groupId: '7:1', parentId: null, add: ['1:2'] });
     });
 });

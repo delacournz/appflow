@@ -1,6 +1,7 @@
 import type { JsonObject } from '../shared/protocol';
-import { renderBoard, type BoardArrow, type BoardDescription, type BoardScreen } from './board-text';
+import { renderBoard, type BoardArrow, type BoardDescription, type BoardGroup, type BoardScreen } from './board-text';
 import { collectScreens, loadBoard, readMeta, rectOf, sceneById, type Board } from './flow';
+import { loadGroups } from './flow-groups';
 import { ARROW_KEY, BOARD_KEY, SCREEN_KEY, parseArrowMeta, parseBoardMeta, parseScreenMeta } from './flowmeta';
 import { buildStatusOf } from './screen-status';
 import { fail, num, ok, str, type Handler } from './types';
@@ -33,6 +34,7 @@ async function screensOf(board: Board): Promise<BoardScreen[]> {
             route: route?.type === 'TEXT' ? route.characters.trim() || null : null,
             verifiedAt: build.status === 'not-built' ? null : build.verifiedAt,
             hasBadge: !!badge,
+            flowGroupId: meta.flowGroupId ?? null,
         });
     }
     return out;
@@ -50,9 +52,20 @@ async function arrowsOf(board: Board): Promise<BoardArrow[]> {
     return out;
 }
 
+async function groupsOf(board: Board): Promise<BoardGroup[]> {
+    return (await loadGroups(board)).map((g) => ({
+        id: g.id,
+        name: g.meta.name,
+        ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}),
+        screenIds: g.meta.screenIds,
+        box: rectOf(g.rect),
+        visible: g.rect.visible,
+    }));
+}
+
 async function describeOne(board: Board, width: number): Promise<BoardDescription> {
-    const [screens, arrows] = await Promise.all([screensOf(board), arrowsOf(board)]);
-    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows }, width);
+    const [screens, arrows, groups] = await Promise.all([screensOf(board), arrowsOf(board), groupsOf(board)]);
+    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups }, width);
 }
 
 export const describeBoard: Handler = async (args: JsonObject) => {

@@ -6,6 +6,7 @@ import { fitRoute } from './anatomy';
 import { badgeName } from './screen-status';
 import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { Rect } from './rect';
+import { checkGroupArg, joinAndRefit } from './flow-groups';
 import { fail, ok, str, type Handler } from './types';
 
 const norm = (id: string) => id.replace('-', ':');
@@ -129,6 +130,12 @@ export const duplicateScreen: Handler = async (args) => {
     const board = parseBoardMeta(boardNode.getSharedPluginData(FLOW_NAMESPACE, BOARD_KEY));
     if (!board) return fail(`${meta.boardId} has no flowbridge board data.`);
 
+    const groupArg = str(args, 'group');
+    const inherited = meta.flowGroupId ? await checkGroupArg(meta.boardId, meta.flowGroupId) : null;
+    const wanted = groupArg === undefined ? { ok: true as const, groupId: inherited?.ok ? inherited.groupId : null } : await checkGroupArg(meta.boardId, groupArg);
+    if (!wanted.ok) return fail(wanted.error);
+    const flowGroupId = wanted.groupId;
+
     const target = cellRect(board, col, row);
     const grouped = src.parent?.type === 'GROUP' && isScreenGroupName(src.parent.name) ? src.parent : null;
     const container = grouped ? grouped.parent : src.parent;
@@ -211,6 +218,7 @@ export const duplicateScreen: Handler = async (args) => {
         groupId: groupCopy?.id ?? null,
         build: { status: 'not-built' },
         badgeId: badgeCopy?.id ?? null,
+        flowGroupId,
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build) await ensureBadge(copy, fresh, fresh.build);
@@ -226,5 +234,18 @@ export const duplicateScreen: Handler = async (args) => {
         boardNode.resize(grown.width, grown.height);
     }
 
-    return ok({ id: copy.id, name: copy.name, groupId: groupCopy?.id ?? null, col, row, labelId: label?.id ?? null, routeId: routeText?.id ?? null, badgeId: badgeCopy?.id ?? null, bannerUpdated });
+    const refit = await joinAndRefit(meta.boardId, copy.id, flowGroupId);
+    return ok({
+        id: copy.id,
+        name: copy.name,
+        groupId: groupCopy?.id ?? null,
+        col,
+        row,
+        labelId: label?.id ?? null,
+        routeId: routeText?.id ?? null,
+        badgeId: badgeCopy?.id ?? null,
+        bannerUpdated,
+        flowGroupId,
+        ...(refit ? { groups: refit } : {}),
+    });
 };

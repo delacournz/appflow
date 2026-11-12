@@ -20,6 +20,14 @@ export type RouteInput = {
     exit?: Exit;
     /** Position among arrows leaving one source through one gutter, ordered by target height; see `fanIndex`. */
     fan?: Fan;
+    /**
+     * Absolute x past which labels must not sit. Set when a widened column boundary (an extra band, see tracks.ts)
+     * lies between source and target: the lane jog already uses the base `gutter` next to the source, and the label
+     * is centred on the base gutter portion (source right edge to `limit`), never in the extra band.
+     */
+    labelLimitX?: number;
+    /** Extra px added to the fan's vertical lanes, to keep them clear of a group stroke; see `planRoutes`. */
+    fanShift?: number;
 };
 
 export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean };
@@ -145,16 +153,17 @@ const done = (kind: RouteKind, raw: Pt[], backwards = false): Route => {
 };
 
 /** A straight arrow's label, moved right of the vertical lanes of arrows fanning out beside it, so lines never cross it. */
-export function clearOfLanes(route: Route, laneXs: readonly number[]): Route {
+export function clearOfLanes(route: Route, laneXs: readonly number[], labelLimitX?: number): Route {
     if (laneXs.length === 0) return route;
     const end = route.points[route.points.length - 1] as Pt;
-    return { ...route, labelAnchor: { x: (Math.max(...laneXs) + end.x) / 2, y: route.labelAnchor.y } };
+    const endX = labelLimitX !== undefined && labelLimitX < end.x ? Math.max(labelLimitX, Math.max(...laneXs)) : end.x;
+    return { ...route, labelAnchor: { x: (Math.max(...laneXs) + endX) / 2, y: route.labelAnchor.y } };
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 export function routeArrow(input: RouteInput): Route | RouteError {
-    const { source, target, trigger, gutter, lane, exit = 'side', fan } = input;
+    const { source, target, trigger, gutter, lane, exit = 'side', fan, labelLimitX, fanShift = 0 } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
         case 'overlap':
@@ -163,6 +172,7 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             const tx = target.x;
             const ty = midY(target);
             const sx = right(source);
+            const bx = labelLimitX !== undefined && labelLimitX < tx ? Math.max(labelLimitX, sx) : tx;
             if (exit === 'bottom' && target.y >= bottom(source)) {
                 // Fanned drops step left from the highest target's lane, so a lower drop never crosses a higher turn.
                 const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
@@ -170,27 +180,29 @@ export function routeArrow(input: RouteInput): Route | RouteError {
                 const y = fan && fan.count > 1 ? ty : ty + off;
                 const r = done('elbow', [{ x, y: bottom(source) }, { x, y }, { x: tx, y }]);
                 // The label sits on the leg entering the target, so drops that run side by side keep their labels apart.
-                return { ...r, labelAnchor: { x: (x + tx) / 2, y } };
+                return { ...r, labelAnchor: { x: (x + bx) / 2, y } };
             }
             if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
                 const y = midY(source);
-                return done('straight', [{ x: sx, y }, { x: tx, y }]);
+                const straight = done('straight', [{ x: sx, y }, { x: tx, y }]);
+                return bx < tx ? { ...straight, labelAnchor: { x: (sx + bx) / 2, y } } : straight;
             }
             if (fan && fan.count > 1) {
                 const base: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
                 const start: Pt = { x: base.x, y: base.y + fan.index * FAN_STEP };
                 // Lanes hug the source edge so the labels, which sit right of them, get most of the gutter.
-                const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP, tx - EDGE_MARGIN);
+                const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP + fanShift, tx - EDGE_MARGIN);
                 const r = done(trigger ? 'trigger' : 'gutter', [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
                 // Fanned arrows share their first stretch, so each label goes on the segment entering its own target.
                 const last = r.points[r.points.length - 2] as Pt;
-                return { ...r, labelAnchor: { x: (last.x + tx) / 2, y: ty } };
+                return { ...r, labelAnchor: { x: (last.x + bx) / 2, y: ty } };
             }
             const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
             const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
             const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
             const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
-            return done(trigger ? 'trigger' : 'gutter', [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
+            const jog = done(trigger ? 'trigger' : 'gutter', [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
+            return bx < tx && bx > midX ? { ...jog, labelAnchor: { x: (midX + bx) / 2, y: ey } } : jog;
         }
         case 'below': {
             const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right(source), right(target)) - EDGE_MARGIN);

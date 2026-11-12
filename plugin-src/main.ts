@@ -3,7 +3,9 @@ import { downloadAssets, getScreenshot, uploadAssets } from './assets';
 import { componentRefs, getContextForCodeConnect, resolveComponent } from './codeconnect';
 import { generateDiagram, htmlBuild, useFigma } from './create';
 import { badgeScreens, setScreenStatus } from './badge';
-import { adoptBoard, connect, rerouteFlow } from './flow';
+import { adoptBoard } from './flow';
+import { adoptFlowGroups } from './flow-group-adopt-handler';
+import { connectWithGroups, createFlowGroup, deleteFlowGroup, rerouteFlowWithGroups, updateFlowGroup } from './flow-groups';
 import { lintFlowLayout } from './flowlint';
 import { getDesignContext, getFigjam, getLibraries, getMetadata, getVariableDefs, searchDesignSystem, status, whoami } from './inspect';
 import { describeBoard } from './describe';
@@ -34,8 +36,12 @@ const handlers: Record<string, Handler> = {
     resolve_component: resolveComponent,
     component_refs: componentRefs,
     lint_flow_layout: lintFlowLayout,
-    connect,
-    reroute_flow: rerouteFlow,
+    connect: connectWithGroups,
+    reroute_flow: rerouteFlowWithGroups,
+    create_flow_group: createFlowGroup,
+    update_flow_group: updateFlowGroup,
+    delete_flow_group: deleteFlowGroup,
+    adopt_flow_groups: adoptFlowGroups,
     adopt_board: adoptBoard,
     describe_board: describeBoard,
     create_board: createBoard,

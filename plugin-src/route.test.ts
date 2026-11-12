@@ -366,3 +366,45 @@ describe('fan-out from one source', () => {
         );
     });
 });
+
+describe('labelLimitX (widened column boundary)', () => {
+    const s0 = screen(0, 0);
+    const EXTRA = 700;
+    const farRight = (row: number): Rect => ({ ...screen(1, row), x: screen(1, row).x + EXTRA });
+    const limit = s0.x + W + GUTTER;
+
+    test('straight label centres on the base gutter, not the whole span', () => {
+        const t = farRight(0);
+        const plain = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
+        const capped = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0, labelLimitX: limit }));
+        expect(capped.points).toEqual(plain.points);
+        expect(capped.labelAnchor.x).toBe(s0.x + W + GUTTER / 2);
+        expect(plain.labelAnchor.x).toBeGreaterThan(limit);
+    });
+    test('gutter jog stays in the base gutter and its label sits left of the extra band', () => {
+        const t = farRight(1);
+        const r = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0, labelLimitX: limit }));
+        expect((r.points[1] as Pt).x).toBe(s0.x + W + GUTTER / 2);
+        expect(r.labelAnchor.x).toBeLessThanOrEqual(limit);
+        expect(r.labelAnchor.x).toBeGreaterThan((r.points[1] as Pt).x);
+    });
+    test('elbow and fan labels stay left of the limit', () => {
+        const t = farRight(1);
+        const elbow = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0, exit: 'bottom', labelLimitX: limit }));
+        expect(elbow.labelAnchor.x).toBeLessThanOrEqual(limit);
+        const fan = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0, fan: { index: 0, count: 2 }, labelLimitX: limit }));
+        expect(fan.labelAnchor.x).toBeLessThanOrEqual(limit);
+    });
+    test('no limit, or a limit past the target, changes nothing', () => {
+        const t = screen(1, 1);
+        const a = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
+        const b = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0, labelLimitX: t.x + 50 }));
+        expect(b).toEqual(a);
+    });
+    test('clearOfLanes honours the limit', () => {
+        const t = farRight(0);
+        const r = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
+        const moved = clearOfLanes(r, [s0.x + W + 40], limit);
+        expect(moved.labelAnchor.x).toBe((s0.x + W + 40 + limit) / 2);
+    });
+});

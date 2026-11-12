@@ -70,18 +70,20 @@ The `verify-built` skill compares each screen's route code and the running app w
 | --- | --- |
 | `create_board` | Empty board: heading, background sized for cols × rows, and an arrows frame kept above the screens. Copies styles from an existing board on the page. |
 | `adopt_board` | Makes a hand-built board manageable: infers the grid, records each screen, and groups each arrow with its start dot and label, linked to its screens and trigger. |
-| `describe_board` | The board as text: ASCII grid with build marks (✓ built, ~ drift, · not built), screens with routes and status, arrows, and issues. |
+| `describe_board` | The board as text: ASCII grid with build marks (✓ built, ~ drift, · not built), screens with routes and status, arrows, flow groups as a tree, and issues. |
 | `move_screen` | Moves a screen (with route and badge) to a cell, or swaps two. Grows the board and reroutes arrows. |
 | `insert_columns` / `insert_rows` | Shift later columns right or rows down to make room. |
 | `compact_board` | Closes empty columns and rows and shrinks the board. |
 | `duplicate_screen` | Copies a screen into a free cell for another state, optionally changing its banner. The copy starts Not built. |
 | `connect` | Draws an arrow from the triggering control and points its prototype at the target. |
 | `reroute_flow` | Redraws arrows from current positions after moves outside the board tools. Reports backwards and dangling arrows. |
-| `lint_flow_layout` | Reports arrows whose head points left or whose path runs left. |
+| `create_flow_group` / `update_flow_group` / `delete_flow_group` | Labelled box (stroked rectangle plus bold title) around a set of screens, one level of nesting. Boundaries widen and boxes refit automatically when screens are added, moved or removed. |
+| `adopt_flow_groups` | Converts hand-drawn boxes and Section Heading instances into flow groups. Dry run by default. |
+| `lint_flow_layout` | Reports arrows whose head points left or whose path runs left, and flow group boxes that cross screens, labels or each other. |
 | `set_screen_status` | Records `built` / `drift` / `not-built` and shows the badge. Follow `verify-built` first. |
 | `badge_screens` | Adds or refreshes the badge on every screen of a board. |
 | `ungroup_screens` | Migrates older boards whose screens sit in `Screen · …` groups back to top-level frames. |
-| `group_screens` | Legacy. Breaks prototype Play; use only if you want groups. |
+| `group_screens` | Legacy. Breaks prototype Play; not for boxes, use `create_flow_group`. |
 
 ## Component and design-system sync
 

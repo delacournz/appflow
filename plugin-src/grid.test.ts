@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { boardBounds, cellOf, cellRect, compactPlan, occupancy, planMove, shiftPlan, staleReason, type GridMeta } from './grid';
+import { boardBounds, cellOf, cellRect, compactedExtras, compactPlan, occupancy, planMove, shiftedExtras, shiftPlan, staleReason, type GridMeta } from './grid';
 
 const meta: GridMeta = { originX: 100, originY: 200, colWidth: 700, rowHeight: 1112, screenW: 393, screenH: 852, labelOffset: 72, margin: 80 };
 const s = (id: string, col: number, row: number) => ({ id, col, row });
@@ -123,5 +123,41 @@ describe('staleReason', () => {
     test('grouped screens use absolute coordinates: group-relative values would read as stale', () => {
         expect(staleReason(meta, { col: 2, row: 1 }, frame, { x: 1500, y: 1240 }, true)).toBeNull();
         expect(staleReason(meta, { col: 2, row: 1 }, { x: 0, y: 0 }, { x: 0, y: -72 }, true)).toBe('cell-mismatch');
+    });
+});
+
+describe('variable gaps (extras)', () => {
+    const wide: GridMeta = { ...meta, colExtra: { 2: 200 }, rowExtra: { 1: 300 } };
+    test('cellRect adds extras before the track and carries them forward', () => {
+        expect(cellRect(wide, 1, 0)).toEqual({ x: 800, y: 200, width: 393, height: 852 });
+        expect(cellRect(wide, 2, 1)).toEqual({ x: 1700, y: 1612, width: 393, height: 852 });
+        expect(cellRect(wide, 3, 1).x).toBe(2400);
+    });
+    test('cellOf inverts cellRect on a widened board', () => {
+        for (let c = 0; c < 5; c++) for (let r = 0; r < 4; r++) expect(cellOf(cellRect(wide, c, r), wide)).toEqual({ col: c, row: r });
+        expect(cellOf({ x: 1703, y: 1610 }, wide)).toEqual({ col: 2, row: 1 });
+    });
+    test('boardBounds includes the extras', () => {
+        const b = boardBounds(wide, [s('a', 0, 0), s('b', 3, 1)]);
+        expect(b.width).toBe(3 * 700 + 200 + 393 + 160);
+        expect(b.height).toBe(1112 + 300 + 72 + 852 + 160);
+    });
+    test('empty extras equal the uniform grid', () => {
+        const e: GridMeta = { ...meta, colExtra: {}, rowExtra: {} };
+        expect(cellRect(e, 3, 2)).toEqual(cellRect(meta, 3, 2));
+        expect(boardBounds(e, [s('a', 4, 4)])).toEqual(boardBounds(meta, [s('a', 4, 4)]));
+    });
+    test('shiftedExtras moves the boundaries after an insert on that axis only', () => {
+        expect(shiftedExtras(wide, 'col', 0, 2)).toEqual({ colExtra: { 4: 200 }, rowExtra: { 1: 300 } });
+        expect(shiftedExtras(wide, 'row', 0, 1)).toEqual({ colExtra: { 2: 200 }, rowExtra: { 2: 300 } });
+        expect(shiftedExtras(meta, 'col', 0, 1)).toEqual({ colExtra: {}, rowExtra: {} });
+    });
+    test('compactedExtras follows the tracks screens use', () => {
+        const e: GridMeta = { ...meta, colExtra: { 3: 200 }, rowExtra: { 2: 300 } };
+        expect(compactedExtras(e, [s('a', 0, 0), s('b', 1, 0), s('c', 3, 2)])).toEqual({ colExtra: { 2: 200 }, rowExtra: { 1: 300 } });
+    });
+    test('planMove and shiftPlan stay in cell space', () => {
+        expect(shiftPlan([s('a', 0, 0), s('b', 2, 0)], 'col', 0, 1).map((m) => m.to)).toEqual([{ col: 3, row: 0 }]);
+        expect(planMove([s('a', 0, 0)], 'a', 2, 1, false)).toEqual({ ok: true, moves: [{ id: 'a', from: { col: 0, row: 0 }, to: { col: 2, row: 1 } }] });
     });
 });

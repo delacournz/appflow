@@ -1,9 +1,14 @@
 /** Shared plugin data model for flow boards, plus pure helpers. No `figma` global. */
 
+import { cleanExtras, trackOf, type Extras } from './tracks';
+
 export const FLOW_NAMESPACE = 'flowbridge';
 export const BOARD_KEY = 'board';
 export const SCREEN_KEY = 'screen';
 export const ARROW_KEY = 'arrow';
+export const GROUP_KEY = 'group';
+/** Plugin data key on the per-board `Flow groups · {board}` holder frame; the value is the board's node id. */
+export const GROUP_LAYER_KEY = 'groups-layer';
 
 export type Rgb = { r: number; g: number; b: number };
 
@@ -14,6 +19,10 @@ export type BoardMeta = {
     originY: number;
     colWidth: number;
     rowHeight: number;
+    /** Extra px added before column i (cumulative). Absent = uniform columns. */
+    colExtra?: Extras;
+    /** Extra px added before row i (cumulative). Absent = uniform rows. */
+    rowExtra?: Extras;
     screenW: number;
     screenH: number;
     labelOffset: number;
@@ -37,6 +46,24 @@ export type ScreenMeta = {
     build?: BuildStatus;
     /** The `Badge · {name}` pill showing `build`. */
     badgeId?: string | null;
+    /** The flow group (labelled box) this screen belongs to: the id of the group's rect. Distinct from the legacy `groupId`. */
+    flowGroupId?: string | null;
+};
+
+/** How a flow group's box and title are drawn. `color` is `#RRGGBB`. */
+export type GroupStyle = { color: string; strokeWeight: number; titleSize: number };
+
+/** Stored on a flow group's rectangle node. The group's id is that node's id (`rectId`). */
+export type GroupMeta = {
+    boardId: string;
+    name: string;
+    /** The screens directly in this group. A screen is in at most one group; a parent's box also wraps its children's. */
+    screenIds: string[];
+    rectId: string;
+    titleId: string;
+    /** Set on a nested child. One level only. */
+    parentId?: string;
+    style: GroupStyle;
 };
 
 export type BuildStatus =
@@ -100,7 +127,15 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
     if (!isNum(s.color.r) || !isNum(s.color.g) || !isNum(s.color.b)) return null;
     for (const k of ['originX', 'originY', 'colWidth', 'rowHeight', 'screenW', 'screenH', 'labelOffset', 'margin']) if (!isNum(o[k])) return null;
     if (!strOrNull(o.headingId) || !isStr(o.arrowsGroupId)) return null;
-    return o as unknown as BoardMeta;
+    const meta = o as unknown as BoardMeta;
+    for (const k of ['colExtra', 'rowExtra'] as const) {
+        const raw = o[k];
+        if (raw === undefined) continue;
+        const clean = isObj(raw) ? cleanExtras(raw as Extras) : {};
+        if (Object.keys(clean).length) meta[k] = clean;
+        else delete meta[k];
+    }
+    return meta;
 }
 
 export function parseScreenMeta(raw: string): ScreenMeta | null {
@@ -109,6 +144,7 @@ export function parseScreenMeta(raw: string): ScreenMeta | null {
     if (!isStr(o.boardId) || !isNum(o.col) || !isNum(o.row) || !strOrNull(o.labelId) || !strOrNull(o.routeId)) return null;
     if (o.groupId !== undefined && !strOrNull(o.groupId)) return null;
     if (o.badgeId !== undefined && !strOrNull(o.badgeId)) return null;
+    if (o.flowGroupId !== undefined && !strOrNull(o.flowGroupId)) return null;
     if (o.build !== undefined && !parseBuildStatus(o.build)) return null;
     return o as unknown as ScreenMeta;
 }
@@ -122,10 +158,33 @@ export function parseArrowMeta(raw: string): ArrowMeta | null {
     return o as unknown as ArrowMeta;
 }
 
+export function parseGroupMeta(raw: string): GroupMeta | null {
+    const o = parse(raw);
+    if (!o) return null;
+    if (!isStr(o.boardId) || !isStr(o.name) || !isStr(o.rectId) || !isStr(o.titleId)) return null;
+    if (!Array.isArray(o.screenIds) || !o.screenIds.every(isStr)) return null;
+    if (o.parentId !== undefined && !isStr(o.parentId)) return null;
+    const s = o.style;
+    if (!isObj(s) || !isStr(s.color) || !/^#[0-9a-fA-F]{6}$/.test(s.color) || !isNum(s.strokeWeight) || !isNum(s.titleSize)) return null;
+    if (s.strokeWeight <= 0 || s.titleSize <= 0) return null;
+    return {
+        boardId: o.boardId,
+        name: o.name,
+        screenIds: [...new Set(o.screenIds)],
+        rectId: o.rectId,
+        titleId: o.titleId,
+        ...(o.parentId ? { parentId: o.parentId } : {}),
+        style: { color: s.color, strokeWeight: s.strokeWeight, titleSize: s.titleSize },
+    };
+}
+
 export const arrowGroupName = (fromName: string, toName: string, label: string): string => `Flow · ${fromName} → ${toName} · ${label}`;
 
-export function cellOfRect(rect: { x: number; y: number }, board: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight'>): { col: number; row: number } {
-    return { col: Math.round((rect.x - board.originX) / board.colWidth), row: Math.round((rect.y - board.originY) / board.rowHeight) };
+export function cellOfRect(
+    rect: { x: number; y: number },
+    board: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra'>,
+): { col: number; row: number } {
+    return { col: trackOf(rect.x - board.originX, board.colWidth, board.colExtra), row: trackOf(rect.y - board.originY, board.rowHeight, board.rowExtra) };
 }
 
 /** Stable order for lane assignment: source column, then target row, then id. */
