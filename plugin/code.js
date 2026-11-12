@@ -1634,6 +1634,15 @@ ${logs.join(`
   function uniformFields(base, effective) {
     return { colWidth: effective.colWidth, rowHeight: effective.rowHeight, baseColWidth: base.colWidth, baseRowHeight: base.rowHeight, spacing: "uniform" };
   }
+  function growPitch(base, more, deficit, previous) {
+    const total = (n) => Math.max(0, n.col) + Math.max(0, n.row);
+    if (previous && total(deficit) >= total(previous))
+      return { more, stop: true };
+    const col = more.col + Math.max(0, deficit.col);
+    const row = more.row + Math.max(0, deficit.row);
+    const capped = { col: Math.min(col, base.colWidth), row: Math.min(row, base.rowHeight) };
+    return { more: capped, stop: capped.col !== col || capped.row !== row };
+  }
 
   // plugin-src/board-ops.ts
   var writeScreen = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
@@ -2083,6 +2092,10 @@ ${logs.join(`
   var right = (r) => r.x + r.width;
   var bottom = (r) => r.y + r.height;
   var span = (cells, key) => [Math.min(...cells.map((c) => c[key])), Math.max(...cells.map((c) => c[key]))];
+  var interleaved = (a, b) => {
+    const [ac, bc, ar, br] = [span(a, "col"), span(b, "col"), span(a, "row"), span(b, "row")];
+    return ac[0] <= bc[1] && bc[0] <= ac[1] && ar[0] <= br[1] && br[0] <= ar[1];
+  };
   var wanted = (a, b) => {
     if (!a.grouped && !b.grouped)
       return null;
@@ -2104,6 +2117,8 @@ ${logs.join(`
         const [a, b] = [blocks[i], blocks[j]];
         const gap = wanted(a, b);
         if (gap === null || !a.cells.length || !b.cells.length)
+          continue;
+        if (interleaved(a.cells, b.cells))
           continue;
         const overlapX = Math.min(right(a.rect), right(b.rect)) - Math.max(a.rect.x, b.rect.x);
         const overlapY = Math.min(bottom(a.rect), bottom(b.rect)) - Math.max(a.rect.y, b.rect.y);
@@ -2688,11 +2703,16 @@ ${logs.join(`
     const uniform = spacingOf(board.meta) === "uniform";
     let bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
     let more = { col: 0, row: 0 };
+    let previous = null;
     while (fit.active && passes < MAX_SETTLE) {
       const short = hasDeficits(fit.deficits);
-      if (short && uniform)
-        more = { col: more.col + fit.deficits.uniform.col, row: more.row + fit.deficits.uniform.row };
-      else if (short) {
+      if (short && uniform) {
+        const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
+        previous = fit.deficits.uniform;
+        if (step.stop && step.more.col === more.col && step.more.row === more.row)
+          break;
+        more = step.more;
+      } else if (short) {
         bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
         setGapExtra(board, bonus);
       }
@@ -7315,7 +7335,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9c2e40a1", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "8d42554b", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7323,7 +7343,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9c2e40a1"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"8d42554b"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

@@ -26,3 +26,19 @@ export const samePitch = (a: Pitch, b: Pitch): boolean => a.colWidth === b.colWi
 export function uniformFields(base: Pitch, effective: Pitch): { colWidth: number; rowHeight: number; baseColWidth: number; baseRowHeight: number; spacing: 'uniform' } {
     return { colWidth: effective.colWidth, rowHeight: effective.rowHeight, baseColWidth: base.colWidth, baseRowHeight: base.rowHeight, spacing: 'uniform' };
 }
+
+type Need = { col: number; row: number };
+
+/**
+ * One settle step of uniform pitch growth: add what the drawn boxes still lack. Stops (and keeps the previous growth) when the
+ * deficit did not shrink since the last pass, which means spacing cannot fix it, and caps growth at one base pitch per axis so
+ * an unsolvable layout never balloons the board.
+ */
+export function growPitch(base: Pitch, more: Need, deficit: Need, previous: Need | null): { more: Need; stop: boolean } {
+    const total = (n: Need) => Math.max(0, n.col) + Math.max(0, n.row);
+    if (previous && total(deficit) >= total(previous)) return { more, stop: true };
+    const col = more.col + Math.max(0, deficit.col);
+    const row = more.row + Math.max(0, deficit.row);
+    const capped = { col: Math.min(col, base.colWidth), row: Math.min(row, base.rowHeight) };
+    return { more: capped, stop: capped.col !== col || capped.row !== row };
+}

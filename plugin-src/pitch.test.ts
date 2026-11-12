@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { cellRect } from './grid';
-import { basePitchOf, pitchFromNeeds, samePitch, spacingOf, uniformFields } from './pitch';
+import { basePitchOf, growPitch, pitchFromNeeds, samePitch, spacingOf, uniformFields } from './pitch';
 import { groupBoundaryNeeds, type GroupRec } from './flow-group-plan';
 import { EDGE_FOR_TEST } from './pitch-fixtures';
 
@@ -78,5 +78,19 @@ describe('uniform grid positions', () => {
         const gapsY = [0, 1, 2, 3].map((r) => cellRect(meta, 0, r + 1).y - cellRect(meta, 0, r).y);
         expect(new Set(gapsX).size).toBe(1);
         expect(new Set(gapsY).size).toBe(1);
+    });
+});
+
+describe('growPitch', () => {
+    const base = { colWidth: 700, rowHeight: 1112 };
+    test('adds the deficit while it shrinks', () => {
+        expect(growPitch(base, { col: 0, row: 0 }, { col: 100, row: 0 }, null)).toEqual({ more: { col: 100, row: 0 }, stop: false });
+        expect(growPitch(base, { col: 100, row: 0 }, { col: 40, row: 0 }, { col: 100, row: 0 })).toEqual({ more: { col: 140, row: 0 }, stop: false });
+    });
+    test('stops when a pass did not reduce the deficit', () => {
+        expect(growPitch(base, { col: 100, row: 0 }, { col: 100, row: 0 }, { col: 100, row: 0 })).toEqual({ more: { col: 100, row: 0 }, stop: true });
+    });
+    test('never grows past the base pitch on an axis', () => {
+        expect(growPitch(base, { col: 600, row: 0 }, { col: 500, row: 0 }, { col: 900, row: 0 })).toEqual({ more: { col: 700, row: 0 }, stop: true });
     });
 });

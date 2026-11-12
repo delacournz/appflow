@@ -23,6 +23,12 @@ const right = (r: Rect) => r.x + r.width;
 const bottom = (r: Rect) => r.y + r.height;
 const span = (cells: readonly Cell[], key: 'col' | 'row'): [number, number] => [Math.min(...cells.map((c) => c[key])), Math.max(...cells.map((c) => c[key]))];
 
+/** Cell ranges overlapping on both axes: one block reaches into the other's rows and columns, so no gap can part them. */
+const interleaved = (a: readonly Cell[], b: readonly Cell[]): boolean => {
+    const [ac, bc, ar, br] = [span(a, 'col'), span(b, 'col'), span(a, 'row'), span(b, 'row')];
+    return ac[0] <= bc[1] && bc[0] <= ac[1] && ar[0] <= br[1] && br[0] <= ar[1];
+};
+
 /** The wanted gap for a pair, or null when they are not neighbours. */
 const wanted = (a: Block, b: Block): number | null => {
     if (!a.grouped && !b.grouped) return null;
@@ -50,6 +56,7 @@ export function gapDeficits(blocks: readonly Block[]): Deficits {
             const [a, b] = [blocks[i] as Block, blocks[j] as Block];
             const gap = wanted(a, b);
             if (gap === null || !a.cells.length || !b.cells.length) continue;
+            if (interleaved(a.cells, b.cells)) continue;
             const overlapX = Math.min(right(a.rect), right(b.rect)) - Math.max(a.rect.x, b.rect.x);
             const overlapY = Math.min(bottom(a.rect), bottom(b.rect)) - Math.max(a.rect.y, b.rect.y);
             if (overlapX > 0 && overlapY > 0 ? overlapY <= overlapX : overlapX > 0) {
