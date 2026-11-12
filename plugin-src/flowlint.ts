@@ -52,7 +52,7 @@ export function orderPath(vertices: readonly Vertex[], segments: readonly Segmen
  * Where the arrowhead points, and whether any part of the path travels left.
  * `maxLeftHop` (default 0 = none) allows the side-entry fallback of a vertical arrow whose straight line would cross a
  * group title (`routeViaLeftGutter`): the head points right and the ONLY leftward segment is the first one, leaving
- * the source, no longer than `maxLeftHop` (half a column gutter).
+ * the source, no longer than `maxLeftHop` (one column gutter: the drop stays inside the gutter left of the source).
  */
 export function classifyArrow(points: readonly Pt[], tolerance = 1, maxLeftHop = 0): { heading: Heading; issues: ArrowIssue[] } {
     const a = points[points.length - 2] as Pt;
@@ -76,7 +76,7 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
     const issues: JsonObject[] = [];
     let checked = 0;
     const boardMetas = ('children' in root ? [root, ...root.children] : [root]).flatMap((n) => readMeta(n, BOARD_KEY, parseBoardMeta) ?? []);
-    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => (m.colWidth - m.screenW) / 2));
+    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => m.colWidth - m.screenW));
     for (const n of walk(root, 100_000)) {
         if (n.type !== 'VECTOR' || !isScene(n)) continue;
         const net = n.vectorNetwork;
