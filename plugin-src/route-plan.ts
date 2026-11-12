@@ -379,6 +379,7 @@ function joinPass(
     edges: readonly Edge[],
     builders: (((lane: number) => Routed) | null)[],
     gutter: number,
+    repair = false,
 ): { total: number; members: number[] } {
     const groups = new Map<string, number[]>();
     items.forEach((it, i) => {
@@ -394,7 +395,7 @@ function joinPass(
         return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
     };
     const joined = [...groups.values()].filter((g) => g.length >= 2);
-    const pending = new Set(joined.flat());
+    const pending = new Set(repair ? [] : joined.flat());
     const lowerFirst = (g: number[]) => (items[g[0] as number] as (typeof items)[number]).ends.target.y;
     let grand = 0;
     const done: number[] = [];
@@ -463,7 +464,9 @@ function joinPass(
 /**
  * Runs `joinPass` with the lower targets first (their trunks nearest the column) and with the higher targets first, on
  * copies, and keeps the cheaper outcome, so groups whose trunks would collide in one column settle whichever way leaves
- * no shared line. Merged routes get no lane builder. Mutates `routes` and `builders`.
+ * no shared line. The global choice can trade one group's collision for another's, so each group is then placed again
+ * with every other route fixed (`repair`), which moves a group off a line a later group's trunk ended up on. Merged
+ * routes get no lane builder. Mutates `routes` and `builders`.
  */
 function joinTargets(
     routes: Routed[],
@@ -483,5 +486,10 @@ function joinTargets(
     for (const i of best.members) {
         routes[i] = best.routes[i] as Routed;
         builders[i] = null;
+    }
+    for (let pass = 0; pass < 2; pass++) {
+        const before = routes.slice();
+        const r = joinPass('lower', routes, items, screens, rowGap, titles, edges, builders, gutter, true);
+        if (r.total === 0 || routes.every((x, i) => x === before[i])) break;
     }
 }
