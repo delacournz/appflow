@@ -562,7 +562,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'badge_screens',
-        'Add or refresh the build badge on every adopted screen, showing its stored status (Not built when none), and delete orphan badges: "Badge · …" pills on the board that no screen points at (left behind by renames, duplicates or deletes; listed in removed with their old text). Idempotent; run once on existing boards. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, removed: [{ id, name, text }], skipped: [{ id, name, reason }] }.',
+        'Add or refresh the build badge on every adopted screen, showing its stored status (Not built when none; a screen with no stored status keeps the Built or Drift its current badge shows, marked recovered), and delete orphan badges: "Badge · …" pills on the board that no screen points at (left behind by renames, duplicates or deletes; listed in removed with their old text). Idempotent; run once on existing boards. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, removed: [{ id, name, text }], skipped: [{ id, name, reason }] }.',
         obj({
             boardId: boardIdAll,
             dryRun: bool('Report what would change without editing the file. Default false.').optional(),

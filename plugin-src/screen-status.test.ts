@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { parseBuildStatus, type BuildStatus } from './flowmeta';
-import { BADGE_SPECS, badgeName, badgePosition, buildStatusOf, statusFromInput, statusMark } from './screen-status';
+import { BADGE_SPECS, badgeName, badgePosition, buildStatusOf, statusFromBadgeText, statusFromInput, statusMark } from './screen-status';
 
 const NOW = '2026-11-03T00:00:00.000Z';
 
@@ -69,5 +69,16 @@ describe('badge helpers', () => {
     test('without a label it uses the label offset', () => {
         const frame = { x: 100, y: 1000, width: 393, height: 852 };
         expect(badgePosition(frame, null, 80, { width: 60, height: 20 })).toEqual({ x: 433, y: 920 });
+    });
+});
+
+describe('statusFromBadgeText', () => {
+    test('a Built or Drift badge is recovered as that status, marked as recovered', () => {
+        expect(statusFromBadgeText('Built', NOW)).toEqual({ status: 'built', verifiedAt: NOW, commit: null, confidence: 'static', notes: 'Recovered from the badge; verify again.' });
+        expect(statusFromBadgeText('Drift', NOW)).toEqual({ status: 'drift', verifiedAt: NOW, commit: null, notes: 'Recovered from the badge; verify again.' });
+    });
+    test('Not built and unknown text give nothing to recover', () => {
+        expect(statusFromBadgeText('Not built', NOW)).toBeNull();
+        expect(statusFromBadgeText('???', NOW)).toBeNull();
     });
 });

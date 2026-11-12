@@ -19,6 +19,18 @@ export const statusMark = (s: BuildState): string => MARKS[s];
 
 export const buildStatusOf = (build: BuildStatus | undefined): BuildStatus => build ?? { status: 'not-built' };
 
+const RECOVERED = 'Recovered from the badge; verify again.';
+
+/**
+ * The status a badge shows, for a screen whose stored status was lost (e.g. by adopting a copied board). Only Built and Drift
+ * carry information; Not built is the default anyway, so it returns null.
+ */
+export function statusFromBadgeText(text: string, now: string): BuildStatus | null {
+    if (text === BADGE_SPECS.built.text) return { status: 'built', verifiedAt: now, commit: null, confidence: 'static', notes: RECOVERED };
+    if (text === BADGE_SPECS.drift.text) return { status: 'drift', verifiedAt: now, commit: null, notes: RECOVERED };
+    return null;
+}
+
 export type StatusInput = { status?: unknown; confidence?: unknown; commit?: unknown; notes?: unknown };
 
 export type StatusResult = { ok: true; value: BuildStatus } | { ok: false; error: string };

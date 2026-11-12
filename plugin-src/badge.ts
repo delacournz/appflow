@@ -4,7 +4,7 @@ import { orphanBadges } from './badge-link';
 import { FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type BuildStatus, type ScreenMeta } from './flowmeta';
 import { fitRoute } from './anatomy';
 import { badgeFallbackOffset } from './screen-group';
-import { BADGE_SPECS, badgeName, badgePosition, buildStatusOf, statusFromInput, type StatusInput } from './screen-status';
+import { BADGE_SPECS, badgeName, badgePosition, buildStatusOf, statusFromBadgeText, statusFromInput, type StatusInput } from './screen-status';
 import { bool, fail, ok, type Handler } from './types';
 
 const PAD_X = 8;
@@ -148,8 +148,9 @@ export const badgeScreens: Handler = async (args) => {
             const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
             if (!meta || meta.boardId !== board.node.id) continue;
             const has = partsOf(meta.badgeId ? await sceneById(meta.badgeId) : null);
-            const build = buildStatusOf(meta.build);
-            const row = { id: frame.id, name: frame.name, status: build.status };
+            const recovered = !meta.build && has ? statusFromBadgeText(has.text.characters, new Date().toISOString()) : null;
+            const build = recovered ?? buildStatusOf(meta.build);
+            const row = { id: frame.id, name: frame.name, status: build.status, ...(recovered ? { recovered: true } : {}) };
             if (dryRun) {
                 (has ? refreshed : added).push(row);
                 continue;
