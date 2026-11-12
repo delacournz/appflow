@@ -78,3 +78,21 @@ describe('classifyArrow', () => {
         expect(classifyArrow([{ x: 0, y: 0 }, { x: -0.5, y: 200 }])).toEqual({ heading: 'down', issues: [] });
     });
 });
+
+describe('classifyArrow side-entry hop', () => {
+    const side = [{ x: 1000, y: 3000 }, { x: 800, y: 3000 }, { x: 800, y: 9000 }, { x: 1000, y: 9400 - 400 }];
+    const ok = [{ x: 1000, y: 3000 }, { x: 870, y: 3000 }, { x: 870, y: 9000 }, { x: 1000, y: 9000 }];
+
+    test('a short first hop out of the source then a right-heading entry is accepted', () => {
+        expect(classifyArrow(ok, 1, 187)).toEqual({ heading: 'right', issues: [] });
+        expect(classifyArrow(ok, 1, 0).issues).toEqual(['runs-left']);
+    });
+
+    test('a hop longer than allowed, a later left run, or a non-right head still fails', () => {
+        expect(classifyArrow(side, 1, 187).issues).toEqual(['runs-left']);
+        const late = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: -60, y: 100 }, { x: -60, y: 500 }, { x: 40, y: 500 }];
+        expect(classifyArrow(late, 1, 187).issues).toEqual(['runs-left']);
+        const down = [{ x: 100, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 300 }];
+        expect(classifyArrow(down, 1, 187).issues).toEqual(['runs-left']);
+    });
+});

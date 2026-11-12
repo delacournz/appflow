@@ -110,6 +110,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
             }
         });
     }
+    separateFans(routes, items, fans, fanGroupOf, shifts, edges, cfg.titles ?? [], (i, extra) => routeArrow(withLimit(i, { ...(items[i] as (typeof items)[number]).ends, gutter, lane: 0, fan: fans.get((items[i] as (typeof items)[number]).id), fanShift: extra })));
     const edgeOf = (e: Endpoints) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
     const fanLanes = new Map<string, number[]>();
     items.forEach((it, i) => {
@@ -226,5 +227,57 @@ function separateLines(routes: Routed[], builders: (((lane: number) => Routed) |
             }
         });
         if (!moved) break;
+    }
+}
+
+/**
+ * Fan lanes of two different sources in one gutter start at the same x and would share a vertical line wherever their
+ * y ranges overlap. Each fan group, the one reaching the shallowest target first so the deepest ends outermost (no crossings), moves out by whole lane steps (all its arrows together, so the
+ * fan keeps its order) until no line of it shares a collinear stretch with another arrow, runs through a title or
+ * along a group stroke. Mutates `routes`.
+ */
+function separateFans(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    fans: ReadonlyMap<string, unknown>,
+    fanGroupOf: ReadonlyMap<string, string>,
+    shifts: ReadonlyMap<string, number>,
+    edges: readonly Edge[],
+    titles: readonly Rect[],
+    reroute: (i: number, fanShift: number) => Routed,
+): void {
+    const groups = new Map<string, number[]>();
+    items.forEach((it, i) => {
+        const g = fanGroupOf.get(it.id);
+        const r = routes[i] as Routed;
+        if (g && fans.has(it.id) && r.ok && r.kind !== 'elbow') groups.set(g, [...(groups.get(g) ?? []), i]);
+    });
+    const deepest = (idx: number[]) => Math.max(...idx.map((i) => (items[i] as (typeof items)[number]).ends.target.y));
+    const pending = new Set([...groups.values()].flat());
+    const ordered = [...groups].sort((a, b) => deepest(a[1]) - deepest(b[1]));
+    for (const [g, idx] of ordered) {
+        const members = new Set(idx);
+        for (const i of idx) pending.delete(i);
+        const costOf = (rs: Routed[]): number =>
+            rs.reduce((sum, r, n) => {
+                if (!r.ok) return sum;
+                let c = 100 * titleHitCount(r.points, titles) + (edges.length && laneConflicts(r.points, edges) ? 50 : 0);
+                routes.forEach((o, j) => {
+                    if (members.has(j) || pending.has(j) || !o.ok) return;
+                    if (sharedRunLength(r.points, o.points) > 1) c += 1000;
+                    else if (crowdedRunLength(r.points, o.points, LANE_STEP) > 0) c += 0.5;
+                });
+                void n;
+                return sum + c;
+            }, 0);
+        const base = shifts.get(g) ?? 0;
+        let best: { rs: Routed[]; c: number } | null = null;
+        for (let k = 0; k <= MAX_NUDGE; k++) {
+            const rs = idx.map((i) => reroute(i, base + k * LANE_STEP));
+            const c = costOf(rs);
+            if (!best || c < best.c) best = { rs, c };
+            if (c < 1) break;
+        }
+        if (best) idx.forEach((i, n) => (routes[i] = (best as { rs: Routed[] }).rs[n] as Routed));
     }
 }
