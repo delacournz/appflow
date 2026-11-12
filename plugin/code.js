@@ -3314,13 +3314,20 @@ ${logs.join(`
 
   // plugin-src/prototype-lint.ts
   var TAB_BAR_NAME = /tab ?bar|bottom ?nav|navigation ?bar/i;
+  var TAB_TRIGGER_NAME = /^Hotspot ·|tab/i;
+  var baseName = (screenName) => (screenName.split(" · ")[0] ?? screenName).trim();
+  function endsWithTab(nodeName, tabNames) {
+    const m = nodeName ? /·\s*([^·]+?)\s*$/.exec(nodeName) : null;
+    return !!m && tabNames.has(m[1].trim());
+  }
   var TAB_ARROW_LABEL = /^tap (home|pay|activity|account)\b/i;
   function lintPrototype(screens, arrows, rawReactions) {
-    const reactions = dedupeReactions(rawReactions);
-    const tabRoots = new Set(arrows.filter((a) => a.label !== undefined && TAB_ARROW_LABEL.test(a.label) || (a.triggerAncestorNames ?? []).some((n) => TAB_BAR_NAME.test(n))).map((a) => a.to));
-    let exemptCount = 0;
     const name = (id) => screens.find((s) => s.id === id)?.name ?? id;
     const isScreen = (id) => screens.some((s) => s.id === id);
+    const reactions = dedupeReactions(rawReactions);
+    const tabRoots = new Set(arrows.filter((a) => a.label !== undefined && TAB_ARROW_LABEL.test(a.label) || (a.triggerAncestorNames ?? []).some((n) => TAB_BAR_NAME.test(n)) || a.triggerName !== undefined && TAB_TRIGGER_NAME.test(a.triggerName)).map((a) => a.to));
+    const rootBases = new Set([...tabRoots].map((id) => baseName(name(id))));
+    let exemptCount = 0;
     const out = [];
     for (const a of arrows) {
       if (a.trigger) {
@@ -3362,7 +3369,7 @@ ${logs.join(`
         continue;
       if (arrows.some((a) => a.from === r.screenId && a.to === r.destinationId))
         continue;
-      if ([r.nodeName ?? "", ...r.ancestorNames ?? []].some((n) => TAB_BAR_NAME.test(n)) || tabRoots.has(r.destinationId)) {
+      if ([r.nodeName ?? "", ...r.ancestorNames ?? []].some((n) => TAB_BAR_NAME.test(n)) || tabRoots.has(r.destinationId) || rootBases.has(baseName(name(r.destinationId))) || endsWithTab(r.nodeName, rootBases)) {
         exemptCount++;
         continue;
       }
@@ -8135,7 +8142,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "62594465", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "deab00be", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8143,7 +8150,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"62594465"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"deab00be"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
