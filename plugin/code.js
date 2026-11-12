@@ -3395,7 +3395,7 @@ ${logs.join(`
       }
       out.push({
         kind: "prototype-without-arrow",
-        severity: "warning",
+        severity: "info",
         sourceName: name(r.screenId),
         targetName: name(r.destinationId),
         reactionNodeId: r.nodeId,
@@ -8178,7 +8178,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "0e170802", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "13cb951f", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8186,7 +8186,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"0e170802"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"13cb951f"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
