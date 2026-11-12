@@ -11,7 +11,7 @@
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, snapBadges, writeScreen, type Screen } from './board-ops';
-import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, setGroupObstacleLoader, toLocal, type Board } from './flow';
+import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, toLocal, type Board } from './flow';
 import {
     TITLE_COLOR,
     TITLE_FILL,
@@ -115,13 +115,16 @@ export async function loadGroups(board: Board): Promise<LoadedGroup[]> {
     return out;
 }
 
-setGroupObstacleLoader(async (board) =>
+/**
+ * Group boxes and title bars as label obstacles for the router. Registered from main.ts (not here): flow.ts and this
+ * module import each other, so a top-level registration here runs before flow.ts initialises its loader slot.
+ */
+export const groupObstacles = async (board: Board) =>
     (await loadGroups(board)).map((g) => {
         const box = rectOf(g.rect);
         const t = g.title ? rectOf(g.title) : null;
         return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight };
-    }),
-);
+    });
 
 const writeGroup = (g: LoadedGroup): void => g.rect.setSharedPluginData(FLOW_NAMESPACE, GROUP_KEY, JSON.stringify(g.meta));
 
