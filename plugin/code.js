@@ -1512,6 +1512,10 @@ ${logs.join(`
     const [dx, dy] = [x - badge.x, y - badge.y];
     return Math.abs(dx) <= 0.5 && Math.abs(dy) <= 0.5 ? null : { dx, dy };
   }
+  function orphanBadges(badges, referenced, board) {
+    const inside = (r) => r.x >= board.x && r.y >= board.y && r.x + r.width <= board.x + board.width && r.y + r.height <= board.y + board.height;
+    return badges.filter((b) => !referenced.has(b.id) && inside(b.rect)).map((b) => b.id);
+  }
 
   // plugin-src/duplicate-plan.ts
   function cellRect(board, col, row) {
@@ -3305,6 +3309,40 @@ ${logs.join(`
     }
     return { anchors, blocked };
   }
+  function runsOf(points) {
+    const out = [];
+    for (let i = 1;i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (a.x === b.x && a.y !== b.y)
+        out.push({ axis: "v", at: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) });
+      else if (a.y === b.y && a.x !== b.x)
+        out.push({ axis: "h", at: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) });
+    }
+    return out;
+  }
+  function sharedRunLength(a, b) {
+    const rb = runsOf(b);
+    let total = 0;
+    for (const s of runsOf(a))
+      for (const t of rb)
+        if (s.axis === t.axis && s.at === t.at)
+          total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    return total;
+  }
+  function crowdedRunLength(a, b, gap) {
+    const rb = runsOf(b);
+    let total = 0;
+    for (const s of runsOf(a))
+      for (const t of rb)
+        if (s.axis === t.axis && s.at !== t.at && Math.abs(s.at - t.at) < gap)
+          total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    return total;
+  }
+  function titleHitCount(points, titles) {
+    const runs = runsOf(points);
+    return titles.filter((r) => runs.some((s) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width)).length;
+  }
 
   // plugin-src/layout-lint.ts
   async function pathOf(vectorId) {
@@ -3332,6 +3370,23 @@ ${logs.join(`
     }
     return lintArrows(arrows, titles);
   }
+  function orphanBadgeIssues(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const referenced = new Set;
+    for (const { frame } of collectScreens(parent.children)) {
+      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+      if (meta?.badgeId)
+        referenced.add(meta.badgeId);
+    }
+    const badges = collectBadges(parent.children).map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) }));
+    return orphanBadges(badges, referenced, rectOf(board.node)).map((id) => ({
+      kind: "orphan-badge",
+      badgeId: id,
+      message: `Badge ${badges.find((b) => b.id === id)?.name ?? id} belongs to no screen. Run badge_screens to remove it.`
+    }));
+  }
   async function boardLayoutLint(board) {
     const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
     const titles = [];
@@ -3343,6 +3398,11 @@ ${logs.join(`
         titles.push({ id: g.id, text });
     }
     const arrowPart = await arrowIssues(board, titles);
+    const orphans = orphanBadgeIssues(board);
+    if (orphans.length) {
+      arrowPart.issues.push(...orphans);
+      arrowPart.counts["orphan-badge"] = orphans.length;
+    }
     if (!loaded.length)
       return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues, counts: arrowPart.counts } : null;
     const { screens } = await loadScreens(board);
@@ -3500,7 +3560,12 @@ ${logs.join(`
 
   // plugin-src/route.ts
   var ENTRY_OFFSET = 340;
-  var DOT_GAP = 10;
+  var NARROW_TRIGGER = 0.4;
+  var DOT_INSET = 12;
+  function triggerDot(trigger, source) {
+    const narrow = trigger.width < NARROW_TRIGGER * source.width;
+    return { x: narrow ? trigger.x + trigger.width / 2 : right2(trigger) - DOT_INSET, y: midY(trigger) };
+  }
   var LANE_STEP = 24;
   var BACKWARDS_DROP = 60;
   var FAN_STEP = 16;
@@ -3638,15 +3703,15 @@ ${logs.join(`
           return bx < tx ? { ...straight, labelAnchor: { x: (sx + bx) / 2, y } } : straight;
         }
         if (fan && fan.count > 1) {
-          const base = trigger ? { x: right2(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
-          const start = { x: base.x, y: base.y + fan.index * FAN_STEP };
+          const base = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) };
+          const start = trigger ? base : { x: base.x, y: base.y + fan.index * FAN_STEP };
           const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP + fanShift, tx - EDGE_MARGIN);
           const r = done(trigger ? "trigger" : "gutter", [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
           const last = r.points[r.points.length - 2];
           return { ...r, labelAnchor: { x: (last.x + bx) / 2, y: ty } };
         }
         const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
-        const start = trigger ? { x: right2(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
+        const start = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) + toward };
         const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
         const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
         const jog = done(trigger ? "trigger" : "gutter", [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
@@ -3667,6 +3732,15 @@ ${logs.join(`
         return done("backwards", [{ x: sx, y: bottom2(source) }, { x: sx, y: dropY }, { x: tx, y: dropY }, { x: tx, y: bottom2(target) }], true);
       }
     }
+  }
+  function routeViaLeftGutter(source, target, gutter, lane, dx = 0) {
+    const left = Math.min(source.x, target.x);
+    const off = laneOffset(lane);
+    const x = left - gutter / 2 - lane * LANE_STEP + dx;
+    const sy = clamp(midY(source) + off, source.y + EDGE_MARGIN, bottom2(source) - EDGE_MARGIN);
+    const ey = clamp(midY(target) + off, target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const r = done("gutter", [{ x: source.x, y: sy }, { x, y: sy }, { x, y: ey }, { x: target.x, y: ey }]);
+    return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
   }
 
   // plugin-src/route-plan.ts
@@ -3771,7 +3845,15 @@ ${logs.join(`
         fanLanes.set(edgeOf(it.ends), [...fanLanes.get(edgeOf(it.ends)) ?? [], r.points[1].x]);
     });
     const final = routes.map((r, i) => r.ok && r.kind === "straight" ? clearOfLanes(r, fanLanes.get(edgeOf(items[i].ends)) ?? [], limits[i]) : r);
-    const warnings = cfg.titles?.length ? shiftOffTitles(final, items, cfg.titles) : new Map;
+    const titles = cfg.titles ?? [];
+    const builders = items.map((it, i) => {
+      const r = final[i];
+      if (!r.ok || r.kind === "straight" || fans.has(it.id))
+        return null;
+      return (lane) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+    });
+    const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
+    separateLines(final, builders, titles, edges);
     return items.map((it, i) => {
       const r = final[i];
       if (!r.ok)
@@ -3787,7 +3869,7 @@ ${logs.join(`
     const [a, b] = r.points;
     return { x: a.x, y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
   }
-  function shiftOffTitles(routes, items, titles) {
+  function shiftOffTitles(routes, items, titles, gutter, edges, builders) {
     const warnings = new Map;
     const crosses = (x, y0, y1, t) => x > t.x - TITLE_MARGIN && x < t.x + t.width + TITLE_MARGIN && overlap1d(y0, y1, t.y, t.y + t.height);
     routes.forEach((r, i) => {
@@ -3805,6 +3887,15 @@ ${logs.join(`
       });
       const cands = titles.flatMap((t) => [t.x - TITLE_MARGIN, t.x + t.width + TITLE_MARGIN]).filter(free);
       if (!cands.length) {
+        for (let k = 0;k <= MAX_NUDGE; k++) {
+          const dx = k === 0 ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
+          const side = routeViaLeftGutter(source, target, gutter, 0, dx);
+          if (side.ok && titleHitCount(side.points, titles) === 0 && !laneConflicts(side.points, edges)) {
+            routes[i] = side;
+            builders[i] = (lane) => routeViaLeftGutter(source, target, gutter, lane, dx);
+            return;
+          }
+        }
         warnings.set(i, `line crosses a group title's text and no lane within both screens avoids it`);
         return;
       }
@@ -3812,6 +3903,48 @@ ${logs.join(`
       routes[i] = { ...r, points: r.points.map((p) => ({ ...p, x })), dot: { ...r.dot, x }, labelAnchor: { ...r.labelAnchor, x } };
     });
     return warnings;
+  }
+  function separateLines(routes, builders, titles, edges) {
+    const cost = (i, pts) => {
+      let c = 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+      routes.forEach((o, j) => {
+        if (j === i || !o.ok)
+          return;
+        if (sharedRunLength(pts, o.points) > 1)
+          c += 1000;
+        else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+          c += 0.5;
+      });
+      return c;
+    };
+    for (let pass = 0;pass < 3; pass++) {
+      let moved = false;
+      routes.forEach((r, i) => {
+        const build = builders[i];
+        if (!r.ok || !build)
+          return;
+        const current = cost(i, r.points);
+        if (current < 1)
+          return;
+        let best = null;
+        for (let lane = 0;lane <= MAX_NUDGE; lane++) {
+          const cand = build(lane);
+          if (!cand.ok)
+            continue;
+          const c = cost(i, cand.points);
+          if (c < current && (!best || c < best.c))
+            best = { route: cand, c };
+          if (best && best.c < 1)
+            break;
+        }
+        if (best) {
+          routes[i] = best.route;
+          moved = true;
+        }
+      });
+      if (!moved)
+        break;
+    }
   }
 
   // plugin-src/flow.ts
@@ -4728,6 +4861,7 @@ ${logs.join(`
     const added = [];
     const refreshed = [];
     const skipped = [];
+    const removed = [];
     for (const board of boards) {
       const parent = board.node.parent;
       if (!parent || !("children" in parent))
@@ -4747,10 +4881,28 @@ ${logs.join(`
         writeScreen2(frame, { ...meta, build, badgeId: badge.id });
         (has ? refreshed : added).push({ ...row, badgeId: badge.id });
       }
+      const referenced = new Set;
+      for (const { frame } of collectScreens(parent.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (meta?.badgeId)
+          referenced.add(meta.badgeId);
+      }
+      const badges = collectBadges(parent.children);
+      const orphans = orphanBadges(badges.map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) })), referenced, rectOf(board.node));
+      for (const id of orphans) {
+        const node = badges.find((b) => b.id === id);
+        if (!node)
+          continue;
+        const found = node.findOne((n) => n.type === "TEXT");
+        const text = found?.type === "TEXT" ? found.characters : null;
+        removed.push({ id, name: node.name, text });
+        if (!dryRun)
+          node.remove();
+      }
       if (!dryRun)
         raiseArrows(board);
     }
-    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, skipped });
+    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, removed, skipped });
   };
 
   // plugin-src/flow-group-adopt.ts
@@ -7337,7 +7489,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a813eb3b", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "24a041b1", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7345,7 +7497,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a813eb3b"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"24a041b1"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

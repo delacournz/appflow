@@ -1,5 +1,6 @@
 import type { JsonObject } from '../shared/protocol';
-import { boardsFor, collectScreens, raiseArrows, readMeta, rectOf, sceneById, type Board } from './flow';
+import { boardsFor, collectBadges, collectScreens, raiseArrows, readMeta, rectOf, sceneById, type Board } from './flow';
+import { orphanBadges } from './badge-link';
 import { FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type BuildStatus, type ScreenMeta } from './flowmeta';
 import { fitRoute } from './anatomy';
 import { badgeFallbackOffset } from './screen-group';
@@ -139,6 +140,7 @@ export const badgeScreens: Handler = async (args) => {
     const added: JsonObject[] = [];
     const refreshed: JsonObject[] = [];
     const skipped: JsonObject[] = [];
+    const removed: JsonObject[] = [];
     for (const board of boards) {
         const parent = board.node.parent;
         if (!parent || !('children' in parent)) continue;
@@ -156,7 +158,22 @@ export const badgeScreens: Handler = async (args) => {
             writeScreen(frame, { ...meta, build, badgeId: badge.id });
             (has ? refreshed : added).push({ ...row, badgeId: badge.id });
         }
+        const referenced = new Set<string>();
+        for (const { frame } of collectScreens(parent.children)) {
+            const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+            if (meta?.badgeId) referenced.add(meta.badgeId);
+        }
+        const badges = collectBadges(parent.children);
+        const orphans = orphanBadges(badges.map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) })), referenced, rectOf(board.node));
+        for (const id of orphans) {
+            const node = badges.find((b) => b.id === id);
+            if (!node) continue;
+            const found = node.findOne((n) => n.type === 'TEXT');
+            const text = found?.type === 'TEXT' ? found.characters : null;
+            removed.push({ id, name: node.name, text });
+            if (!dryRun) node.remove();
+        }
         if (!dryRun) raiseArrows(board);
     }
-    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, skipped });
+    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, removed, skipped });
 };

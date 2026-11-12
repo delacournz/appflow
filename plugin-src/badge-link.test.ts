@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { badgeLine, badgeSnap, linkBadges, slotDistance, type BadgeCandidate, type BadgeScreen } from './badge-link';
+import { badgeLine, badgeSnap, linkBadges, orphanBadges, slotDistance, type BadgeCandidate, type BadgeScreen } from './badge-link';
 import type { Rect } from './rect';
 import { ROUTE_ABOVE } from './screen-group';
 
@@ -80,5 +80,16 @@ describe('badgeSnap', () => {
         const stray: Rect = { x: 0, y: 1400, width: 200, height: 28 };
         expect(badgeLine(f, [stray])).toBeNull();
         expect(badgeSnap(f, [stray], badge(333, 0), 60)).toEqual({ dx: 0, dy: 2000 - 60 });
+    });
+});
+
+describe('orphanBadges', () => {
+    const board: Rect = { x: 0, y: 0, width: 5000, height: 5000 };
+    const b = (id: string, x: number, y: number): BadgeCandidate => ({ id, name: `Badge · ${id}`, rect: { x, y, width: 60, height: 20 } });
+    test('badges on the board that no screen points at are orphans', () => {
+        expect(orphanBadges([b('a', 100, 100), b('b', 900, 100), b('c', 2000, 3000)], new Set(['b']), board)).toEqual(['a', 'c']);
+    });
+    test('badges off the board belong to someone else and are left alone', () => {
+        expect(orphanBadges([b('far', 9000, 100)], new Set(), board)).toEqual([]);
     });
 });

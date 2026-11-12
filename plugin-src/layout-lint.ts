@@ -1,11 +1,13 @@
 import type { JsonObject } from '../shared/protocol';
 import { loadScreens } from './board-ops';
-import { listArrows, rectOf, sceneById, type Board } from './flow';
+import { collectBadges, collectScreens, listArrows, readMeta, rectOf, sceneById, type Board } from './flow';
+import { orphanBadges } from './badge-link';
+import { SCREEN_KEY, parseScreenMeta } from './flowmeta';
 import type { Rect } from './route';
 import type { ConflictContent, ConflictGroup } from './flow-group';
 import { footprintOf, loadGroups } from './flow-groups';
 import { orderPath } from './flowlint';
-import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type TitleText } from './group-lint';
+import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type OrphanBadgeIssue, type TitleText } from './group-lint';
 import { titleTextRect } from './route-avoid';
 
 /** An arrow's absolute path (rounded like `lintFlowLayout`), or null when its vector is gone or not a single-headed line. */
@@ -37,6 +39,23 @@ async function arrowIssues(board: Board, titles: TitleText[]): Promise<{ issues:
 }
 
 /** The layout part of lint_flow_layout for one board: reads the drawn boxes and arrows (never repaints) and checks them against the board's content. */
+/** `orphan-badge`: a build badge on the board that no screen points at. `badge_screens` removes them. */
+function orphanBadgeIssues(board: Board): (OrphanBadgeIssue & { message: string })[] {
+    const parent = board.node.parent;
+    if (!parent || !('children' in parent)) return [];
+    const referenced = new Set<string>();
+    for (const { frame } of collectScreens(parent.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (meta?.badgeId) referenced.add(meta.badgeId);
+    }
+    const badges = collectBadges(parent.children).map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) }));
+    return orphanBadges(badges, referenced, rectOf(board.node)).map((id) => ({
+        kind: 'orphan-badge' as const,
+        badgeId: id,
+        message: `Badge ${badges.find((b) => b.id === id)?.name ?? id} belongs to no screen. Run badge_screens to remove it.`,
+    }));
+}
+
 export async function boardLayoutLint(board: Board): Promise<{ boardId: string; issues: JsonObject[]; counts: Record<string, number> } | null> {
     const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
     const titles: TitleText[] = [];
@@ -46,6 +65,11 @@ export async function boardLayoutLint(board: Board): Promise<{ boardId: string; 
         if (text) titles.push({ id: g.id, text });
     }
     const arrowPart = await arrowIssues(board, titles);
+    const orphans = orphanBadgeIssues(board);
+    if (orphans.length) {
+        arrowPart.issues.push(...orphans);
+        arrowPart.counts['orphan-badge'] = orphans.length;
+    }
     if (!loaded.length) return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues as unknown as JsonObject[], counts: arrowPart.counts } : null;
     const { screens } = await loadScreens(board);
     const contents: ConflictContent[] = [];

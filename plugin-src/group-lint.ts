@@ -9,7 +9,10 @@ export type ArrowLayoutIssue =
     | { kind: 'lines-overlap'; arrowId: string; otherId: string; length: number }
     | { kind: 'line-crosses-title'; arrowId: string; groupId: string };
 
-export type LayoutIssue = (GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string };
+/** A build badge on the board that no screen points at. */
+export type OrphanBadgeIssue = { kind: 'orphan-badge'; badgeId: string };
+
+export type LayoutIssue = ((GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string }) | (OrphanBadgeIssue & { message: string });
 
 export type GroupLint = { issues: LayoutIssue[]; counts: Record<string, number> };
 
