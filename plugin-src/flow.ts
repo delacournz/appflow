@@ -2,6 +2,7 @@ import type { JsonObject, JsonValue } from '../shared/protocol';
 import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigger, modeOf, type TriggerCandidate } from './adopt';
 import { boardMissingMessage } from './board-missing';
 import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
+import { arrowsContainerName, isArrowsContainerType, recoverableArrowIds, recoveryIndex } from './arrow-recovery';
 import { isLabelsContainerName, labelsContainerName, labelsToMigrate, stackingNeeds } from './arrow-labels';
 import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
@@ -38,7 +39,7 @@ const DOT_SIZE = 10;
 
 type Style = BoardMeta['arrowStyle'];
 /** `labels` is the container holding every arrow label above all arrow lines; absent until `ensureLabels` runs on a board. */
-export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin; labels?: (SceneNode & ChildrenMixin) | null };
+export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin; labels?: (SceneNode & ChildrenMixin) | null; recovered?: string };
 type ArrowEntry = { group: GroupNode; meta: ArrowMeta };
 
 export async function sceneById(id: string): Promise<SceneNode | null> {
@@ -76,11 +77,44 @@ export async function loadBoard(boardId: string): Promise<Board> {
     if (!node) throw new Error(boardMissingMessage(boardId));
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
     if (!meta) throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
-    const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
-    if (!arrows || !('children' in arrows)) throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone.`);
-    const labelsNode = meta.labelsGroupId ? await figma.getNodeByIdAsync(meta.labelsGroupId) : null;
+    let boardMeta = meta;
+    let recovered: string | undefined;
+    let arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
+    if (!arrows || arrows.removed || !isArrowsContainerType(arrows.type) || !('children' in arrows)) {
+        const rebuilt = await rebuildArrowsContainer(node, meta);
+        if (!rebuilt) throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone and no arrow data was found to rebuild it.`);
+        arrows = rebuilt.container;
+        boardMeta = { ...meta, arrowsGroupId: rebuilt.container.id };
+        node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+        recovered = `Arrows container ${meta.arrowsGroupId} was lost; rebuilt ${rebuilt.container.id} and moved ${rebuilt.moved} arrow groups into it.`;
+    }
+    const labelsNode = boardMeta.labelsGroupId ? await figma.getNodeByIdAsync(boardMeta.labelsGroupId) : null;
     const labels = labelsNode && 'children' in labelsNode && !labelsNode.removed ? (labelsNode as SceneNode & ChildrenMixin) : null;
-    return { node, meta, arrows: arrows as SceneNode & ChildrenMixin, labels };
+    return { node, meta: boardMeta, arrows: arrows as SceneNode & ChildrenMixin, labels, ...(recovered ? { recovered } : {}) };
+}
+
+/**
+ * Rebuilds a lost arrows container: a FRAME (never a group, which dissolves when emptied) with no fill, no clipping, at
+ * 0,0 and 1x1 so children keep their absolute coordinates, directly below the labels container (else on top). Moves in
+ * every node beside the board that carries arrow data for it. Null when there is none.
+ */
+async function rebuildArrowsContainer(boardNode: SceneNode, meta: BoardMeta): Promise<{ container: FrameNode; moved: number } | null> {
+    const parent = boardNode.parent;
+    if (!parent || !('children' in parent)) return null;
+    const candidates = parent.children.map((c) => ({ node: c, boardId: readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId ?? null }));
+    const ids = new Set(recoverableArrowIds(candidates.map((c) => ({ id: c.node.id, boardId: c.boardId })), boardNode.id));
+    const arrows = candidates.filter((c) => ids.has(c.node.id)).map((c) => c.node);
+    if (!arrows.length) return null;
+    const frame = figma.createFrame();
+    frame.name = arrowsContainerName(boardNode.name);
+    frame.fills = [];
+    frame.clipsContent = false;
+    frame.resize(1, 1);
+    frame.x = 0;
+    frame.y = 0;
+    parent.insertChild(recoveryIndex(parent.children.map((c) => c.id), meta.labelsGroupId ?? null), frame);
+    for (const n of arrows) moveInto(n, frame);
+    return { container: frame, moved: arrows.length };
 }
 
 /**
@@ -516,8 +550,8 @@ export const connect: Handler = async (args) => {
         prototypeUpdated,
         backwards: route.backwards,
         updated: !!match,
-        ...(blocked || crowded || mine.warning
-            ? { warnings: [...(blocked ? [`label overlaps a group box: ${blocked}`] : []), ...(crowded ? ['label overlaps another arrow label and no spot on its path is clear'] : []), ...(mine.warning ? [mine.warning] : [])] }
+        ...(blocked || crowded || mine.warning || board.recovered
+            ? { warnings: [...(board.recovered ? [board.recovered] : []), ...(blocked ? [`label overlaps a group box: ${blocked}`] : []), ...(crowded ? ['label overlaps another arrow label and no spot on its path is clear'] : []), ...(mine.warning ? [mine.warning] : [])] }
             : {}),
     });
 };
@@ -542,6 +576,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
     let obstacleCount = 0;
     for (const board of boards) {
         board.node.locked = true;
+        if (board.recovered) warnings.push({ boardId: board.node.id, warning: board.recovered });
         const entries = listArrows(board);
         await migrateLabels(board, entries.map((e) => e.meta));
         const ordered = await orderedEntries(entries);

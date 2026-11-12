@@ -1204,6 +1204,40 @@ ${logs.join(`
   }
   var restoreDelta = (before, after) => ({ x: before.x - after.x, y: before.y - after.y });
 
+  // plugin-src/arrow-recovery.ts
+  function arrowsContainerName(boardName) {
+    const board = boardName.replace(/^(Board background|Board)\s*·?\s*/, "").trim();
+    return board && board !== boardName.trim() ? `Flow arrows · ${board}` : "Flow arrows";
+  }
+  var isArrowsContainerType = (type) => type === "FRAME" || type === "GROUP" || type === "SECTION";
+  function recoveryIndex(ids, labelsId) {
+    const at = labelsId ? ids.indexOf(labelsId) : -1;
+    return at >= 0 ? at : ids.length;
+  }
+  function recoverableArrowIds(nodes, boardId) {
+    return nodes.filter((n) => n.boardId === boardId).map((n) => n.id);
+  }
+
+  // plugin-src/arrow-labels.ts
+  var LABELS_PREFIX = "Flow arrow labels · ";
+  function labelsContainerName(boardName, arrowsName = "") {
+    const strip = (n, re) => n.replace(re, "").trim();
+    const fromBoard = strip(boardName, /^(Board background|Board)\s*·?\s*/);
+    const fromArrows = strip(arrowsName, /^Flow arrows\s*·?\s*/);
+    const board = fromBoard && fromBoard !== boardName.trim() ? fromBoard : fromArrows || fromBoard;
+    return board ? `${LABELS_PREFIX}${board}` : LABELS_PREFIX.trim().replace(/\s*·$/, "");
+  }
+  var isLabelsContainerName = (name) => name.startsWith("Flow arrow labels");
+  function labelsToMigrate(arrows, labelsId) {
+    return arrows.filter((a) => a.labelParentId !== labelsId).map((a) => a.labelId);
+  }
+  function stackingNeeds(ids, isScreen, arrowsId, labelsId) {
+    const at = ids.indexOf(arrowsId);
+    const raiseArrows = at >= 0 && ids.some((id, i) => i > at && isScreen(id));
+    const placeLabels = labelsId !== null && (raiseArrows || ids.indexOf(labelsId) !== at + 1);
+    return { raiseArrows, placeLabels };
+  }
+
   // plugin-src/flowmeta.ts
   var FLOW_NAMESPACE = "flowbridge";
   var BOARD_KEY = "board";
@@ -1273,6 +1307,8 @@ ${logs.join(`
       else
         delete meta[k];
     }
+    if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId))
+      delete meta.labelsGroupId;
     if (o.spacing !== undefined && o.spacing !== "uniform" && o.spacing !== "banded")
       delete meta.spacing;
     for (const k of ["baseColWidth", "baseRowHeight"])
@@ -1397,6 +1433,14 @@ ${logs.join(`
   var MARKS = { built: "✓", drift: "~", "not-built": "·" };
   var statusMark = (s) => MARKS[s];
   var buildStatusOf = (build) => build ?? { status: "not-built" };
+  var RECOVERED = "Recovered from the badge; verify again.";
+  function statusFromBadgeText(text, now) {
+    if (text === BADGE_SPECS.built.text)
+      return { status: "built", verifiedAt: now, commit: null, confidence: "static", notes: RECOVERED };
+    if (text === BADGE_SPECS.drift.text)
+      return { status: "drift", verifiedAt: now, commit: null, notes: RECOVERED };
+    return null;
+  }
   var optStr = (v) => typeof v === "string" && v.trim() ? v.trim() : null;
   function statusFromInput(input, now) {
     const commit = optStr(input.commit);
@@ -3143,6 +3187,8 @@ ${logs.join(`
         return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
       case "line-crosses-title":
         return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
+      case "line-crosses-screen":
+        return `Arrow ${i.arrowId} runs through screen ${i.screenId}, which is neither its source nor its target`;
     }
   }
   function lintGroups(groups, contents) {
@@ -3168,7 +3214,30 @@ ${logs.join(`
     return out;
   }
   var segHitsRect = (s, r) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
-  function lintArrows(arrows, titles) {
+  function mergedLines(a, b) {
+    const out = [];
+    const pa = a.points;
+    const pb = b.points;
+    if (a.to !== undefined && a.to === b.to && pa.length >= 2 && pb.length >= 2) {
+      const la = pa[pa.length - 1];
+      const lb = pb[pb.length - 1];
+      if (la.x === lb.x && la.y === lb.y) {
+        out.push({ axis: "h", at: la.y });
+        const ca = pa[pa.length - 2];
+        const cb = pb[pb.length - 2];
+        const turnA = pa.length >= 3 && pa[pa.length - 3].x === ca.x;
+        const turnB = pb.length >= 3 && pb[pb.length - 3].x === cb.x;
+        if (turnA && turnB && ca.x === cb.x)
+          out.push({ axis: "v", at: ca.x });
+      }
+    }
+    const sa = pa[0];
+    const sb = pb[0];
+    if (sa && sb && sa.x === sb.x && sa.y === sb.y)
+      out.push({ axis: "h", at: sa.y });
+    return out;
+  }
+  function lintArrows(arrows, titles, screens = []) {
     const raw = [];
     const segs = arrows.map((a) => segmentsOf(a.points));
     for (let i = 0;i < arrows.length; i++) {
@@ -3177,8 +3246,11 @@ ${logs.join(`
         const b = arrows[j];
         if (a.label && b.label && rectsIntersect(a.label, b.label))
           raw.push({ kind: "label-overlaps-label", arrowId: a.id, otherId: b.id });
+        const merged = mergedLines(a, b);
         let shared = 0;
         for (const s of segs[i]) {
+          if (merged.some((m) => m.axis === s.axis && m.at === s.at))
+            continue;
           for (const t of segs[j]) {
             if (s.axis === t.axis && s.at === t.at)
               shared += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
@@ -3190,6 +3262,13 @@ ${logs.join(`
       for (const t of titles) {
         if (segs[i].some((s) => segHitsRect(s, t.text)))
           raw.push({ kind: "line-crosses-title", arrowId: a.id, groupId: t.id });
+      }
+      for (const sc of screens) {
+        if (sc.id === a.from || sc.id === a.to)
+          continue;
+        const inner = { x: sc.rect.x + 1, y: sc.rect.y + 1, width: sc.rect.width - 2, height: sc.rect.height - 2 };
+        if (segs[i].some((s) => segHitsRect(s, inner)))
+          raw.push({ kind: "line-crosses-screen", arrowId: a.id, screenId: sc.id });
       }
     }
     const issues = raw.map((i) => ({ ...i, message: describe(i) }));
@@ -3321,13 +3400,20 @@ ${logs.join(`
     }
     return out;
   }
-  function sharedRunLength(a, b) {
+  function sharedRunLength(a, b, ignore = {}) {
     const rb = runsOf(b);
     let total = 0;
-    for (const s of runsOf(a))
+    const a0 = a[0];
+    const sameStart = !!a0 && !!b[0] && a0.x === b[0].x && a0.y === b[0].y;
+    for (const s of runsOf(a)) {
+      if (s.at === (s.axis === "v" ? ignore.v : ignore.h))
+        continue;
+      if (sameStart && s.axis === "h" && s.at === a0.y)
+        continue;
       for (const t of rb)
         if (s.axis === t.axis && s.at === t.at)
           total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    }
     return total;
   }
   function crowdedRunLength(a, b, gap) {
@@ -3342,6 +3428,11 @@ ${logs.join(`
   function titleHitCount(points, titles) {
     const runs = runsOf(points);
     return titles.filter((r) => runs.some((s) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width)).length;
+  }
+  function screensCrossed(points, screens, except = []) {
+    const runs = runsOf(points);
+    const same = (a, b) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    return screens.filter((r) => !except.some((e) => same(e, r)) && runs.some((s) => s.axis === "v" ? s.at > r.x + 1 && s.at < r.x + r.width - 1 && s.hi > r.y + 1 && s.lo < r.y + r.height - 1 : s.at > r.y + 1 && s.at < r.y + r.height - 1 && s.hi > r.x + 1 && s.lo < r.x + r.width - 1)).length;
   }
 
   // plugin-src/layout-lint.ts
@@ -3366,9 +3457,9 @@ ${logs.join(`
       if (!points)
         continue;
       const label = await sceneById(a.meta.labelId);
-      arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null });
+      arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null, from: a.meta.from, to: a.meta.to });
     }
-    return lintArrows(arrows, titles);
+    return lintArrows(arrows, titles, boardScreens(board));
   }
   function orphanBadgeIssues(board) {
     const parent = board.node.parent;
@@ -3465,16 +3556,18 @@ ${logs.join(`
       return { x: v.x, y: v.y };
     });
   }
-  function classifyArrow(points, tolerance = 1) {
+  function classifyArrow(points, tolerance = 1, maxLeftHop = 0) {
     const a = points[points.length - 2];
     const b = points[points.length - 1];
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const heading = Math.abs(dx) > Math.abs(dy) ? dx > 0 ? "right" : "left" : dy > 0 ? "down" : "up";
     const issues = [];
+    const leftward = points.slice(1).flatMap((p, i) => p.x - points[i].x < -tolerance ? [i] : []);
+    const firstHopOnly = heading === "right" && leftward.length === 1 && leftward[0] === 0 && points[0].x - points[1].x <= maxLeftHop + tolerance;
     if (heading === "left" && dx < -tolerance)
       issues.push("points-left");
-    else if (points.slice(1).some((p, i) => p.x - points[i].x < -tolerance))
+    else if (leftward.length && !firstHopOnly)
       issues.push("runs-left");
     return { heading, issues };
   }
@@ -3484,6 +3577,8 @@ ${logs.join(`
     const tolerance = num(args, "tolerance") ?? 1;
     const issues = [];
     let checked = 0;
+    const boardMetas = ("children" in root ? [root, ...root.children] : [root]).flatMap((n) => readMeta(n, BOARD_KEY, parseBoardMeta) ?? []);
+    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => m.colWidth - m.screenW));
     for (const n of walk(root, 1e5)) {
       if (n.type !== "VECTOR" || !isScene(n))
         continue;
@@ -3494,7 +3589,7 @@ ${logs.join(`
       checked++;
       const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
       const abs = local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
-      const result = classifyArrow(abs, tolerance);
+      const result = classifyArrow(abs, tolerance, maxLeftHop);
       if (result.issues.length) {
         issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0], to: abs[abs.length - 1] });
       }
@@ -3742,6 +3837,39 @@ ${logs.join(`
     const r = done("gutter", [{ x: source.x, y: sy }, { x, y: sy }, { x, y: ey }, { x: target.x, y: ey }]);
     return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
   }
+  function routeViaBand(source, target, trigger, bandY, lane) {
+    const start = trigger ? triggerDot(trigger, source) : { x: right2(source), y: midY(source) };
+    const x1 = right2(source) + FAN_EDGE + lane * LANE_STEP;
+    const x2 = target.x - FAN_EDGE - lane * LANE_STEP;
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const r = done("gutter", [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: x2, y: bandY }, { x: x2, y: ey }, { x: target.x, y: ey }]);
+    return { ...r, labelAnchor: { x: (x2 + target.x) / 2, y: ey } };
+  }
+  var TRUNK_GAP = 48;
+  var LABEL_GAP = 8;
+  function routeJoin(source, target, trigger, trunkX, bandY, lane = 0) {
+    const start = trigger ? triggerDot(trigger, source) : { x: right2(source), y: midY(source) };
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const joinY = bandY ?? start.y;
+    const x1 = right2(source) + FAN_EDGE + lane * LANE_STEP;
+    const pts = bandY === null ? [start, { x: trunkX, y: start.y }, { x: trunkX, y: ey }, { x: target.x, y: ey }] : [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: trunkX, y: bandY }, { x: trunkX, y: ey }, { x: target.x, y: ey }];
+    const r = done("gutter", pts);
+    const at = r.points.findIndex((p) => p.x === trunkX && p.y === joinY);
+    const first = r.points[0];
+    const second = r.points[1];
+    return { ...r, trunkFrom: at >= 0 ? at : r.points.length - 1, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
+  }
+  function startLabelAnchor(route, size) {
+    const a = route.points[0];
+    const b = route.points[1];
+    if (a.y === b.y)
+      return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
+    return { x: a.x, y: a.y + (b.y >= a.y ? 1 : -1) * (LABEL_GAP + size.height / 2) };
+  }
+  function leadRoute(route, anchor) {
+    const end = Math.max(1, route.trunkFrom ?? route.points.length - 1);
+    return { ...route, points: route.points.slice(0, end + 1), labelAnchor: anchor };
+  }
 
   // plugin-src/route-plan.ts
   var TITLE_MARGIN = 8;
@@ -3837,6 +3965,7 @@ ${logs.join(`
         }
       });
     }
+    separateFans(routes, items, fans, fanGroupOf, shifts, edges, cfg.titles ?? [], (i, extra) => routeArrow(withLimit(i, { ...items[i].ends, gutter, lane: 0, fan: fans.get(items[i].id), fanShift: extra })));
     const edgeOf = (e) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
     const fanLanes = new Map;
     items.forEach((it, i) => {
@@ -3852,6 +3981,8 @@ ${logs.join(`
         return null;
       return (lane) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
     });
+    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
     separateLines(final, builders, titles, edges);
     return items.map((it, i) => {
@@ -3859,7 +3990,7 @@ ${logs.join(`
       if (!r.ok)
         return { id: it.id, route: null, error: r.error };
       const warning = warnings.get(i);
-      return { id: it.id, route: r, error: null, ...warning ? { warning } : {} };
+      return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width }, error: null, ...warning ? { warning } : {} };
     });
   }
   var overlap1d = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
@@ -3946,6 +4077,187 @@ ${logs.join(`
         break;
     }
   }
+  function separateFans(routes, items, fans, fanGroupOf, shifts, edges, titles, reroute) {
+    const groups = new Map;
+    items.forEach((it, i) => {
+      const g = fanGroupOf.get(it.id);
+      const r = routes[i];
+      if (g && fans.has(it.id) && r.ok && r.kind !== "elbow")
+        groups.set(g, [...groups.get(g) ?? [], i]);
+    });
+    const deepest = (idx) => Math.max(...idx.map((i) => items[i].ends.target.y));
+    const pending = new Set([...groups.values()].flat());
+    const ordered = [...groups].sort((a, b) => deepest(a[1]) - deepest(b[1]));
+    for (const [g, idx] of ordered) {
+      const members = new Set(idx);
+      for (const i of idx)
+        pending.delete(i);
+      const costOf = (rs) => rs.reduce((sum, r, n) => {
+        if (!r.ok)
+          return sum;
+        let c = 100 * titleHitCount(r.points, titles) + (edges.length && laneConflicts(r.points, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (members.has(j) || pending.has(j) || !o.ok)
+            return;
+          if (sharedRunLength(r.points, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(r.points, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return sum + c;
+      }, 0);
+      const base = shifts.get(g) ?? 0;
+      let best = null;
+      for (let k = 0;k <= MAX_NUDGE; k++) {
+        const rs = idx.map((i) => reroute(i, base + k * LANE_STEP));
+        const c = costOf(rs);
+        if (!best || c < best.c)
+          best = { rs, c };
+        if (c < 1)
+          break;
+      }
+      if (best)
+        idx.forEach((i, n) => routes[i] = best.rs[n]);
+    }
+  }
+  var SCREEN_COST = 1e4;
+  function detourAroundScreens(routes, items, screens, rowGap, titles, edges, builders) {
+    if (!screens.length)
+      return;
+    routes.forEach((r, i) => {
+      if (!r.ok)
+        return;
+      const { source, target, trigger } = items[i].ends;
+      if (target.x < source.x + source.width)
+        return;
+      if (screensCrossed(r.points, screens, [source, target]) === 0)
+        return;
+      const cost = (pts) => {
+        let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (j === i || !o.ok)
+            return;
+          if (sharedRunLength(pts, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return c;
+      };
+      const bands = [];
+      for (let k = 0;k <= 8; k++)
+        bands.push(target.y - 72 - 32 - k * LANE_STEP);
+      for (let k = 0;k <= 8; k++)
+        bands.push(target.y + target.height + 24 + k * LANE_STEP);
+      const lo = target.y - rowGap + 8;
+      const hi = target.y + target.height + rowGap - 8;
+      let best = null;
+      for (let lane = 0;lane <= 4 && (!best || best.c >= 1); lane++) {
+        for (const y of bands) {
+          if (y < lo || y > hi)
+            continue;
+          const cand = routeViaBand(source, target, trigger, y, lane);
+          const c = cost(cand.points);
+          if (!best || c < best.c)
+            best = { route: cand, c, y, lane };
+        }
+      }
+      const chosen = best;
+      if (!chosen || chosen.c >= SCREEN_COST)
+        return;
+      routes[i] = chosen.route;
+      builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane);
+    });
+  }
+  var bandsFor = (target, rowGap) => {
+    const out = [];
+    const lo = target.y - rowGap + 8;
+    const hi = target.y + target.height + rowGap - 8;
+    for (let k = 0;k <= 8; k++)
+      out.push(target.y - 72 - 32 - k * LANE_STEP);
+    for (let k = 0;k <= 8; k++)
+      out.push(target.y + target.height + 24 + k * LANE_STEP);
+    return out.filter((y) => y >= lo && y <= hi);
+  };
+  function joinTargets(routes, items, screens, rowGap, titles, edges, builders) {
+    const groups = new Map;
+    items.forEach((it, i) => {
+      const r = routes[i];
+      const { source, target, exit } = it.ends;
+      if (!r.ok || exit === "bottom" || relation(source, target) !== "right")
+        return;
+      const key = `${target.x}:${target.y}`;
+      groups.set(key, [...groups.get(key) ?? [], i]);
+    });
+    const startY = (i) => {
+      const { source, trigger } = items[i].ends;
+      return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
+    };
+    const joined = [...groups.values()].filter((g) => g.length >= 2);
+    const pending = new Set(joined.flat());
+    const lowerFirst = (g) => items[g[0]].ends.target.y;
+    for (const idx of [...joined].sort((p, q) => lowerFirst(q) - lowerFirst(p))) {
+      const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
+      const members = new Set(idx);
+      for (const i of idx)
+        pending.delete(i);
+      const target = items[idx[0]].ends.target;
+      const ey = target.y + target.height / 2;
+      let best = null;
+      for (let k = 0;k <= MAX_NUDGE; k++) {
+        const trunkX = target.x - TRUNK_GAP - k * LANE_STEP;
+        const trial = new Map;
+        let total = 0;
+        for (const i of ordered) {
+          const { source, trigger } = items[i].ends;
+          const cost = (pts) => {
+            let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+            const against = (o, ignore) => {
+              if (!o.ok)
+                return;
+              if (sharedRunLength(pts, o.points, ignore) > 1)
+                c += 1000;
+              else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+                c += 0.5;
+            };
+            routes.forEach((o, j) => {
+              if (j !== i && !members.has(j) && !pending.has(j))
+                against(o, {});
+            });
+            for (const [j, o] of trial)
+              if (j !== i)
+                against(o, { v: trunkX, h: ey });
+            return c;
+          };
+          const plain = routeJoin(source, target, trigger, trunkX, null);
+          let pick = { route: plain, c: cost(plain.points) };
+          if (pick.c >= SCREEN_COST) {
+            for (let lane = 0;lane <= 4; lane++) {
+              for (const y of bandsFor(target, rowGap)) {
+                const cand = routeJoin(source, target, trigger, trunkX, y, lane);
+                const c = cost(cand.points);
+                if (c < pick.c)
+                  pick = { route: cand, c };
+              }
+              if (pick.c < 1)
+                break;
+            }
+          }
+          trial.set(i, pick.route);
+          total += pick.c;
+        }
+        if (!best || total < best.total)
+          best = { total, chosen: ordered.map((i) => trial.get(i)) };
+        if (total < 1)
+          break;
+      }
+      const chosen = best;
+      ordered.forEach((i, n) => {
+        routes[i] = chosen.chosen[n];
+        builders[i] = null;
+      });
+    }
+  }
 
   // plugin-src/flow.ts
   var norm2 = (id) => id.replace("-", ":");
@@ -3982,10 +4294,92 @@ ${logs.join(`
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
     if (!meta)
       throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
-    const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
-    if (!arrows || !("children" in arrows))
-      throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone.`);
-    return { node, meta, arrows };
+    let boardMeta = meta;
+    let recovered;
+    let arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
+    if (!arrows || arrows.removed || !isArrowsContainerType(arrows.type) || !("children" in arrows)) {
+      const rebuilt = await rebuildArrowsContainer(node, meta);
+      if (!rebuilt)
+        throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone and no arrow data was found to rebuild it.`);
+      arrows = rebuilt.container;
+      boardMeta = { ...meta, arrowsGroupId: rebuilt.container.id };
+      node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+      recovered = `Arrows container ${meta.arrowsGroupId} was lost; rebuilt ${rebuilt.container.id} and moved ${rebuilt.moved} arrow groups into it.`;
+    }
+    const labelsNode = boardMeta.labelsGroupId ? await figma.getNodeByIdAsync(boardMeta.labelsGroupId) : null;
+    const labels = labelsNode && "children" in labelsNode && !labelsNode.removed ? labelsNode : null;
+    return { node, meta: boardMeta, arrows, labels, ...recovered ? { recovered } : {} };
+  }
+  async function rebuildArrowsContainer(boardNode, meta) {
+    const parent = boardNode.parent;
+    if (!parent || !("children" in parent))
+      return null;
+    const candidates = parent.children.map((c) => ({ node: c, boardId: readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId ?? null }));
+    const ids = new Set(recoverableArrowIds(candidates.map((c) => ({ id: c.node.id, boardId: c.boardId })), boardNode.id));
+    const arrows = candidates.filter((c) => ids.has(c.node.id)).map((c) => c.node);
+    if (!arrows.length)
+      return null;
+    const frame = figma.createFrame();
+    frame.name = arrowsContainerName(boardNode.name);
+    frame.fills = [];
+    frame.clipsContent = false;
+    frame.resize(1, 1);
+    frame.x = 0;
+    frame.y = 0;
+    parent.insertChild(recoveryIndex(parent.children.map((c) => c.id), meta.labelsGroupId ?? null), frame);
+    for (const n of arrows)
+      moveInto(n, frame);
+    return { container: frame, moved: arrows.length };
+  }
+  async function ensureLabels(board) {
+    if (board.labels && !board.labels.removed) {
+      const wanted = labelsContainerName(board.node.name, board.arrows.name);
+      if (board.labels.name !== wanted && isLabelsContainerName(board.labels.name))
+        board.labels.name = wanted;
+      return board.labels;
+    }
+    const parent = board.arrows.parent;
+    if (!parent || !("children" in parent))
+      throw new Error(`The arrows group of board ${board.node.id} has no parent for a labels container.`);
+    const name = labelsContainerName(board.node.name, board.arrows.name);
+    let found = parent.children.find((c) => c.type === "FRAME" && isLabelsContainerName(c.name) && c.name === name) ?? null;
+    if (!found) {
+      found = figma.createFrame();
+      found.name = name;
+      found.fills = [];
+      found.clipsContent = false;
+      found.resize(1, 1);
+      parent.insertChild(parent.children.indexOf(board.arrows) + 1, found);
+      const at = toLocal(parent, rectOf(board.arrows));
+      found.x = at.x;
+      found.y = at.y;
+    }
+    board.labels = found;
+    board.meta = { ...board.meta, labelsGroupId: found.id };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return found;
+  }
+  function moveInto(node, container) {
+    const before = rectOf(node);
+    container.appendChild(node);
+    const d = restoreDelta(before, rectOf(node));
+    if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+      node.x += d.x;
+      node.y += d.y;
+    }
+  }
+  async function migrateLabels(board, metas) {
+    const labels = await ensureLabels(board);
+    const nodes = (await Promise.all(metas.map((m) => sceneById(m.labelId)))).flatMap((n) => n ? [n] : []);
+    const ids = new Set(labelsToMigrate(nodes.map((n) => ({ labelId: n.id, labelParentId: n.parent?.id ?? null })), labels.id));
+    let moved = 0;
+    for (const n of nodes) {
+      if (!ids.has(n.id))
+        continue;
+      moveInto(n, labels);
+      moved++;
+    }
+    return moved;
   }
   function listArrows(board) {
     const out = [];
@@ -3998,6 +4392,13 @@ ${logs.join(`
     }
     return out;
   }
+  function boardScreens(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    return collectScreens(parent.children).filter((s) => readMeta(s.frame, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id).map((s) => ({ id: s.frame.id, rect: rectOf(s.frame) }));
+  }
+  var boardScreenRects = (board) => boardScreens(board).map((s) => s.rect);
   var gutterOf = (m) => m.colWidth - m.screenW;
   function labelLimitOf(meta, ends) {
     return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
@@ -4009,8 +4410,8 @@ ${logs.join(`
     const trig = meta.trigger ? await sceneById(meta.trigger) : null;
     return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig, exit: meta.exit ?? "side" };
   }
-  function planRoutes2(meta, items, groups = []) {
-    return planRoutes({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...g.strokeWeight ? { strokeWeight: g.strokeWeight } : {} })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
+  function planRoutes2(meta, items, groups = [], screens = []) {
+    return planRoutes({ gutter: gutterOf(meta), screens, rowGap: meta.rowHeight - meta.screenH, limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...g.strokeWeight ? { strokeWeight: g.strokeWeight } : {} })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
   }
   var loadGroupObstacles = null;
   function setGroupObstacleLoader(loader) {
@@ -4083,8 +4484,9 @@ ${logs.join(`
     parent.appendChild(dot);
     return dot;
   }
-  async function newLabel(parent, style, label) {
-    const template = firstOf(parent, (n) => n.type === "FRAME" && n.name.startsWith("Label ·"));
+  async function newLabel(parent, style, label, alsoFrom = null) {
+    const isLabel = (n) => n.type === "FRAME" && n.name.startsWith("Label ·");
+    const template = firstOf(parent, isLabel) ?? (alsoFrom ? firstOf(alsoFrom, isLabel) : null);
     let frame;
     if (template) {
       frame = template.clone();
@@ -4128,18 +4530,21 @@ ${logs.join(`
   async function applyRoute(parts, route, style, groups = []) {
     await writeVector(parts.vector, route.points, style);
     centre(parts.dot, route.dot);
+    const size = { width: parts.label.width, height: parts.label.height };
+    const anchor = startLabelAnchor(route, size);
     if (!groups.length) {
-      centre(parts.label, route.labelAnchor);
+      centre(parts.label, anchor);
       return null;
     }
-    const placed = clearLabel(route, { width: parts.label.width, height: parts.label.height }, labelObstacles(groups));
-    centre(parts.label, placed.ok ? placed.anchor : route.labelAnchor);
+    const placed = clearLabel(leadRoute(route, anchor), size, labelObstacles(groups));
+    centre(parts.label, placed.ok ? placed.anchor : anchor);
     return placed.ok ? null : placed.blocked;
   }
   async function separateBoardLabels(placed, fixed, groups) {
     const items = placed.map((p) => {
       const r = rectOf(p.label);
-      return { id: p.id, route: p.route, anchor: { x: r.x + r.width / 2, y: r.y + r.height / 2 }, size: { width: r.width, height: r.height } };
+      const anchor = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      return { id: p.id, route: leadRoute(p.route, anchor), anchor, size: { width: r.width, height: r.height } };
     });
     const res = separateLabels(items, labelObstacles(groups), LABEL_PAD, fixed.map(rectOf));
     for (const [i, p] of placed.entries()) {
@@ -4200,11 +4605,18 @@ ${logs.join(`
     const parent = board.arrows.parent;
     if (!parent || !("children" in parent))
       return;
-    const kids = parent.children;
-    const at = kids.indexOf(board.arrows);
-    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
-    if (screenAbove)
-      parent.insertChild(kids.length - 1, board.arrows);
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    const need = stackingNeeds(parent.children.map((k) => k.id), (id) => {
+      const k = parent.children.find((c) => c.id === id);
+      return !!k && k.id !== labels?.id && holdsScreen(k, board.node.id);
+    }, board.arrows.id, labels?.id ?? null);
+    if (need.raiseArrows)
+      parent.insertChild(parent.children.length - 1, board.arrows);
+    if (need.placeLabels && labels) {
+      const a = parent.children.indexOf(board.arrows);
+      const l = parent.children.indexOf(labels);
+      parent.insertChild(l > a ? a + 1 : a, labels);
+    }
   }
   function writeArrowMeta(group, meta) {
     group.setSharedPluginData(FLOW_NAMESPACE, ARROW_KEY, JSON.stringify(meta));
@@ -4237,26 +4649,33 @@ ${logs.join(`
     if (!boardId)
       return fail(`${from.name} (${from.id}) is not on an adopted board. Run adopt_board, or pass boardId.`);
     const board = await loadBoard(boardId);
+    const labelsBox = await ensureLabels(board);
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
     const ends = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false, exit };
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []);
     const groups = await obstaclesOf(board);
-    const plans = planRoutes2(board.meta, [...others, { id: "new", ends }], groups);
+    const plans = planRoutes2(board.meta, [...others, { id: "new", ends }], groups, boardScreenRects(board));
     const mine = plans[plans.length - 1];
     if (!mine.route)
       return fail(mine.error ?? "Could not route the arrow.");
     const route = mine.route;
     let parts = match ? await partsOf(match.meta) : null;
-    if (match && !parts)
+    if (match && !parts) {
+      const staleLabel = await sceneById(match.meta.labelId);
+      if (staleLabel && staleLabel.parent !== match.group)
+        staleLabel.remove();
       match.group.remove();
+    }
     const style = board.meta.arrowStyle;
     if (!parts) {
       const vector = await newVector(board.arrows, style, `Arrow · ${label}`);
       const dot = await newDot(board.arrows, style);
-      const lab = await newLabel(board.arrows, style, label);
+      const lab = await newLabel(labelsBox, style, label, board.arrows);
       parts = { vector, dot, label: lab };
     } else {
+      if (parts.label.parent !== labelsBox)
+        moveInto(parts.label, labelsBox);
       await setLabelText(parts.label, label);
       parts.vector.name = `Arrow · ${label}`;
     }
@@ -4281,7 +4700,7 @@ ${logs.join(`
     if (match && parts.vector.parent === match.group) {
       group = match.group;
     } else {
-      group = figma.group([parts.vector, parts.dot, parts.label], board.arrows);
+      group = figma.group([parts.vector, parts.dot], board.arrows);
     }
     group.name = arrowGroupName(from.name, to.name, label);
     writeArrowMeta(group, meta);
@@ -4301,7 +4720,7 @@ ${logs.join(`
       prototypeUpdated,
       backwards: route.backwards,
       updated: !!match,
-      ...blocked || crowded || mine.warning ? { warnings: [...blocked ? [`label overlaps a group box: ${blocked}`] : [], ...crowded ? ["label overlaps another arrow label and no spot on its path is clear"] : [], ...mine.warning ? [mine.warning] : []] } : {}
+      ...blocked || crowded || mine.warning || board.recovered ? { warnings: [...board.recovered ? [board.recovered] : [], ...blocked ? [`label overlaps a group box: ${blocked}`] : [], ...crowded ? ["label overlaps another arrow label and no spot on its path is clear"] : [], ...mine.warning ? [mine.warning] : []] } : {}
     });
   };
   async function boardsFor(args) {
@@ -4324,7 +4743,11 @@ ${logs.join(`
     let obstacleCount = 0;
     for (const board of boards) {
       board.node.locked = true;
-      const ordered = await orderedEntries(listArrows(board));
+      if (board.recovered)
+        warnings.push({ boardId: board.node.id, warning: board.recovered });
+      const entries = listArrows(board);
+      await migrateLabels(board, entries.map((e) => e.meta));
+      const ordered = await orderedEntries(entries);
       for (const o of ordered) {
         if (!o.ends)
           deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
@@ -4332,7 +4755,7 @@ ${logs.join(`
       const live = ordered.flatMap((o) => o.ends ? [{ entry: o.entry, ends: o.ends }] : []);
       const groups = await obstaclesOf(board);
       obstacleCount += groups.length;
-      const plans = planRoutes2(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
+      const plans = planRoutes2(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups, boardScreenRects(board));
       const drawn = [];
       const kept = [];
       for (const [i, l] of live.entries()) {
@@ -4430,7 +4853,10 @@ ${logs.join(`
       groups.push(...pick);
     }
     const arrowsGroup = groups[0];
-    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
+    const prevBoardMeta = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const labelsHolder = (prevBoardMeta?.labelsGroupId ? parent.children.find((c) => c.id === prevBoardMeta.labelsGroupId) : null) ?? parent.children.find((c) => ("children" in c) && isLabelsContainerName(c.name) && c.name === labelsContainerName(boardNode.name, arrowsGroup.name)) ?? null;
+    const labelsKids = labelsHolder && "children" in labelsHolder ? [...labelsHolder.children] : [];
+    const siblings = parent.children.filter((c) => c.id !== boardNode.id && c.id !== labelsHolder?.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
     const found = collectScreens(siblings).filter((c) => {
       const r = rectOf(c.frame);
       return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
@@ -4518,7 +4944,8 @@ ${logs.join(`
     for (const h of holders) {
       const v = h.children.find((x) => x.type === "VECTOR");
       const dot = h.children.find((x) => x.type === "ELLIPSE");
-      const lab = h.children.find((x) => x.type === "FRAME" && x.name.startsWith("Label ·")) ?? h.children.find((x) => x.type === "FRAME");
+      const priorMeta = readMeta(h, ARROW_KEY, parseArrowMeta);
+      const lab = h.children.find((x) => x.type === "FRAME" && x.name.startsWith("Label ·")) ?? h.children.find((x) => x.type === "FRAME") ?? labelsKids.find((x) => x.type === "FRAME" && x.id === priorMeta?.labelId);
       if (!v || !dot || !lab) {
         unmatched.push({ id: h.id, name: h.name, reason: "incomplete-group" });
         continue;
@@ -4637,9 +5064,19 @@ ${logs.join(`
         if (routeNode?.type === "TEXT")
           await fitRoute(routeNode, s.node.width, null);
       }
+      const adopted = { node: boardNode, meta: boardMeta, arrows: arrowsGroup, labels: labelsHolder && "children" in labelsHolder ? labelsHolder : null };
+      if (planned.length || arrowsKept || labelsHolder)
+        await ensureLabels(adopted);
+      const labelsBox = adopted.labels ?? null;
+      if (labelsBox) {
+        boardMeta.labelsGroupId = labelsBox.id;
+        boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+      }
       for (const p of planned) {
         const container = p.vector.parent && "children" in p.vector.parent ? p.vector.parent : arrowsGroup;
-        const group = p.holder ?? figma.group([p.vector, p.dot, p.label], container);
+        const group = p.holder ?? figma.group([p.vector, p.dot], container);
+        if (labelsBox && p.label.parent !== labelsBox)
+          moveInto(p.label, labelsBox);
         const fromName = screenRects.find((s) => s.id === p.from)?.node.name ?? p.from;
         const toName = screenRects.find((s) => s.id === p.to)?.node.name ?? p.to;
         group.name = arrowGroupName(fromName, toName, p.labelText);
@@ -4658,6 +5095,13 @@ ${logs.join(`
           dotId: p.dot.id,
           labelId: p.label.id
         });
+      }
+      if (labelsBox) {
+        for (const h of holders) {
+          const inside = h.removed ? undefined : h.children.find((x) => x.type === "FRAME" && x.name.startsWith("Label ·"));
+          if (inside && h.children.some((x) => x.type === "VECTOR"))
+            moveInto(inside, labelsBox);
+        }
       }
     }
     const consolidation = planConsolidation(groups.map((g) => ({ id: g.id, childIds: g.children.map((c) => c.id) })));
@@ -4871,8 +5315,9 @@ ${logs.join(`
         if (!meta || meta.boardId !== board.node.id)
           continue;
         const has = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
-        const build = buildStatusOf(meta.build);
-        const row = { id: frame.id, name: frame.name, status: build.status };
+        const recovered = !meta.build && has ? statusFromBadgeText(has.text.characters, new Date().toISOString()) : null;
+        const build = recovered ?? buildStatusOf(meta.build);
+        const row = { id: frame.id, name: frame.name, status: build.status, ...recovered ? { recovered: true } : {} };
         if (dryRun) {
           (has ? refreshed : added).push(row);
           continue;
@@ -4910,7 +5355,7 @@ ${logs.join(`
   var MAX_FILL = 0.3;
   var ABOVE_GAP = 400;
   var TOP_BAND = 0.25;
-  var EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Arrows)/;
+  var EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Flow arrow labels|Arrows)/;
   var HEADING_NAME = /^Section Heading/;
   var area = (r) => r.width * r.height;
   var contains2 = (o, i) => i.x >= o.x - TOL && i.y >= o.y - TOL && i.x + i.width <= o.x + o.width + TOL && i.y + i.height <= o.y + o.height + TOL;
@@ -5111,7 +5556,7 @@ ${logs.join(`
   async function adoptBoard2(board, dryRun, removeOld) {
     const { screens } = await loadScreens(board);
     const screenIds = new Set(screens.map((s) => s.node.id));
-    const skip = new Set([board.node.id, board.meta.arrowsGroupId, ...board.meta.headingId ? [board.meta.headingId] : [], ...screenIds]);
+    const skip = new Set([board.node.id, board.meta.arrowsGroupId, ...board.meta.labelsGroupId ? [board.meta.labelsGroupId] : [], ...board.meta.headingId ? [board.meta.headingId] : [], ...screenIds]);
     const candidates = collect(skip, rectOf(board.node));
     const plan = planAdopt({
       candidates,
@@ -7489,7 +7934,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "24a041b1", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "c1a9fb90", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7497,7 +7942,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"24a041b1"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"c1a9fb90"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
