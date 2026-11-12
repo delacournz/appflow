@@ -3,6 +3,8 @@ import { renderBoard, type BoardArrow, type BoardDescription, type BoardGroup, t
 import { collectScreens, loadBoard, readMeta, rectOf, sceneById, type Board } from './flow';
 import { loadGroups } from './flow-groups';
 import { ARROW_KEY, BOARD_KEY, SCREEN_KEY, parseArrowMeta, parseBoardMeta, parseScreenMeta } from './flowmeta';
+import { findOrphans } from './board-missing';
+import { GROUP_LAYER_KEY, FLOW_NAMESPACE } from './flowmeta';
 import { buildStatusOf } from './screen-status';
 import { fail, num, ok, str, type Handler } from './types';
 
@@ -68,6 +70,23 @@ async function describeOne(board: Board, width: number): Promise<BoardDescriptio
     return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups }, width);
 }
 
+/** Boards that screens and group holders on this page still point at, whose background is gone. */
+async function missingBoards() {
+    const screenBoards: string[] = [];
+    for (const { frame } of collectScreens(figma.currentPage.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (meta) screenBoards.push(meta.boardId);
+    }
+    const groupBoards: string[] = [];
+    for (const n of figma.currentPage.children) {
+        const board = n.type === 'FRAME' ? n.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) : '';
+        if (board && n.type === 'FRAME') groupBoards.push(...n.children.filter((c) => c.type === 'RECTANGLE').map(() => board));
+    }
+    const existing = new Set<string>();
+    for (const bid of new Set([...screenBoards, ...groupBoards])) if (await sceneById(bid)) existing.add(bid);
+    return findOrphans(screenBoards, groupBoards, existing);
+}
+
 export const describeBoard: Handler = async (args: JsonObject) => {
     const width = num(args, 'width') ?? DEFAULT_WIDTH;
     const id = str(args, 'boardId');
@@ -79,7 +98,11 @@ export const describeBoard: Handler = async (args: JsonObject) => {
             if (readMeta(n, BOARD_KEY, parseBoardMeta)) boards.push(await loadBoard(n.id));
         }
     }
-    if (!boards.length) return fail('No adopted boards on this page. Run adopt_board first, or pass boardId.');
+    const issues = id ? [] : await missingBoards();
+    if (!boards.length) {
+        if (issues.length) return ok({ boards: [], issues: issues as unknown as JsonObject[] });
+        return fail('No adopted boards on this page. Run adopt_board first, or pass boardId.');
+    }
     const described = await Promise.all(boards.map((b) => describeOne(b, width)));
-    return ok({ boards: described as unknown as JsonObject[] });
+    return ok({ boards: described as unknown as JsonObject[], ...(issues.length ? { issues: issues as unknown as JsonObject[] } : {}) });
 };
