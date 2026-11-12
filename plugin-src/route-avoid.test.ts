@@ -531,6 +531,13 @@ describe('same-row arrows across occupied cells and merged fan-in', () => {
             expect(issues).toEqual([]);
         });
 
+        test('a lone gap route into one target does not run on the merged trunk of the target below it (live 15788 / 5480)', () => {
+            const t1 = cellAt(17, 4);
+            const t2 = cellAt(17, 6);
+            expect(run([['again', cellAt(17, 5), t1], ['setup', cellAt(16, 4), t2], ['setup2', cellAt(16, 4), t2]])).toEqual([]);
+            expect(run([['again', cellAt(17, 5), t1], ['setup', cellAt(16, 4), t2]])).toEqual([]);
+        });
+
         test('trunks of two targets in one column do not share a vertical when one arrow starts at the other entry height (Trusted devices)', () => {
             const t1 = cellAt(17, 4);
             const t2 = cellAt(17, 6);

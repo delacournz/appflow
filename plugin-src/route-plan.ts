@@ -22,6 +22,10 @@ export type PlanConfig = {
 /** Clear space kept between a vertical line and the end of a title's text. */
 const TITLE_MARGIN = 8;
 
+/** Builder lanes from here up mean "gutter lane hugging the target" (`NEAR_EDGE` from its left edge, then one step further each), for gap routes. */
+const NEAR_LANE = 100;
+const NEAR_EDGE = 24;
+
 /** How many lane steps a conflicting lane may move before the original is kept. */
 const MAX_NUDGE = 8;
 
@@ -126,7 +130,13 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
     const builders: (((lane: number) => Routed) | null)[] = items.map((it, i) => {
         const r = final[i] as Routed;
         if (!r.ok || r.kind === 'straight' || fans.has(it.id)) return null;
-        return (lane: number) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+        const around = r.kind === 'around' || r.kind === 'backwards';
+        const { source, target, trigger } = it.ends;
+        return (lane: number) => {
+            if (lane < NEAR_LANE) return routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+            if (!around) return { ok: false, error: 'no near-column lane' };
+            return routeViaGap(source, target, trigger, gutter, 0, { laneX: target.x - NEAR_EDGE - (lane - NEAR_LANE) * LANE_STEP, kind: r.kind, backwards: r.backwards });
+        };
     });
     joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
@@ -220,7 +230,7 @@ function separateLines(routes: Routed[], builders: (((lane: number) => Routed) |
             const current = cost(i, r.points);
             if (current < 1) return;
             let best: { route: Routed; c: number } | null = null;
-            for (let lane = 0; lane <= MAX_NUDGE; lane++) {
+            for (const lane of [...Array.from({ length: MAX_NUDGE + 1 }, (_, n) => n), ...Array.from({ length: 5 }, (_, n) => NEAR_LANE + n)]) {
                 const cand = build(lane);
                 if (!cand.ok) continue;
                 const c = cost(i, cand.points);
