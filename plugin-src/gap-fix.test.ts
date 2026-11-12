@@ -14,6 +14,12 @@ const block = (id: string, rect: Rect, cs: Cell[], extra: Partial<Block> = {}): 
 const r = (x: number, y: number, w: number, h: number): Rect => ({ x, y, width: w, height: h });
 
 describe('gapDeficits', () => {
+    test('groups whose cell ranges interleave on both axes are skipped: spacing cannot separate them', () => {
+        const tabs = block('tabs', r(0, 0, 3600, 3500), [...cells(0, 4, 0, 0), { col: 4, row: 2 }]);
+        const keys = block('keys', r(-200, 1300, 5000, 2300), [{ col: 4, row: 1 }, ...cells(6, 11, 2, 2)]);
+        expect(gapDeficits([tabs, keys])).toEqual({ colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } });
+    });
+
     test('live case: the upper box grew from internal arrows and touches the lower title bar (zero gap)', () => {
         const device = block('device', r(11632, 5678, 3537, 2000), cells(16, 20, 3, 6));
         const kyc = block('kyc', r(7000, 7678, 9000, 3000), cells(11, 25, 8, 12));

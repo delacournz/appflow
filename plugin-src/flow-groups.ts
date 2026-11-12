@@ -11,7 +11,7 @@
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { applyBanded, applyExtras, applyMoves, applyPitch, setSpacing, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
-import { basePitchOf, pitchFromNeeds, samePitch, spacingOf } from './pitch';
+import { basePitchOf, growPitch, pitchFromNeeds, samePitch, spacingOf } from './pitch';
 import { addBands, gapDeficits, hasDeficits, type Block, type Deficits } from './gap-fix';
 import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, toLocal, type Board } from './flow';
 import {
@@ -429,10 +429,15 @@ async function settleBoard(board: Board, screens: Screen[], first: RefitResult, 
     const uniform = spacingOf(board.meta) === 'uniform';
     let bonus: Bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
     let more = { col: 0, row: 0 };
+    let previous: { col: number; row: number } | null = null;
     while (fit.active && passes < MAX_SETTLE) {
         const short = hasDeficits(fit.deficits);
-        if (short && uniform) more = { col: more.col + fit.deficits.uniform.col, row: more.row + fit.deficits.uniform.row };
-        else if (short) {
+        if (short && uniform) {
+            const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
+            previous = fit.deficits.uniform;
+            if (step.stop && step.more.col === more.col && step.more.row === more.row) break;
+            more = step.more;
+        } else if (short) {
             bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
             setGapExtra(board, bonus);
         }
