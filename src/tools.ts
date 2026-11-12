@@ -387,7 +387,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'lint_flow_layout',
-        'Check that flow arrows read left to right and that flow group boxes are clean. Scans arrow vectors under a node (or the current page) and reports any whose head points left (points-left) or whose path travels left (runs-left), with ids and endpoints. On adopted boards with flow groups it also returns layoutIssues (each with boardId and message) and counts per kind: group-crosses-content (a box stroke cuts a screen, route text or badge), group-crosses-label (a stroke cuts an arrow label), group-overlaps-group, group-encloses-foreign (a non-member screen inside a box), title-overlaps, and nesting-too-deep, child-outside-parent, parent-missing. Arrow lines may cross a box; nothing else may. passed is false on any issue. Run it after laying out, grouping or rerouting a flow; follow the flow-layout skill to fix issues.',
+        'Check that flow arrows read left to right and that flow group boxes are clean. Scans arrow vectors under a node (or the current page) and reports any whose head points left (points-left) or whose path travels left (runs-left), with ids and endpoints. On adopted boards with flow groups it also returns layoutIssues (each with boardId and message) and counts per kind: group-crosses-content (a box stroke cuts a screen, route text or badge), group-crosses-label (a stroke cuts an arrow label), group-overlaps-group, group-encloses-foreign (a non-member screen inside a box), title-overlaps, and nesting-too-deep, child-outside-parent, parent-missing, plus arrow checks label-overlaps-label, lines-overlap (two collinear arrow lines sharing over 40px) and line-crosses-title (an arrow line through a group title). Arrow lines may cross a box; nothing else may. passed is false on any issue. Run it after laying out, grouping or rerouting a flow; follow the flow-layout skill to fix issues.',
         obj({ nodeId, tolerance: num('Pixels of leftward movement to ignore. Default 1.').optional() }),
     ),
     passthrough(
@@ -412,6 +412,7 @@ const RAW_TOOLS: ToolDef[] = [
         obj({
             boardId: str('Board node ID.').optional(),
             arrowIds: z.array(z.string()).describe('Only redraw these arrow group IDs (as returned by connect).').optional(),
+            spacing: z.enum(['uniform', 'banded']).describe('Board spacing mode, stored on the board. "uniform" (default): one column pitch and one row pitch for the whole board, grown to fit the widest group boundary, so every column shares an x and every row a y. "banded": base pitch plus per-region extras (older behaviour). Switching converts the board on this call.').optional(),
         }),
         120_000,
     ),

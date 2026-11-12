@@ -1,14 +1,52 @@
 import type { JsonObject } from '../shared/protocol';
 import { loadScreens } from './board-ops';
 import { listArrows, rectOf, sceneById, type Board } from './flow';
+import type { Rect } from './route';
 import type { ConflictContent, ConflictGroup } from './flow-group';
 import { footprintOf, loadGroups } from './flow-groups';
-import { lintGroups } from './group-lint';
+import { orderPath } from './flowlint';
+import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type TitleText } from './group-lint';
+import { titleTextRect } from './route-avoid';
 
-/** The group part of lint_flow_layout for one board: reads the drawn boxes (never repaints) and checks them against the board's content. */
+/** An arrow's absolute path (rounded like `lintFlowLayout`), or null when its vector is gone or not a single-headed line. */
+async function pathOf(vectorId: string): Promise<{ x: number; y: number }[] | null> {
+    const n = await sceneById(vectorId);
+    if (n?.type !== 'VECTOR') return null;
+    const local = orderPath(n.vectorNetwork.vertices, n.vectorNetwork.segments);
+    if (!local) return null;
+    const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
+    return local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
+}
+
+/** The text area of a group's title: its real character count when the title holds text, else the router's default guess. */
+function titleTextOf(box: Rect, bar: Rect, title: SceneNode): Rect | null {
+    const text = title.type === 'TEXT' ? title : title.type === 'FRAME' ? title.children.find((k): k is TextNode => k.type === 'TEXT') : undefined;
+    return titleTextRect({ box, title: bar, ...(text ? { titleChars: text.characters.length } : {}) });
+}
+
+/** Arrow-level checks: label vs label, collinear lines, lines through title text. Never repaints. */
+async function arrowIssues(board: Board, titles: TitleText[]): Promise<{ issues: LayoutIssue[]; counts: Record<string, number> }> {
+    const arrows: ArrowShape[] = [];
+    for (const a of listArrows(board)) {
+        const points = await pathOf(a.meta.vectorId);
+        if (!points) continue;
+        const label = await sceneById(a.meta.labelId);
+        arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null });
+    }
+    return lintArrows(arrows, titles);
+}
+
+/** The layout part of lint_flow_layout for one board: reads the drawn boxes and arrows (never repaints) and checks them against the board's content. */
 export async function boardLayoutLint(board: Board): Promise<{ boardId: string; issues: JsonObject[]; counts: Record<string, number> } | null> {
     const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
-    if (!loaded.length) return null;
+    const titles: TitleText[] = [];
+    for (const g of loaded) {
+        if (!g.title) continue;
+        const text = titleTextOf(rectOf(g.rect), rectOf(g.title), g.title);
+        if (text) titles.push({ id: g.id, text });
+    }
+    const arrowPart = await arrowIssues(board, titles);
+    if (!loaded.length) return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues as unknown as JsonObject[], counts: arrowPart.counts } : null;
     const { screens } = await loadScreens(board);
     const contents: ConflictContent[] = [];
     for (const s of screens) {
@@ -26,6 +64,8 @@ export async function boardLayoutLint(board: Board): Promise<{ boardId: string; 
         return { id: g.id, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), box, title: g.title ? rectOf(g.title) : { x: box.x, y: box.y, width: 0, height: 0 } };
     });
     const r = lintGroups(groups, contents);
-    return { boardId: board.node.id, issues: r.issues as unknown as JsonObject[], counts: r.counts };
+    const counts = { ...r.counts };
+    for (const [k, v] of Object.entries(arrowPart.counts)) counts[k] = (counts[k] ?? 0) + v;
+    return { boardId: board.node.id, issues: [...r.issues, ...arrowPart.issues] as unknown as JsonObject[], counts };
 }
 

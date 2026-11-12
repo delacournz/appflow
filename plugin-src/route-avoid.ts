@@ -4,12 +4,31 @@
  * Arrow LINES may cross a box stroke (perpendicular). A stroke or title must never touch an arrow label,
  * and a lane must not run alongside a stroke closer than `GROUP_CLEAR`.
  */
-import { GROUP_CLEAR, GROUP_STROKE, strokeBands } from './flow-group';
+import { GROUP_CLEAR, GROUP_STROKE, TITLE_LINE_HEIGHT, TITLE_PAD_X, TITLE_PAD_Y, strokeBands } from './flow-group';
 import type { Pt, Rect, Route } from './route';
 
-/** What a group box leaves behind on the board: the box rect and its title's planning rect. */
-/** `strokeWeight` is the box's own stroke; absent = `GROUP_STROKE`. */
-export type GroupObstacle = { box: Rect; title: Rect; strokeWeight?: number };
+/**
+ * What a group box leaves behind on the board: the box rect and its title's planning rect.
+ * `strokeWeight` is the box's own stroke; absent = `GROUP_STROKE`.
+ * `titleChars` is the title's length in characters, used to estimate where its text ends; absent = `TITLE_FALLBACK_CHARS`.
+ */
+export type GroupObstacle = { box: Rect; title: Rect; strokeWeight?: number; titleChars?: number };
+
+/** Average glyph width as a fraction of the font size, for estimating title text extents. */
+export const TITLE_CHAR_WIDTH = 0.6;
+/** Title length assumed when the obstacle does not say. */
+export const TITLE_FALLBACK_CHARS = 16;
+
+/**
+ * Where a title's text sits: left-aligned `TITLE_PAD_X` in from the bar, `chars x 0.6 x titleSize` wide (capped at the
+ * bar's text width), as tall as the bar. The font size is recovered from the bar height. Null for a bar with no height.
+ */
+export function titleTextRect(g: GroupObstacle): Rect | null {
+    if (g.title.height <= 0) return null;
+    const size = Math.max(1, (g.title.height - 2 * TITLE_PAD_Y) / TITLE_LINE_HEIGHT);
+    const width = Math.min((g.titleChars ?? TITLE_FALLBACK_CHARS) * TITLE_CHAR_WIDTH * size, Math.max(0, g.title.width - 2 * TITLE_PAD_X));
+    return { x: g.title.x + TITLE_PAD_X, y: g.title.y, width, height: g.title.height };
+}
 
 /** A box rect that carries its own stroke weight. */
 export type StrokedBox = Rect & { strokeWeight?: number };
@@ -113,4 +132,31 @@ export function clearLabel(route: Route, size: LabelSize, obstacles: readonly Re
         if (spot && !obstacles.some((o) => overlapsRect(labelRect(spot, size), o)) && (!best || dist(spot, from) < dist(best, from))) best = spot;
     }
     return best ? { ok: true, anchor: best, moved: true } : { ok: false, blocked: 'no spot on the arrow keeps its label 48px clear of group box strokes and titles' };
+}
+
+export type LabelItem = { id: string; route: Route; anchor: Pt; size: LabelSize };
+
+/** Minimum gap between two arrow labels. */
+export const LABEL_PAD = 8;
+
+const inflate = (r: Rect, by: number): Rect => ({ x: r.x - by, y: r.y - by, width: r.width + 2 * by, height: r.height + 2 * by });
+
+/**
+ * Board-wide label de-overlap. Items are handled in the order given (callers pass `stableArrowOrder`), so the result
+ * is deterministic. The first label stays; each later one slides along its own path (`clearLabel`) until it is `pad`
+ * clear of `obstacles` and of every label placed before it. `fixed` are label rects that cannot move (arrows not being
+ * redrawn). A label with no clear spot keeps its anchor and its id is listed in `blocked`.
+ */
+export function separateLabels(items: readonly LabelItem[], obstacles: readonly Rect[], pad = LABEL_PAD, fixed: readonly Rect[] = []): { anchors: Map<string, Pt>; blocked: string[] } {
+    const anchors = new Map<string, Pt>();
+    const blocked: string[] = [];
+    const placed: Rect[] = fixed.map((r) => inflate(r, pad));
+    for (const it of items) {
+        const res = clearLabel({ ...it.route, labelAnchor: it.anchor }, it.size, [...obstacles, ...placed]);
+        const at = res.ok ? res.anchor : it.anchor;
+        if (!res.ok) blocked.push(it.id);
+        anchors.set(it.id, at);
+        placed.push(inflate(labelRect(at, it.size), pad));
+    }
+    return { anchors, blocked };
 }

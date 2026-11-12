@@ -1,16 +1,22 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
 import { boxEdges, laneConflicts, type Edge, type StrokedBox } from './route-avoid';
-import { LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, type Exit, type Pt, type Rect, type Route } from './route';
+import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
-export type Plan = { id: string; route: Route | null; error: string | null };
+/** `warning` is set when a line could not be kept off a group title's text. */
+export type Plan = { id: string; route: Route | null; error: string | null; warning?: string };
 export type PlanConfig = {
     gutter: number;
     /** Per item (same order as `items`): the absolute x past which its label must not sit; see `RouteInput.labelLimitX`. */
     limits: readonly (number | undefined)[];
     /** Group boxes on the board. Lanes running alongside a stroke step to the next lane. Empty or absent leaves the plan unchanged. */
     boxes?: readonly StrokedBox[];
+    /** Text rects of the group titles (`titleTextRect`). Straight vertical arrows shift sideways off them when they can. */
+    titles?: readonly Rect[];
 };
+
+/** Clear space kept between a vertical line and the end of a title's text. */
+const TITLE_MARGIN = 8;
 
 /** How many lane steps a conflicting lane may move before the original is kept. */
 const MAX_NUDGE = 8;
@@ -110,10 +116,52 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         const r = routes[i] as Routed;
         if (r.ok && fans.has(it.id)) fanLanes.set(edgeOf(it.ends), [...(fanLanes.get(edgeOf(it.ends)) ?? []), (r.points[1] as Pt).x]);
     });
+    const final: Routed[] = routes.map((r, i) => (r.ok && r.kind === 'straight' ? clearOfLanes(r, fanLanes.get(edgeOf((items[i] as (typeof items)[number]).ends)) ?? [], limits[i]) : r));
+    const warnings = cfg.titles?.length ? shiftOffTitles(final, items, cfg.titles) : new Map<number, string>();
     return items.map((it, i) => {
-        const r = routes[i] as Routed;
+        const r = final[i] as Routed;
         if (!r.ok) return { id: it.id, route: null, error: r.error };
-        const route = r.kind === 'straight' ? clearOfLanes(r, fanLanes.get(edgeOf(it.ends)) ?? [], limits[i]) : r;
-        return { id: it.id, route, error: null };
+        const warning = warnings.get(i);
+        return { id: it.id, route: r, error: null, ...(warning ? { warning } : {}) };
     });
+}
+
+const overlap1d = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
+
+/** The single vertical leg of a straight 'below'/'above' route, or null. */
+function verticalLeg(r: Routed): { x: number; y0: number; y1: number } | null {
+    if (!r.ok || (r.kind !== 'below' && r.kind !== 'above')) return null;
+    const [a, b] = r.points as [Pt, Pt];
+    return { x: a.x, y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
+}
+
+/**
+ * Moves each straight vertical arrow whose line runs through a title's text to the nearest x just outside it, within
+ * the x range both screens allow and at least a lane step from other vertical lines that share its y range. When no x
+ * qualifies the line stays and a warning is recorded for its index. Mutates `routes`.
+ */
+function shiftOffTitles(routes: Routed[], items: { id: string; ends: Endpoints }[], titles: readonly Rect[]): Map<number, string> {
+    const warnings = new Map<number, string>();
+    const crosses = (x: number, y0: number, y1: number, t: Rect) => x > t.x - TITLE_MARGIN && x < t.x + t.width + TITLE_MARGIN && overlap1d(y0, y1, t.y, t.y + t.height);
+    routes.forEach((r, i) => {
+        const leg = verticalLeg(r);
+        if (!leg || !r.ok) return;
+        if (!titles.some((t) => crosses(leg.x, leg.y0, leg.y1, t))) return;
+        const { source, target } = (items[i] as (typeof items)[number]).ends;
+        const lo = Math.max(source.x, target.x) + EDGE_MARGIN;
+        const hi = Math.min(source.x + source.width, target.x + target.width) - EDGE_MARGIN;
+        const free = (x: number) =>
+            x >= lo && x <= hi && !titles.some((t) => crosses(x, leg.y0, leg.y1, t)) && !routes.some((o, j) => {
+                const ol = j === i ? null : verticalLeg(o);
+                return !!ol && overlap1d(leg.y0, leg.y1, ol.y0, ol.y1) && Math.abs(ol.x - x) < LANE_STEP;
+            });
+        const cands = titles.flatMap((t) => [t.x - TITLE_MARGIN, t.x + t.width + TITLE_MARGIN]).filter(free);
+        if (!cands.length) {
+            warnings.set(i, `line crosses a group title's text and no lane within both screens avoids it`);
+            return;
+        }
+        const x = cands.reduce((best, c) => (Math.abs(c - leg.x) < Math.abs(best - leg.x) ? c : best));
+        routes[i] = { ...r, points: r.points.map((p) => ({ ...p, x })), dot: { ...r.dot, x }, labelAnchor: { ...r.labelAnchor, x } };
+    });
+    return warnings;
 }
