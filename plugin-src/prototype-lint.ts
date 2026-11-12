@@ -46,6 +46,8 @@ export const isInformational = (i: { severity?: string }): boolean => i.severity
  *   AFTER_TIMEOUT nor any reaction to that target.
  */
 export function lintPrototype(screens: readonly ProtoScreen[], arrows: readonly ProtoArrow[], rawReactions: readonly ProtoReaction[]): { issues: PrototypeLintIssue[]; exemptCount: number } {
+    const name = (id: string) => screens.find((s) => s.id === id)?.name ?? id;
+    const isScreen = (id: string) => screens.some((s) => s.id === id);
     const reactions = dedupeReactions(rawReactions);
     const tabRoots = new Set(
         arrows
@@ -54,8 +56,6 @@ export function lintPrototype(screens: readonly ProtoScreen[], arrows: readonly 
     );
     const rootBases = new Set([...tabRoots].map((id) => baseName(name(id))));
     let exemptCount = 0;
-    const name = (id: string) => screens.find((s) => s.id === id)?.name ?? id;
-    const isScreen = (id: string) => screens.some((s) => s.id === id);
     const out: PrototypeLintIssue[] = [];
     for (const a of arrows) {
         if (a.trigger) {
