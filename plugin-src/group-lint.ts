@@ -7,7 +7,8 @@ import { groupConflicts, validateNesting, type ConflictContent, type ConflictGro
 export type ArrowLayoutIssue =
     | { kind: 'label-overlaps-label'; arrowId: string; otherId: string }
     | { kind: 'lines-overlap'; arrowId: string; otherId: string; length: number }
-    | { kind: 'line-crosses-title'; arrowId: string; groupId: string };
+    | { kind: 'line-crosses-title'; arrowId: string; groupId: string }
+    | { kind: 'line-crosses-screen'; arrowId: string; screenId: string };
 
 /** A build badge on the board that no screen points at. */
 export type OrphanBadgeIssue = { kind: 'orphan-badge'; badgeId: string };
@@ -40,6 +41,8 @@ function describe(i: GroupIssue | NestingIssue | ArrowLayoutIssue): string {
             return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
         case 'line-crosses-title':
             return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
+        case 'line-crosses-screen':
+            return `Arrow ${i.arrowId} runs through screen ${i.screenId}, which is neither its source nor its target`;
     }
 }
 
@@ -52,7 +55,9 @@ export function lintGroups(groups: readonly ConflictGroup[], contents: readonly 
     return { issues, counts };
 }
 
-export type ArrowShape = { id: string; points: readonly Pt[]; label: Rect | null };
+/** `from` and `to` are the arrow's screen ids: a line may touch its own ends but never pass through any other screen. */
+export type ArrowShape = { id: string; points: readonly Pt[]; label: Rect | null; from?: string; to?: string };
+export type ScreenBox = { id: string; rect: Rect };
 /** `text` is the title's text area (`titleTextRect`), or the bar when the text is unknown. */
 export type TitleText = { id: string; text: Rect };
 
@@ -80,9 +85,10 @@ const segHitsRect = (s: Seg, r: Rect): boolean =>
 /**
  * Arrow-vs-arrow and arrow-vs-title checks for lint_flow_layout, in the order the arrows are given:
  * `label-overlaps-label` (label rects intersect), `lines-overlap` (collinear segments sharing more than
- * `LINES_OVERLAP_MIN` px) and `line-crosses-title` (any segment through a title's text area).
+ * `LINES_OVERLAP_MIN` px), `line-crosses-title` (any segment through a title's text area) and `line-crosses-screen`
+ * (any segment through a screen that is not the arrow's source or target).
  */
-export function lintArrows(arrows: readonly ArrowShape[], titles: readonly TitleText[]): GroupLint {
+export function lintArrows(arrows: readonly ArrowShape[], titles: readonly TitleText[], screens: readonly ScreenBox[] = []): GroupLint {
     const raw: ArrowLayoutIssue[] = [];
     const segs = arrows.map((a) => segmentsOf(a.points));
     for (let i = 0; i < arrows.length; i++) {
@@ -100,6 +106,11 @@ export function lintArrows(arrows: readonly ArrowShape[], titles: readonly Title
         }
         for (const t of titles) {
             if ((segs[i] as Seg[]).some((s) => segHitsRect(s, t.text))) raw.push({ kind: 'line-crosses-title', arrowId: a.id, groupId: t.id });
+        }
+        for (const sc of screens) {
+            if (sc.id === a.from || sc.id === a.to) continue;
+            const inner = { x: sc.rect.x + 1, y: sc.rect.y + 1, width: sc.rect.width - 2, height: sc.rect.height - 2 };
+            if ((segs[i] as Seg[]).some((s) => segHitsRect(s, inner))) raw.push({ kind: 'line-crosses-screen', arrowId: a.id, screenId: sc.id });
         }
     }
     const issues = raw.map((i): LayoutIssue => ({ ...i, message: describe(i) }));

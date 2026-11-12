@@ -2,10 +2,16 @@
 
 export const LABELS_PREFIX = 'Flow arrow labels · ';
 
-/** Name of the labels container that goes with an arrows container named `Flow arrows · {board}`. */
-export function labelsContainerName(arrowsName: string): string {
-    const board = arrowsName.replace(/^Flow arrows\s*·?\s*/, '').trim();
-    return `${LABELS_PREFIX}${board}`;
+/**
+ * Name of a board's labels container: `Flow arrow labels · {board}`. The board part comes from the board node's name
+ * (`Board background · X` or `Board · X`), else from the arrows container's (`Flow arrows · X`), else is left out.
+ */
+export function labelsContainerName(boardName: string, arrowsName = ''): string {
+    const strip = (n: string, re: RegExp) => n.replace(re, '').trim();
+    const fromBoard = strip(boardName, /^(Board background|Board)\s*·?\s*/);
+    const fromArrows = strip(arrowsName, /^Flow arrows\s*·?\s*/);
+    const board = fromBoard && fromBoard !== boardName.trim() ? fromBoard : fromArrows || fromBoard;
+    return board ? `${LABELS_PREFIX}${board}` : LABELS_PREFIX.trim().replace(/\s*·$/, '');
 }
 
 export const isLabelsContainerName = (name: string): boolean => name.startsWith('Flow arrow labels');

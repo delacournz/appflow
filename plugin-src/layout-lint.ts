@@ -1,6 +1,6 @@
 import type { JsonObject } from '../shared/protocol';
 import { loadScreens } from './board-ops';
-import { collectBadges, collectScreens, listArrows, readMeta, rectOf, sceneById, type Board } from './flow';
+import { boardScreens, collectBadges, collectScreens, listArrows, readMeta, rectOf, sceneById, type Board } from './flow';
 import { orphanBadges } from './badge-link';
 import { SCREEN_KEY, parseScreenMeta } from './flowmeta';
 import type { Rect } from './route';
@@ -33,9 +33,9 @@ async function arrowIssues(board: Board, titles: TitleText[]): Promise<{ issues:
         const points = await pathOf(a.meta.vectorId);
         if (!points) continue;
         const label = await sceneById(a.meta.labelId);
-        arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null });
+        arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null, from: a.meta.from, to: a.meta.to });
     }
-    return lintArrows(arrows, titles);
+    return lintArrows(arrows, titles, boardScreens(board));
 }
 
 /** The layout part of lint_flow_layout for one board: reads the drawn boxes and arrows (never repaints) and checks them against the board's content. */

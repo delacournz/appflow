@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assignLanes, clearOfLanes, fanIndex, gutterKey, laneOffset, routeArrow, type Pt, type Rect, type Route } from './route';
+import { assignLanes, clearOfLanes, fanIndex, gutterKey, laneOffset, routeArrow, spreadEntries, type Pt, type Rect, type Route } from './route';
 
 const W = 393;
 const H = 852;
@@ -434,5 +434,23 @@ describe('start dot on a trigger', () => {
             expect(d.y).toBe(row.y + 32);
             expect(d.x).toBe(row.x + row.width - 12);
         });
+    });
+});
+
+describe('spreadEntries', () => {
+    const home = screen(1, 0);
+    const from = (col: number, row: number): Rect => ({ ...screen(0, row), x: screen(0, 0).x - col * 100 });
+    test('one arrow keeps the target middle; several enter 24px apart ordered by start height', () => {
+        const one = spreadEntries([{ id: 'a', source: screen(0, 0), target: home, trigger: null }]);
+        expect(one.size).toBe(0);
+        const many = spreadEntries([
+            { id: 'low', source: screen(0, 2), target: home, trigger: null },
+            { id: 'high', source: screen(0, 0), target: home, trigger: null },
+            { id: 'mid', source: from(1, 1), target: home, trigger: null },
+        ]);
+        const mid = home.y + H / 2;
+        expect(many.get('high')).toBe(mid - 24);
+        expect(many.get('mid')).toBe(mid);
+        expect(many.get('low')).toBe(mid + 24);
     });
 });
