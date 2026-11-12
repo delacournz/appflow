@@ -161,6 +161,22 @@ describe('protocol', () => {
         expect(text).toContain('ungroup_screens');
     });
 
+    test('grouped layout: tools and skill describe group-local grids', async () => {
+        const mc = await client();
+        const tools = await listTools();
+        const desc = (n: string) => tools.find((t) => t.name === n)?.description ?? '';
+        expect(desc('reroute_flow')).toContain('grouped');
+        expect(desc('move_screen')).toContain('local to the screen');
+        expect(desc('insert_rows')).toContain('groupId');
+        expect(desc('insert_columns')).toContain('groupId');
+        expect(desc('create_flow_group')).toContain('snapped');
+        expect(desc('describe_board')).toContain('origin');
+        const content = (await mc.readResource({ uri: 'skill://appflow/flow-layout/SKILL.md' })).contents[0];
+        const text = content && 'text' in content ? content.text : '';
+        expect(text).toContain('off-grid');
+        expect(text).toContain('own grid');
+    });
+
     test('sync from code: instructions, skill resource and prompt', async () => {
         const mc = await client();
         expect(mc.getInstructions()).toContain('skill://appflow/sync-from-code/SKILL.md');

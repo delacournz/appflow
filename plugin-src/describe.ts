@@ -37,6 +37,7 @@ async function screensOf(board: Board): Promise<BoardScreen[]> {
             verifiedAt: build.status === 'not-built' ? null : build.verifiedAt,
             hasBadge: !!badge,
             flowGroupId: meta.flowGroupId ?? null,
+            ...(board.meta.spacing === 'grouped' ? { layoutId: meta.flowGroupId ?? 'board' } : {}),
         });
     }
     return out;
@@ -67,7 +68,14 @@ async function groupsOf(board: Board): Promise<BoardGroup[]> {
 
 async function describeOne(board: Board, width: number): Promise<BoardDescription> {
     const [screens, arrows, groups] = await Promise.all([screensOf(board), arrowsOf(board), groupsOf(board)]);
-    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups }, width);
+    const layouts =
+        board.meta.spacing === 'grouped'
+            ? [
+                  { id: 'board', name: 'Board', originX: board.meta.originX, originY: board.meta.originY },
+                  ...(await loadGroups(board)).flatMap((g) => (g.meta.layout ? [{ id: g.id, name: g.meta.name, originX: g.meta.layout.originX, originY: g.meta.layout.originY }] : [])),
+              ]
+            : undefined;
+    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups, ...(layouts ? { layouts } : {}) }, width);
 }
 
 /** Boards that screens and group holders on this page still point at, whose background is gone. */

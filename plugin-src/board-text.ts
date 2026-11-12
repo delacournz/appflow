@@ -1,6 +1,7 @@
 import { cellOfRect, type ArrowMeta, type BoardMeta, type BuildState } from './flowmeta';
 import type { Rect } from './rect';
 import { statusMark } from './screen-status';
+import { BOARD_GRID, cellOfIn, onGrid, type LayoutGrid } from './layout-grid';
 
 /** Pure text renderer for an adopted flow board. No `figma` global. */
 
@@ -20,6 +21,8 @@ export type BoardScreen = {
     hasBadge?: boolean;
     /** The innermost flow group (id of its rect), when any. */
     flowGroupId?: string | null;
+    /** Grouped boards: the layout grid `col`/`row` are local to (a group id, or `board`). */
+    layoutId?: string;
 };
 
 export type ScreenStatusRow = { id: string; name: string; col: number; row: number; route: string | null; status: BuildState; verifiedAt: string | null };
@@ -44,7 +47,11 @@ export type BoardInput = {
     screens: BoardScreen[];
     arrows: BoardArrow[];
     groups?: BoardGroup[];
+    /** Grouped boards: one entry per layout grid (the board grid, then each group's), with its name and origin. */
+    layouts?: { id: string; name: string; originX: number; originY: number }[];
 };
+
+export type LayoutGridView = { id: string; name: string; originX: number; originY: number; cols: number; rows: number; grid: string };
 
 export type BoardDescription = {
     boardId: string;
@@ -52,6 +59,8 @@ export type BoardDescription = {
     cols: number;
     rows: number;
     grid: string;
+    /** Grouped boards: the same grid split per layout. */
+    grids?: LayoutGridView[];
     screens: ScreenStatusRow[];
     arrows: string[];
     groups: GroupRow[];
@@ -125,20 +134,35 @@ function renderGroups(groups: readonly BoardGroup[], screens: readonly BoardScre
 export function renderBoard(input: BoardInput, width = 16): BoardDescription {
     const { screens, arrows, meta } = input;
     const byId = new Map(screens.map((s) => [s.id, s]));
+    const layouts = input.layouts;
+    const layoutOf = (s: BoardScreen): string => s.layoutId ?? BOARD_GRID;
+    const gridOf = (id: string): LayoutGrid | null => {
+        const l = layouts?.find((x) => x.id === id);
+        return l ? { id: l.id, originX: l.originX, originY: l.originY, colWidth: meta.colWidth, rowHeight: meta.rowHeight } : null;
+    };
     const cols = screens.length ? Math.max(...screens.map((s) => s.col)) + 1 : 0;
     const rows = screens.length ? Math.max(...screens.map((s) => s.row)) + 1 : 0;
     const issues: string[] = [];
 
     for (const s of screens) {
-        const actual = cellOfRect(s, meta);
-        if (actual.col !== s.col || actual.row !== s.row) issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+        const grid = layouts ? gridOf(layoutOf(s)) : null;
+        if (layouts && !grid) issues.push(`${s.name}: layout ${layoutOf(s)} has no grid`);
+        else if (grid) {
+            const actual = cellOfIn(grid, s);
+            if (!onGrid(grid, s)) issues.push(`${s.name}: ${Math.round(s.x - (grid.originX + actual.col * grid.colWidth))}px, ${Math.round(s.y - (grid.originY + actual.row * grid.rowHeight))}px off cell ${cell(actual.col, actual.row)} of its grid`);
+            else if (actual.col !== s.col || actual.row !== s.row) issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+        } else {
+            const actual = cellOfRect(s, meta);
+            if (actual.col !== s.col || actual.row !== s.row) issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+        }
         if (s.labelX !== null && Math.abs(s.labelX - s.x) > LABEL_TOLERANCE) issues.push(`${s.name}: label is at x=${s.labelX} but the frame is at x=${s.x}`);
         if (s.hasBadge === false) issues.push(`${s.name}: no build badge (run badge_screens)`);
         if (s.status === 'built' && !s.route) issues.push(`${s.name}: marked built but has no route text`);
     }
 
     const cellKeys = new Map<string, BoardScreen[]>();
-    for (const s of screens) cellKeys.set(`${s.col},${s.row}`, [...(cellKeys.get(`${s.col},${s.row}`) ?? []), s]);
+    const keyOf = (s: BoardScreen) => `${layoutOf(s)}:${s.col},${s.row}`;
+    for (const s of screens) cellKeys.set(keyOf(s), [...(cellKeys.get(keyOf(s)) ?? []), s]);
     for (const group of cellKeys.values()) {
         const first = group[0];
         if (group.length > 1 && first) issues.push(`Cell ${cell(first.col, first.row)} holds ${group.length} screens: ${group.map((g) => g.name).join(', ')}`);
@@ -161,11 +185,18 @@ export function renderBoard(input: BoardInput, width = 16): BoardDescription {
         lines.push(`${point(a.from, from)} --${a.label}--> ${point(a.to, to)} ${tail}`);
         if (!from) issues.push(`Arrow "${a.label}": source ${a.from} is missing`);
         if (!to) issues.push(`Arrow "${a.label}": target ${a.to} is missing`);
-        if (from && to && to.col < from.col) issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
+        if (from && to && (layouts ? to.x < from.x : to.col < from.col)) issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
     }
 
     const g = renderGroups(input.groups ?? [], screens);
     issues.push(...g.issues);
 
-    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, groups: g.rows, groupTree: g.tree, issues };
+    const views: LayoutGridView[] | undefined = layouts?.map((l) => {
+        const own = screens.filter((s) => layoutOf(s) === l.id);
+        const c = own.length ? Math.max(...own.map((s) => s.col)) + 1 : 0;
+        const r = own.length ? Math.max(...own.map((s) => s.row)) + 1 : 0;
+        return { id: l.id, name: l.name, originX: l.originX, originY: l.originY, cols: c, rows: r, grid: renderGrid(own, c, r, width) };
+    });
+    const grid = views ? views.filter((v) => v.cols).map((v) => `${v.name} (origin ${v.originX},${v.originY})\n${v.grid}`).join('\n\n') : renderGrid(screens, cols, rows, width);
+    return { boardId: input.boardId, name: input.name, cols, rows, grid, ...(views ? { grids: views } : {}), screens: statusRows(screens), arrows: lines, groups: g.rows, groupTree: g.tree, issues };
 }
