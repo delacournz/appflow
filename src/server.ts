@@ -67,6 +67,7 @@ const handle = serveStdio(
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 async function reloadTools(): Promise<void> {
     try {
+        expectedBuild = await readExpectedBuild(BUILD_JSON);
         const mod = (await import(`./tools.ts?v=${Date.now()}`)) as { TOOLS: ToolDef[] };
         liveTools = mod.TOOLS;
         for (const server of servers) {
