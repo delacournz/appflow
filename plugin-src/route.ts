@@ -35,8 +35,10 @@ export type RouteInput = {
  * segment leaves the screen.
  * `trunkFrom` is the index of the first point of the part shared with other arrows into the same target (`routeJoin`);
  * labels never sit past it. Absent = nothing is shared.
+ * `lead` is the index of the point where the segment that carries the label starts (default 0): arrows forked off a
+ * shared dot put the label on their own branch, not on the shared stub.
  */
-export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean; edge?: number; bottomEdge?: number; trunkFrom?: number };
+export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean; edge?: number; bottomEdge?: number; trunkFrom?: number; lead?: number };
 export type RouteError = { ok: false; error: string };
 
 export const ENTRY_OFFSET = 340;
@@ -56,6 +58,11 @@ export const BACKWARDS_DROP = 60;
 export const FAN_STEP = 16;
 /** Gap between a source's edge and its nearest fan lane. */
 export const FAN_EDGE = 24;
+/** Vertical distance between the rows of arrows forked off one dot: a label height plus a gap. */
+export const FORK_ROW = 48;
+/** Where the first fork turn sits right of the source edge, and how much further each inner branch turns. */
+export const FORK_X0 = 8;
+export const FORK_STEP = 8;
 
 export type Fan = { index: number; count: number };
 
@@ -295,12 +302,13 @@ export function routeJoin(source: Rect, target: Rect, trigger: Rect | null, trun
 }
 
 /**
- * Where an arrow's label goes: on its first segment, just right of the source screen's right edge (after the dot's stub
+ * Where an arrow's label goes: on its first segment (its `lead` segment, for an arrow forked off a shared dot), just right of the source screen's right edge (after the dot's stub
  * crosses it), centred on the line. A first segment that runs vertically puts the label just past its start.
  */
 export function startLabelAnchor(route: Route, size: { width: number; height: number }): Pt {
-    const a = route.points[0] as Pt;
-    const b = route.points[1] as Pt;
+    const from = route.lead ?? 0;
+    const a = route.points[from] as Pt;
+    const b = route.points[from + 1] as Pt;
     if (a.y === b.y) return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
     if (b.y >= a.y) return { x: a.x, y: Math.max(a.y, route.bottomEdge ?? a.y) + LABEL_GAP + size.height / 2 };
     return { x: a.x, y: a.y - LABEL_GAP - size.height / 2 };

@@ -1237,6 +1237,18 @@ ${logs.join(`
     const placeLabels = labelsId !== null && (raiseArrows || ids.indexOf(labelsId) !== at + 1);
     return { raiseArrows, placeLabels };
   }
+  function labelsInsertIndex(ids, arrowsId) {
+    return ids.indexOf(arrowsId) + 1;
+  }
+  function labelStackIssue(ids, arrowsId, labelsId) {
+    if (labelsId === null)
+      return null;
+    const a = ids.indexOf(arrowsId);
+    const l = ids.indexOf(labelsId);
+    if (a < 0 || l < 0 || l > a)
+      return null;
+    return { kind: "labels-under-lines", arrowsId, labelsId };
+  }
 
   // plugin-src/flowmeta.ts
   var FLOW_NAMESPACE = "flowbridge";
@@ -3205,6 +3217,8 @@ ${logs.join(`
         return `Label of arrow ${i.arrowId} overlaps the label of arrow ${i.otherId}`;
       case "lines-overlap":
         return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
+      case "shared-start":
+        return `Arrow ${i.arrowId} and arrow ${i.otherId} leave the same dot for different targets and share ${i.length}px of their first run; fork them into separate rows`;
       case "line-crosses-title":
         return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
       case "starts-wrong-side":
@@ -3239,6 +3253,15 @@ ${logs.join(`
   }
   var segHitsRect = (s, r) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
   var SIDE_TOLERANCE = 2;
+  var SHARED_START_MAX = 48;
+  function sharedStartLength(a, b) {
+    const [a0, a1, b0, b1] = [a.points[0], a.points[1], b.points[0], b.points[1]];
+    if (!a0 || !a1 || !b0 || !b1 || a0.x !== b0.x || a0.y !== b0.y || a.to !== undefined && a.to === b.to)
+      return 0;
+    if (a1.y !== a0.y || b1.y !== b0.y)
+      return 0;
+    return Math.max(0, Math.min(Math.max(a0.x, a1.x), Math.max(b0.x, b1.x)) - Math.max(Math.min(a0.x, a1.x), Math.min(b0.x, b1.x)));
+  }
   function edgeSide(p, r, sides) {
     const inX = p.x >= r.x - SIDE_TOLERANCE && p.x <= r.x + r.width + SIDE_TOLERANCE;
     const inY = p.y >= r.y - SIDE_TOLERANCE && p.y <= r.y + r.height + SIDE_TOLERANCE;
@@ -3298,6 +3321,9 @@ ${logs.join(`
         }
         if (shared > LINES_OVERLAP_MIN)
           raw.push({ kind: "lines-overlap", arrowId: a.id, otherId: b.id, length: Math.round(shared) });
+        const together = sharedStartLength(a, b);
+        if (together > SHARED_START_MAX)
+          raw.push({ kind: "shared-start", arrowId: a.id, otherId: b.id, length: Math.round(together) });
       }
       for (const t of titles) {
         if (segs[i].some((s) => segHitsRect(s, t.text)))
@@ -3677,6 +3703,14 @@ ${logs.join(`
       message: `Badge ${badges.find((b) => b.id === id)?.name ?? id} belongs to no screen. Run badge_screens to remove it.`
     }));
   }
+  function labelStackOf(board) {
+    const parent = board.arrows.parent;
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    if (!parent || !("children" in parent) || !labels)
+      return null;
+    const issue = labelStackIssue(parent.children.map((k) => k.id), board.arrows.id, labels.id);
+    return issue ? { ...issue, message: "Arrow labels sit under their lines. Run reroute_flow to put the labels layer back on top." } : null;
+  }
   async function boardLayoutLint(board) {
     const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
     const titles = [];
@@ -3692,6 +3726,11 @@ ${logs.join(`
     arrowPart.issues.push(...proto.issues);
     for (const [k, v] of Object.entries(proto.counts))
       arrowPart.counts[k] = (arrowPart.counts[k] ?? 0) + v;
+    const stack = labelStackOf(board);
+    if (stack) {
+      arrowPart.issues.push(stack);
+      arrowPart.counts["labels-under-lines"] = 1;
+    }
     const orphans = orphanBadgeIssues(board);
     if (orphans.length) {
       arrowPart.issues.push(...orphans);
@@ -3870,6 +3909,9 @@ ${logs.join(`
   var BACKWARDS_DROP = 60;
   var FAN_STEP = 16;
   var FAN_EDGE = 24;
+  var FORK_ROW = 48;
+  var FORK_X0 = 8;
+  var FORK_STEP = 8;
   function fanIndex(items) {
     const groups = new Map;
     for (const it of items)
@@ -4061,8 +4103,9 @@ ${logs.join(`
     return { ...r, trunkFrom: at >= 0 ? at : r.points.length - 1, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
   }
   function startLabelAnchor(route, size) {
-    const a = route.points[0];
-    const b = route.points[1];
+    const from = route.lead ?? 0;
+    const a = route.points[from];
+    const b = route.points[from + 1];
     if (a.y === b.y)
       return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
     if (b.y >= a.y)
@@ -4198,6 +4241,7 @@ ${logs.join(`
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
     separateLines(final, builders, titles, edges);
+    forkStarts(final, items);
     return items.map((it, i) => {
       const r = final[i];
       if (!r.ok)
@@ -4206,6 +4250,59 @@ ${logs.join(`
       return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width, bottomEdge: it.ends.source.y + it.ends.source.height }, error: null, ...warning ? { warning } : {} };
     });
   }
+  function forkStarts(routes, items) {
+    const groups = new Map;
+    routes.forEach((r, i) => {
+      if (!r.ok)
+        return;
+      const p0 = r.points[0];
+      const key = `${p0.x}:${p0.y}`;
+      groups.set(key, [...groups.get(key) ?? [], i]);
+    });
+    for (const idx of groups.values()) {
+      const members = idx.filter((i) => {
+        const r = routes[i];
+        const t = items[i].ends.target;
+        return r.ok && idx.some((j) => j !== i && items[j].ends.target !== t);
+      });
+      if (members.length < 2)
+        continue;
+      const forkable = (i) => {
+        const r = routes[i];
+        if (!r.ok || r.points.length < 4)
+          return null;
+        const [p0, p1, p2] = r.points;
+        if (p1.y !== p0.y || p1.x <= p0.x || p2.x !== p1.x || p2.y === p1.y)
+          return null;
+        return { dir: p2.y > p1.y ? 1 : -1, laneX: p1.x };
+      };
+      const straight = members.some((i) => routes[i].ok && routes[i].points.length === 2);
+      const sides = { 1: [], "-1": [] };
+      for (const i of members) {
+        const f = forkable(i);
+        if (f)
+          sides[f.dir === 1 ? 1 : "-1"].push(i);
+      }
+      const both = sides[1].length > 0 && sides["-1"].length > 0;
+      for (const dir of [1, -1]) {
+        const list = [...sides[dir === 1 ? 1 : "-1"]].sort((a, b) => (forkable(b)?.laneX ?? 0) - (forkable(a)?.laneX ?? 0));
+        list.forEach((i, rank) => {
+          const r = routes[i];
+          const [p0, p1, p2] = r.points;
+          const row = straight ? FORK_ROW * (rank + 1) : both ? FORK_ROW / 2 + FORK_ROW * rank : FORK_ROW * rank;
+          if (row === 0)
+            return;
+          const y = p0.y + dir * row;
+          const fx = right3(items[i].ends.source) + FORK_X0 + FORK_STEP * (list.length - 1 - rank);
+          if ((p2.y - y) * dir < EDGE_MARGIN || p1.x - fx < EDGE_MARGIN)
+            return;
+          const points = [p0, { x: fx, y: p0.y }, { x: fx, y }, { x: p1.x, y }, ...r.points.slice(2)];
+          routes[i] = { ...r, points, labelAnchor: { x: (fx + p1.x) / 2, y }, lead: 2, ...r.trunkFrom !== undefined ? { trunkFrom: r.trunkFrom + 2 } : {} };
+        });
+      }
+    }
+  }
+  var right3 = (r) => r.x + r.width;
   var overlap1d = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
   function verticalLeg(r) {
     if (!r.ok || r.kind !== "below" && r.kind !== "above")
@@ -4856,11 +4953,8 @@ ${logs.join(`
     }, board.arrows.id, labels?.id ?? null);
     if (need.raiseArrows)
       parent.insertChild(parent.children.length - 1, board.arrows);
-    if (need.placeLabels && labels) {
-      const a = parent.children.indexOf(board.arrows);
-      const l = parent.children.indexOf(labels);
-      parent.insertChild(l > a ? a + 1 : a, labels);
-    }
+    if (need.placeLabels && labels)
+      parent.insertChild(labelsInsertIndex(parent.children.map((k) => k.id), board.arrows.id), labels);
   }
   function writeArrowMeta(group, meta) {
     group.setSharedPluginData(FLOW_NAMESPACE, ARROW_KEY, JSON.stringify(meta));
@@ -8178,7 +8272,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "13cb951f", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "f107757e", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8186,7 +8280,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"13cb951f"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"f107757e"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

@@ -50,6 +50,17 @@ describe('lintArrows', () => {
         expect(r.counts['label-overlaps-label']).toBeUndefined();
     });
 
+    test('shared-start: two arrows from one dot to different targets that share a long first run are flagged; a short fork stub or the same target is not', () => {
+        const start = { x: 400, y: 100 };
+        const long = lintArrows([{ id: 'a', points: [start, { x: 700, y: 100 }, { x: 700, y: 0 }, { x: 900, y: 0 }], label: null, from: 's', to: 't1' }, { id: 'b', points: [start, { x: 760, y: 100 }, { x: 760, y: 300 }, { x: 900, y: 300 }], label: null, from: 's', to: 't2' }], []);
+        expect(long.counts['shared-start']).toBe(1);
+        expect(long.issues.find((i) => i.kind === 'shared-start')?.message).toContain('300px');
+        const forked = lintArrows([{ id: 'a', points: [start, { x: 408, y: 100 }, { x: 408, y: 76 }, { x: 700, y: 76 }, { x: 700, y: 0 }], label: null, from: 's', to: 't1' }, { id: 'b', points: [start, { x: 416, y: 100 }, { x: 416, y: 124 }, { x: 760, y: 124 }, { x: 760, y: 300 }], label: null, from: 's', to: 't2' }], []);
+        expect(forked.counts['shared-start']).toBeUndefined();
+        const same = lintArrows([{ id: 'a', points: [start, { x: 700, y: 100 }, { x: 700, y: 0 }, { x: 900, y: 0 }], label: null, from: 's', to: 't1' }, { id: 'b', points: [start, { x: 700, y: 100 }, { x: 700, y: 0 }, { x: 900, y: 0 }], label: null, from: 's', to: 't1' }], []);
+        expect(same.counts['shared-start']).toBeUndefined();
+    });
+
     test('collinear segments sharing more than 40px are lines-overlap; 40px or less, offset lanes and crossings are not', () => {
         const base = arrow('a', [{ x: 100, y: 0 }, { x: 100, y: 300 }]);
         expect(lintArrows([base, arrow('b', [{ x: 100, y: 200 }, { x: 100, y: 400 }])], []).counts['lines-overlap']).toBe(1);
@@ -89,15 +100,18 @@ describe('lintArrows line-crosses-screen', () => {
 
 describe('lintArrows merged arrows', () => {
     const mk = (id: string, to: string, pts: [number, number][]) => ({ id, to, label: null, points: pts.map(([x, y]) => ({ x, y })) });
-    test('arrows into one target may share trunk and final run; different targets may not; a shared dot stub is ignored', () => {
+    test('arrows into one target may share trunk and final run; different targets may not; a short shared dot stub is ignored, a long one is shared-start', () => {
         const a = mk('a', 'T', [[0, 0], [900, 0], [900, 500], [1000, 500]]);
         const b = mk('b', 'T', [[0, 1000], [900, 1000], [900, 500], [1000, 500]]);
         expect(lintArrows([a, b], []).issues).toEqual([]);
         const c = mk('c', 'U', [[0, 1000], [900, 1000], [900, 500], [1000, 500]]);
         expect(lintArrows([a, c], []).counts['lines-overlap']).toBe(1);
-        const d = mk('d', 'X', [[0, 0], [300, 0], [300, 800]]);
-        const e = mk('e', 'Y', [[0, 0], [300, 0], [300, -800]]);
+        const d = mk('d', 'X', [[0, 0], [30, 0], [30, 800]]);
+        const e = mk('e', 'Y', [[0, 0], [30, 0], [30, -800]]);
         expect(lintArrows([d, e], []).issues).toEqual([]);
+        const f = mk('f', 'X', [[0, 0], [300, 0], [300, 800]]);
+        const g = mk('g', 'Y', [[0, 0], [300, 0], [300, -800]]);
+        expect(lintArrows([f, g], []).counts['shared-start']).toBe(1);
     });
 });
 

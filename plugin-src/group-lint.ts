@@ -9,6 +9,7 @@ import { groupConflicts, validateNesting, type ConflictContent, type ConflictGro
 export type ArrowLayoutIssue =
     | { kind: 'label-overlaps-label'; arrowId: string; otherId: string }
     | { kind: 'lines-overlap'; arrowId: string; otherId: string; length: number }
+    | { kind: 'shared-start'; arrowId: string; otherId: string; length: number }
     | { kind: 'line-crosses-title'; arrowId: string; groupId: string }
     | { kind: 'line-crosses-screen'; arrowId: string; screenId: string }
     | { kind: 'starts-wrong-side'; arrowId: string; screenId: string; side: 'left' | 'top' }
@@ -43,6 +44,8 @@ function describe(i: GroupIssue | NestingIssue | ArrowLayoutIssue): string {
             return `Label of arrow ${i.arrowId} overlaps the label of arrow ${i.otherId}`;
         case 'lines-overlap':
             return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
+        case 'shared-start':
+            return `Arrow ${i.arrowId} and arrow ${i.otherId} leave the same dot for different targets and share ${i.length}px of their first run; fork them into separate rows`;
         case 'line-crosses-title':
             return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
         case 'starts-wrong-side':
@@ -91,6 +94,17 @@ const segHitsRect = (s: Seg, r: Rect): boolean =>
     s.axis === 'v' ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
 
 const SIDE_TOLERANCE = 2;
+
+/** The longest first run two arrows from one dot to different targets may share: a fork stub, not a common line. */
+export const SHARED_START_MAX = 48;
+
+/** How far the first horizontal runs of two arrows that start on the same dot coincide, or 0 when they do not start together or share a target. */
+function sharedStartLength(a: ArrowShape, b: ArrowShape): number {
+    const [a0, a1, b0, b1] = [a.points[0], a.points[1], b.points[0], b.points[1]];
+    if (!a0 || !a1 || !b0 || !b1 || a0.x !== b0.x || a0.y !== b0.y || (a.to !== undefined && a.to === b.to)) return 0;
+    if (a1.y !== a0.y || b1.y !== b0.y) return 0;
+    return Math.max(0, Math.min(Math.max(a0.x, a1.x), Math.max(b0.x, b1.x)) - Math.max(Math.min(a0.x, a1.x), Math.min(b0.x, b1.x)));
+}
 
 /** Which of `sides` of `r` the point lies on (within `SIDE_TOLERANCE`, inside the edge's span), or null. */
 function edgeSide(p: Pt, r: Rect, sides: readonly ('left' | 'top' | 'right' | 'bottom')[]): 'left' | 'top' | 'right' | 'bottom' | null {
@@ -155,6 +169,8 @@ export function lintArrows(arrows: readonly ArrowShape[], titles: readonly Title
                 }
             }
             if (shared > LINES_OVERLAP_MIN) raw.push({ kind: 'lines-overlap', arrowId: a.id, otherId: b.id, length: Math.round(shared) });
+            const together = sharedStartLength(a, b);
+            if (together > SHARED_START_MAX) raw.push({ kind: 'shared-start', arrowId: a.id, otherId: b.id, length: Math.round(together) });
         }
         for (const t of titles) {
             if ((segs[i] as Seg[]).some((s) => segHitsRect(s, t.text))) raw.push({ kind: 'line-crosses-title', arrowId: a.id, groupId: t.id });
