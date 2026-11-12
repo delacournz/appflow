@@ -2704,13 +2704,13 @@ ${logs.join(`
     let bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
     let more = { col: 0, row: 0 };
     let previous = null;
+    let frozen = false;
     while (fit.active && passes < MAX_SETTLE) {
-      const short = hasDeficits(fit.deficits);
+      const short = hasDeficits(fit.deficits) && !frozen;
       if (short && uniform) {
         const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
         previous = fit.deficits.uniform;
-        if (step.stop && step.more.col === more.col && step.more.row === more.row)
-          break;
+        frozen = step.stop;
         more = step.more;
       } else if (short) {
         bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
@@ -2720,11 +2720,13 @@ ${logs.join(`
       passes++;
       const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
       fit = again;
-      if (settled && !hasDeficits(again.deficits))
+      if (settled && (frozen || !hasDeficits(again.deficits)))
         break;
       await resizeBoard(board, screens, false, fit.extent);
       last = await rerouteBoards([board]);
     }
+    if (fit.active)
+      await resizeBoard(board, screens, true, fit.extent);
     return { fit, reroute: last, passes };
   }
   async function syncBoard(board, screens, opts = {}) {
@@ -7335,7 +7337,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "8d42554b", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a813eb3b", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7343,7 +7345,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"8d42554b"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a813eb3b"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
