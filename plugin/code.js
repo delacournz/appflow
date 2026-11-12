@@ -1321,7 +1321,7 @@ ${logs.join(`
     }
     if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId))
       delete meta.labelsGroupId;
-    if (o.spacing !== undefined && o.spacing !== "uniform" && o.spacing !== "banded")
+    if (o.spacing !== undefined && o.spacing !== "uniform" && o.spacing !== "banded" && o.spacing !== "grouped")
       delete meta.spacing;
     for (const k of ["baseColWidth", "baseRowHeight"])
       if (o[k] !== undefined && !(isNum(o[k]) && o[k] > 0))
@@ -1348,6 +1348,8 @@ ${logs.join(`
     if (o.badgeId !== undefined && !strOrNull(o.badgeId))
       return null;
     if (o.flowGroupId !== undefined && !strOrNull(o.flowGroupId))
+      return null;
+    if (o.layoutId !== undefined && !isStr(o.layoutId))
       return null;
     if (o.build !== undefined && !parseBuildStatus(o.build))
       return null;
@@ -1388,6 +1390,7 @@ ${logs.join(`
     if (s.padding !== undefined && (!isNum(s.padding) || s.padding <= 0))
       return null;
     const legacy = s.padding === undefined;
+    const layout = isObj(o.layout) && isNum(o.layout.originX) && isNum(o.layout.originY) ? { originX: o.layout.originX, originY: o.layout.originY } : null;
     return {
       boardId: o.boardId,
       name: o.name,
@@ -1395,6 +1398,7 @@ ${logs.join(`
       rectId: o.rectId,
       titleId: o.titleId,
       ...o.parentId ? { parentId: o.parentId } : {},
+      ...layout ? { layout } : {},
       style: {
         color: s.color,
         strokeWeight: legacy && s.strokeWeight === LEGACY_STROKE ? STYLE_DEFAULTS.strokeWeight : s.strokeWeight,
@@ -8334,7 +8338,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "15095910", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a681c203", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8342,7 +8346,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"15095910"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a681c203"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
