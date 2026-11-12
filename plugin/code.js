@@ -1092,7 +1092,7 @@ ${logs.join(`
   }
 
   // plugin-src/board-missing.ts
-  var boardMissingMessage = (boardId) => `Board background ${boardId} is missing (probably deleted). Restore it with Cmd+Z or File → Show version history; recreating it loses the stored grid and gap data.`;
+  var boardMissingMessage = (boardId) => `Board background ${boardId} is missing (probably deleted). Run repair_board to rebuild it from the screens, arrows and groups that still point at it (or restore it with Cmd+Z / File → Show version history).`;
   function findOrphans(screenBoardIds, groupBoardIds, existing) {
     const count = (ids) => ids.reduce((m, id) => m.set(id, (m.get(id) ?? 0) + 1), new Map);
     const [screens, groups] = [count(screenBoardIds), count(groupBoardIds)];
@@ -4985,6 +4985,340 @@ ${logs.join(`
     return ok({ dryRun, removeOld, boards: results });
   };
 
+  // plugin-src/board-repair.ts
+  var DEFAULT_COL = 700;
+  var DEFAULT_ROW = 1112;
+  var modeOf2 = (xs) => {
+    const counts = new Map;
+    for (const x of xs)
+      counts.set(Math.round(x), (counts.get(Math.round(x)) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+  };
+  var stepOf = (screens, track, pos) => {
+    let best = null;
+    for (const a of screens)
+      for (const b of screens) {
+        const dt = track(b) - track(a);
+        if (dt <= 0)
+          continue;
+        const step = (pos(b) - pos(a)) / dt;
+        if (step > 0 && (best === null || step < best))
+          best = step;
+      }
+    return best === null ? null : Math.round(best);
+  };
+  function inferRepairGrid(screens) {
+    const screenW = modeOf2(screens.map((s) => s.width));
+    const screenH = modeOf2(screens.map((s) => s.height));
+    const colWidth = Math.max(screenW, stepOf(screens, (s) => s.col, (s) => s.x) ?? DEFAULT_COL);
+    const rowHeight = Math.max(screenH, stepOf(screens, (s) => s.row, (s) => s.y) ?? DEFAULT_ROW);
+    const first = (track) => [...screens].sort((a, b) => track(a) - track(b))[0];
+    const left = first((s) => s.col);
+    const top = first((s) => s.row);
+    return { originX: Math.round(left.x - left.col * colWidth), originY: Math.round(top.y - top.row * rowHeight), colWidth, rowHeight, screenW, screenH };
+  }
+
+  // plugin-src/gridtools.ts
+  var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
+  var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
+  async function finish(board, screens, stale, moves, shrink, extras) {
+    if (extras)
+      applyExtras(board, extras);
+    const moved = await applyMoves(board, screens, moves);
+    const fit = await refitGroups(board, screens);
+    const size = await resizeBoard(board, screens, shrink, fit.extent);
+    const reroute = await rerouteBoards([board]);
+    return ok({ boardId: board.node.id, moved, stale: stale.map((s) => ({ ...s, fixedTo: { ...s.fixedTo } })), board: size, reroute, ...fit.active ? { groups: fit.summary } : {} });
+  }
+  var wholeNumber = (v, fallback, min) => {
+    const n = v ?? fallback;
+    return Number.isInteger(n) && n >= min ? n : null;
+  };
+  var moveScreen = async (args) => {
+    const id = str(args, "id");
+    const col = num(args, "col");
+    const row = num(args, "row");
+    if (!id || col === undefined || row === undefined)
+      return fail("move_screen needs id, col and row.");
+    const node = await sceneById(id);
+    if (!node)
+      return fail(`No node ${id}.`);
+    const stored = readMeta(node, SCREEN_KEY, parseScreenMeta);
+    if (!stored)
+      return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
+    const board = await loadBoard(stored.boardId);
+    const { screens, stale } = await loadScreens(board);
+    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, "swap", false));
+    if (!plan.ok)
+      return fail(plan.error);
+    const groupArg = str(args, "group");
+    if (groupArg !== undefined) {
+      const target = await checkGroupArg(board.node.id, groupArg);
+      if (!target.ok)
+        return fail(target.error);
+      const set = await setScreenGroup(board, screens, node.id, target.groupId);
+      if (!set.ok)
+        return fail(set.error);
+    }
+    return finish(board, screens, stale, plan.moves, false);
+  };
+  async function insertAlong(args, axis) {
+    const tool = axis === "col" ? "insert_columns" : "insert_rows";
+    const boardId = str(args, "boardId");
+    const after = num(args, "after");
+    if (!boardId || after === undefined)
+      return fail(`${tool} needs boardId and after.`);
+    const count = wholeNumber(num(args, "count"), 1, 1);
+    if (count === null || count > 50)
+      return fail("count must be a whole number from 1 to 50.");
+    if (!Number.isInteger(after) || after < -1)
+      return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+  }
+  var insertColumns = (args) => insertAlong(args, "col");
+  var insertRows = (args) => insertAlong(args, "row");
+  var compactBoard = async (args) => {
+    const boardId = str(args, "boardId");
+    if (!boardId)
+      return fail("compact_board needs boardId.");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
+  };
+  async function fontFor2(text) {
+    const current = text.fontName;
+    const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
+    for (const font of candidates) {
+      try {
+        await figma.loadFontAsync(font);
+        return font;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("Could not load a font for the board heading.");
+  }
+  async function findStyleBoard() {
+    for (const n of figma.currentPage.children) {
+      if (!readMeta(n, BOARD_KEY, parseBoardMeta))
+        continue;
+      try {
+        return await loadBoard(n.id);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+  var createBoard = async (args) => {
+    const name = str(args, "name");
+    if (!name)
+      return fail("create_board needs name.");
+    const colWidth = num(args, "colWidth") ?? 700;
+    const rowHeight = num(args, "rowHeight") ?? 1112;
+    const screenW = num(args, "screenW") ?? 393;
+    const screenH = num(args, "screenH") ?? 852;
+    const cols = wholeNumber(num(args, "cols"), 4, 1);
+    const rows = wholeNumber(num(args, "rows"), 2, 1);
+    if (cols === null || rows === null || cols > 50 || rows > 50)
+      return fail("cols and rows must be whole numbers from 1 to 50.");
+    if (![colWidth, rowHeight, screenW, screenH].every((n) => n > 0))
+      return fail("colWidth, rowHeight, screenW and screenH must be positive.");
+    if (colWidth < screenW || rowHeight < screenH)
+      return fail("colWidth and rowHeight must be at least the screen size, or the screens overlap.");
+    const page = figma.currentPage;
+    const styleBoard = await findStyleBoard();
+    const margin = styleBoard?.meta.margin ?? 80;
+    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
+    const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
+    const rects = page.children.map(rectOf);
+    const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
+    const y = num(args, "y") ?? (rects.length ? Math.min(...rects.map((r) => r.y)) : 0);
+    const grid = { originX: x + margin, originY: y + margin + labelOffset, colWidth, rowHeight, screenW, screenH, labelOffset, margin };
+    const bounds = boardBounds(grid, [{ col: cols - 1, row: rows - 1 }]);
+    const styleBg = styleBoard?.node;
+    let bg;
+    if (styleBg?.type === "RECTANGLE") {
+      bg = styleBg.clone();
+      bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
+    } else {
+      bg = figma.createRectangle();
+      const fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
+      bg.fills = fills;
+      if (styleBg && "cornerRadius" in styleBg && typeof styleBg.cornerRadius === "number")
+        bg.cornerRadius = styleBg.cornerRadius;
+    }
+    page.appendChild(bg);
+    bg.name = `Board background · ${name}`;
+    bg.x = bounds.x;
+    bg.y = bounds.y;
+    bg.resize(bounds.width, bounds.height);
+    const headingNode = styleBoard?.meta.headingId ? await sceneById(styleBoard.meta.headingId) : null;
+    const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
+    const heading = headingStyle ? headingStyle.clone() : figma.createText();
+    page.appendChild(heading);
+    await figma.loadFontAsync(await fontFor2(heading));
+    heading.fontName = await fontFor2(heading);
+    if (!headingStyle) {
+      heading.fontSize = 48;
+      heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
+    }
+    heading.characters = `Board · ${name}`;
+    heading.name = `Board · ${name}`;
+    heading.x = bounds.x;
+    heading.y = bounds.y - heading.height - 24;
+    const arrows = figma.createFrame();
+    page.appendChild(arrows);
+    arrows.name = `Flow arrows · ${name}`;
+    arrows.fills = [];
+    arrows.clipsContent = false;
+    arrows.resize(1, 1);
+    arrows.x = bounds.x;
+    arrows.y = bounds.y;
+    const meta = { v: 1, kind: "board", ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
+    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    bg.locked = true;
+    return ok({
+      boardId: bg.id,
+      headingId: heading.id,
+      arrowsGroupId: arrows.id,
+      bounds,
+      grid: { originX: grid.originX, originY: grid.originY, colWidth, rowHeight, screenW, screenH, cols, rows },
+      styledFrom: styleBoard ? styleBoard.node.id : null
+    });
+  };
+
+  // plugin-src/board-repair-handler.ts
+  var norm3 = (id) => id.replace("-", ":");
+  function arrowGroupsIn(container, boardId, depth = 0) {
+    const out = [];
+    for (const c of container.children) {
+      if (readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId === boardId)
+        out.push(c);
+      else if ("children" in c && depth < 2)
+        out.push(...arrowGroupsIn(c, boardId, depth + 1));
+    }
+    return out;
+  }
+  function findOrphanParts(boardId) {
+    const page = figma.currentPage;
+    const screens = collectScreens(page.children).map((s) => s.frame).filter((f) => readMeta(f, SCREEN_KEY, parseScreenMeta)?.boardId === boardId);
+    const holder = page.children.find((c) => c.type === "FRAME" && c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) === boardId) ?? null;
+    const groupRects = holder ? holder.children.filter((c) => readMeta(c, GROUP_KEY, parseGroupMeta)?.boardId === boardId) : [];
+    let arrowsContainer = null;
+    let arrowGroups = [];
+    for (const c of page.children) {
+      if (!("children" in c) || !c.name.startsWith("Flow arrows"))
+        continue;
+      const found = arrowGroupsIn(c, boardId);
+      if (found.length > arrowGroups.length)
+        [arrowsContainer, arrowGroups] = [c, found];
+    }
+    return { screens, holder, groupRects, arrowGroups, arrowsContainer };
+  }
+  async function missingBoardIds() {
+    const ids = collectScreens(figma.currentPage.children).flatMap((s) => {
+      const m = readMeta(s.frame, SCREEN_KEY, parseScreenMeta);
+      return m ? [m.boardId] : [];
+    });
+    const existing = new Set;
+    for (const id of new Set(ids))
+      if (await sceneById(id))
+        existing.add(id);
+    return findOrphans(ids, [], existing).map((o) => o.boardId);
+  }
+  function rewrite(node, key, parse, boardId) {
+    const meta = readMeta(node, key, parse);
+    if (meta)
+      node.setSharedPluginData(FLOW_NAMESPACE, key, JSON.stringify({ ...meta, boardId }));
+  }
+  var repairBoard = async (args) => {
+    const asked = str(args, "boardId");
+    const dryRun = bool(args, "dryRun", false);
+    const missing = await missingBoardIds();
+    const oldId = asked ? norm3(asked) : missing.length === 1 ? missing[0] : null;
+    if (!oldId)
+      return fail(missing.length ? `Several boards are missing (${missing.join(", ")}). Pass boardId.` : "No board on this page is missing its background.");
+    if (await sceneById(oldId))
+      return fail(`Board ${oldId} still exists; nothing to repair.`);
+    const parts = findOrphanParts(oldId);
+    if (!parts.screens.length)
+      return fail(`No screens on this page point at board ${oldId}.`);
+    if (!parts.arrowsContainer)
+      return fail(`No "Flow arrows" container holds arrows of board ${oldId}.`);
+    const backupRaw = parts.holder?.getSharedPluginData(FLOW_NAMESPACE, "board-backup") ?? "";
+    const backup = backupRaw ? JSON.parse(backupRaw) : null;
+    const backupMeta = backup?.meta ? parseBoardMeta(JSON.stringify(backup.meta)) : null;
+    const grid = inferRepairGrid(parts.screens.flatMap((f) => {
+      const m = readMeta(f, SCREEN_KEY, parseScreenMeta);
+      const r = rectOf(f);
+      return m ? [{ col: m.col, row: m.row, x: r.x, y: r.y, width: f.width, height: f.height }] : [];
+    }));
+    const style = await findStyleBoard();
+    const meta = backupMeta ? { ...backupMeta, arrowsGroupId: parts.arrowsContainer.id } : {
+      v: 1,
+      kind: "board",
+      ...grid,
+      spacing: "uniform",
+      baseColWidth: grid.colWidth,
+      baseRowHeight: grid.rowHeight,
+      labelOffset: style?.meta.labelOffset ?? 80,
+      margin: style?.meta.margin ?? 80,
+      headingId: null,
+      arrowsGroupId: parts.arrowsContainer.id,
+      arrowStyle: style?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE
+    };
+    const name = backup?.name ?? (parts.holder ? `Board background · ${parts.holder.name.replace(/^Flow groups\s*·\s*/, "")}` : "Board background · repaired");
+    const summary = {
+      missingBoardId: oldId,
+      name,
+      fromBackup: !!backupMeta,
+      grid: { originX: meta.originX, originY: meta.originY, colWidth: meta.colWidth, rowHeight: meta.rowHeight, screenW: meta.screenW, screenH: meta.screenH },
+      screens: parts.screens.length,
+      arrows: parts.arrowGroups.length,
+      groups: parts.groupRects.length,
+      holder: parts.holder?.id ?? null,
+      arrowsContainer: parts.arrowsContainer.id
+    };
+    if (dryRun)
+      return ok({ dryRun, ...summary });
+    const page = figma.currentPage;
+    const bg = figma.createRectangle();
+    const styleBg = style?.node;
+    bg.fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
+    const lowest = Math.min(...[...parts.screens, parts.arrowsContainer, ...parts.holder ? [parts.holder] : []].map((n) => {
+      let top = n;
+      while (top.parent && top.parent.type !== "PAGE")
+        top = top.parent;
+      return page.children.indexOf(top);
+    }).filter((i) => i >= 0));
+    page.insertChild(Number.isFinite(lowest) ? lowest : 0, bg);
+    bg.name = name;
+    const cells = parts.screens.flatMap((f) => {
+      const m = readMeta(f, SCREEN_KEY, parseScreenMeta);
+      return m ? [{ col: m.col, row: m.row }] : [];
+    });
+    const b = boardBounds(meta, cells);
+    bg.x = b.x;
+    bg.y = b.y;
+    bg.resize(b.width, b.height);
+    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    bg.locked = true;
+    for (const f of parts.screens)
+      rewrite(f, SCREEN_KEY, parseScreenMeta, bg.id);
+    for (const a of parts.arrowGroups)
+      rewrite(a, ARROW_KEY, parseArrowMeta, bg.id);
+    for (const g of parts.groupRects)
+      rewrite(g, GROUP_KEY, parseGroupMeta, bg.id);
+    if (parts.holder)
+      parts.holder.setSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY, bg.id);
+    const board = { node: bg, meta, arrows: parts.arrowsContainer };
+    const settled = await rerouteBoards([board]);
+    return ok({ boardId: bg.id, ...summary, settled });
+  };
+
   // plugin-src/util.ts
   var arbitrary = (value) => value.replace(/"/g, "'").replace(/,\s+/g, ",").replace(/\s+/g, "_");
   var NAMED = {
@@ -5637,9 +5971,9 @@ ${body}
   };
 
   // plugin-src/duplicate.ts
-  var norm3 = (id) => id.replace("-", ":");
+  var norm4 = (id) => id.replace("-", ":");
   async function sceneById2(id) {
-    const n = await figma.getNodeByIdAsync(norm3(id));
+    const n = await figma.getNodeByIdAsync(norm4(id));
     return n && "visible" in n && !n.removed ? n : null;
   }
   function rectOf2(n) {
@@ -5696,7 +6030,7 @@ ${body}
     return copy;
   }
   async function componentFor(id) {
-    const n = await figma.getNodeByIdAsync(norm3(id));
+    const n = await figma.getNodeByIdAsync(norm4(id));
     if (!n)
       throw new Error(`No node ${id}.`);
     if (n.type === "COMPONENT")
@@ -6459,7 +6793,7 @@ ${body}
         return null;
     }
   }
-  async function fontFor2(family, style, s) {
+  async function fontFor3(family, style, s) {
     s.fonts ??= await figma.listAvailableFontsAsync();
     if (!fontAvailable(s.fonts, family, style))
       throw new Error(`font ${family} ${style} is not available in Figma`);
@@ -6468,7 +6802,7 @@ ${body}
     return font;
   }
   async function writeStyle(style, spec, s) {
-    style.fontName = await fontFor2(spec.fontFamily, spec.fontStyle, s);
+    style.fontName = await fontFor3(spec.fontFamily, spec.fontStyle, s);
     if (spec.fontSize !== undefined)
       style.fontSize = spec.fontSize;
     if (spec.lineHeight)
@@ -6916,178 +7250,6 @@ ${body}
     });
   };
 
-  // plugin-src/gridtools.ts
-  var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
-  var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
-  async function finish(board, screens, stale, moves, shrink, extras) {
-    if (extras)
-      applyExtras(board, extras);
-    const moved = await applyMoves(board, screens, moves);
-    const fit = await refitGroups(board, screens);
-    const size = await resizeBoard(board, screens, shrink, fit.extent);
-    const reroute = await rerouteBoards([board]);
-    return ok({ boardId: board.node.id, moved, stale: stale.map((s) => ({ ...s, fixedTo: { ...s.fixedTo } })), board: size, reroute, ...fit.active ? { groups: fit.summary } : {} });
-  }
-  var wholeNumber = (v, fallback, min) => {
-    const n = v ?? fallback;
-    return Number.isInteger(n) && n >= min ? n : null;
-  };
-  var moveScreen = async (args) => {
-    const id = str(args, "id");
-    const col = num(args, "col");
-    const row = num(args, "row");
-    if (!id || col === undefined || row === undefined)
-      return fail("move_screen needs id, col and row.");
-    const node = await sceneById(id);
-    if (!node)
-      return fail(`No node ${id}.`);
-    const stored = readMeta(node, SCREEN_KEY, parseScreenMeta);
-    if (!stored)
-      return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
-    const board = await loadBoard(stored.boardId);
-    const { screens, stale } = await loadScreens(board);
-    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, "swap", false));
-    if (!plan.ok)
-      return fail(plan.error);
-    const groupArg = str(args, "group");
-    if (groupArg !== undefined) {
-      const target = await checkGroupArg(board.node.id, groupArg);
-      if (!target.ok)
-        return fail(target.error);
-      const set = await setScreenGroup(board, screens, node.id, target.groupId);
-      if (!set.ok)
-        return fail(set.error);
-    }
-    return finish(board, screens, stale, plan.moves, false);
-  };
-  async function insertAlong(args, axis) {
-    const tool = axis === "col" ? "insert_columns" : "insert_rows";
-    const boardId = str(args, "boardId");
-    const after = num(args, "after");
-    if (!boardId || after === undefined)
-      return fail(`${tool} needs boardId and after.`);
-    const count = wholeNumber(num(args, "count"), 1, 1);
-    if (count === null || count > 50)
-      return fail("count must be a whole number from 1 to 50.");
-    if (!Number.isInteger(after) || after < -1)
-      return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
-    const board = await loadBoard(boardId);
-    const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
-  }
-  var insertColumns = (args) => insertAlong(args, "col");
-  var insertRows = (args) => insertAlong(args, "row");
-  var compactBoard = async (args) => {
-    const boardId = str(args, "boardId");
-    if (!boardId)
-      return fail("compact_board needs boardId.");
-    const board = await loadBoard(boardId);
-    const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
-  };
-  async function fontFor3(text) {
-    const current = text.fontName;
-    const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
-    for (const font of candidates) {
-      try {
-        await figma.loadFontAsync(font);
-        return font;
-      } catch {
-        continue;
-      }
-    }
-    throw new Error("Could not load a font for the board heading.");
-  }
-  async function findStyleBoard() {
-    for (const n of figma.currentPage.children) {
-      if (!readMeta(n, BOARD_KEY, parseBoardMeta))
-        continue;
-      try {
-        return await loadBoard(n.id);
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  }
-  var createBoard = async (args) => {
-    const name = str(args, "name");
-    if (!name)
-      return fail("create_board needs name.");
-    const colWidth = num(args, "colWidth") ?? 700;
-    const rowHeight = num(args, "rowHeight") ?? 1112;
-    const screenW = num(args, "screenW") ?? 393;
-    const screenH = num(args, "screenH") ?? 852;
-    const cols = wholeNumber(num(args, "cols"), 4, 1);
-    const rows = wholeNumber(num(args, "rows"), 2, 1);
-    if (cols === null || rows === null || cols > 50 || rows > 50)
-      return fail("cols and rows must be whole numbers from 1 to 50.");
-    if (![colWidth, rowHeight, screenW, screenH].every((n) => n > 0))
-      return fail("colWidth, rowHeight, screenW and screenH must be positive.");
-    if (colWidth < screenW || rowHeight < screenH)
-      return fail("colWidth and rowHeight must be at least the screen size, or the screens overlap.");
-    const page = figma.currentPage;
-    const styleBoard = await findStyleBoard();
-    const margin = styleBoard?.meta.margin ?? 80;
-    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
-    const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
-    const rects = page.children.map(rectOf);
-    const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
-    const y = num(args, "y") ?? (rects.length ? Math.min(...rects.map((r) => r.y)) : 0);
-    const grid = { originX: x + margin, originY: y + margin + labelOffset, colWidth, rowHeight, screenW, screenH, labelOffset, margin };
-    const bounds = boardBounds(grid, [{ col: cols - 1, row: rows - 1 }]);
-    const styleBg = styleBoard?.node;
-    let bg;
-    if (styleBg?.type === "RECTANGLE") {
-      bg = styleBg.clone();
-      bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
-    } else {
-      bg = figma.createRectangle();
-      const fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
-      bg.fills = fills;
-      if (styleBg && "cornerRadius" in styleBg && typeof styleBg.cornerRadius === "number")
-        bg.cornerRadius = styleBg.cornerRadius;
-    }
-    page.appendChild(bg);
-    bg.name = `Board background · ${name}`;
-    bg.x = bounds.x;
-    bg.y = bounds.y;
-    bg.resize(bounds.width, bounds.height);
-    const headingNode = styleBoard?.meta.headingId ? await sceneById(styleBoard.meta.headingId) : null;
-    const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
-    const heading = headingStyle ? headingStyle.clone() : figma.createText();
-    page.appendChild(heading);
-    await figma.loadFontAsync(await fontFor3(heading));
-    heading.fontName = await fontFor3(heading);
-    if (!headingStyle) {
-      heading.fontSize = 48;
-      heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
-    }
-    heading.characters = `Board · ${name}`;
-    heading.name = `Board · ${name}`;
-    heading.x = bounds.x;
-    heading.y = bounds.y - heading.height - 24;
-    const arrows = figma.createFrame();
-    page.appendChild(arrows);
-    arrows.name = `Flow arrows · ${name}`;
-    arrows.fills = [];
-    arrows.clipsContent = false;
-    arrows.resize(1, 1);
-    arrows.x = bounds.x;
-    arrows.y = bounds.y;
-    const meta = { v: 1, kind: "board", ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
-    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
-    bg.locked = true;
-    return ok({
-      boardId: bg.id,
-      headingId: heading.id,
-      arrowsGroupId: arrows.id,
-      bounds,
-      grid: { originX: grid.originX, originY: grid.originY, colWidth, rowHeight, screenW, screenH, cols, rows },
-      styledFrom: styleBoard ? styleBoard.node.id : null
-    });
-  };
-
   // plugin-src/main.ts
   setGroupObstacleLoader(groupObstacles);
   var handlers = {
@@ -7115,6 +7277,7 @@ ${body}
     update_flow_group: updateFlowGroup,
     delete_flow_group: deleteFlowGroup,
     adopt_flow_groups: adoptFlowGroups,
+    repair_board: repairBoard,
     adopt_board: adoptBoard,
     describe_board: describeBoard,
     create_board: createBoard,
@@ -7157,7 +7320,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "40f89f70", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9b660006", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7165,7 +7328,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"40f89f70"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9b660006"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

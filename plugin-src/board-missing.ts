@@ -1,7 +1,7 @@
 /** Pure helpers for a deleted board background. No `figma` global. */
 
 export const boardMissingMessage = (boardId: string): string =>
-    `Board background ${boardId} is missing (probably deleted). Restore it with Cmd+Z or File → Show version history; recreating it loses the stored grid and gap data.`;
+    `Board background ${boardId} is missing (probably deleted). Run repair_board to rebuild it from the screens, arrows and groups that still point at it (or restore it with Cmd+Z / File → Show version history).`;
 
 export type OrphanIssue = { kind: 'board-background-missing'; boardId: string; screens: number; groups: number; message: string };
 

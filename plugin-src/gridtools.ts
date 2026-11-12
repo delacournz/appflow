@@ -6,8 +6,8 @@ import { BOARD_KEY, FLOW_NAMESPACE, parseBoardMeta, SCREEN_KEY, parseScreenMeta,
 import { boardBounds, compactedExtras, compactPlan, planMove, shiftedExtras, shiftPlan, type GridMeta, type Move, type ExtrasPair } from './grid';
 import { fail, num, ok, str, bool, type Handler, type MainReply } from './types';
 
-const DEFAULT_ARROW_STYLE: BoardMeta['arrowStyle'] = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
-const DARK_FILL: SolidPaint = { type: 'SOLID', color: { r: 0.067, g: 0.067, b: 0.067 } };
+export const DEFAULT_ARROW_STYLE: BoardMeta['arrowStyle'] = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
+export const DARK_FILL: SolidPaint = { type: 'SOLID', color: { r: 0.067, g: 0.067, b: 0.067 } };
 
 async function finish(board: Board, screens: Screen[], stale: StaleFix[], moves: Move[], shrink: boolean, extras?: ExtrasPair): Promise<MainReply> {
     if (extras) applyExtras(board, extras);
@@ -84,7 +84,7 @@ async function fontFor(text: TextNode): Promise<FontName> {
     throw new Error('Could not load a font for the board heading.');
 }
 
-async function findStyleBoard(): Promise<Board | null> {
+export async function findStyleBoard(): Promise<Board | null> {
     for (const n of figma.currentPage.children) {
         if (!readMeta(n, BOARD_KEY, parseBoardMeta)) continue;
         try {

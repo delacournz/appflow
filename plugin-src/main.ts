@@ -5,6 +5,7 @@ import { generateDiagram, htmlBuild, useFigma } from './create';
 import { badgeScreens, setScreenStatus } from './badge';
 import { adoptBoard, setGroupObstacleLoader } from './flow';
 import { adoptFlowGroups } from './flow-group-adopt-handler';
+import { repairBoard } from './board-repair-handler';
 import { connectWithGroups, createFlowGroup, deleteFlowGroup, groupObstacles, rerouteFlowWithGroups, updateFlowGroup } from './flow-groups';
 
 setGroupObstacleLoader(groupObstacles);
@@ -44,6 +45,7 @@ const handlers: Record<string, Handler> = {
     update_flow_group: updateFlowGroup,
     delete_flow_group: deleteFlowGroup,
     adopt_flow_groups: adoptFlowGroups,
+    repair_board: repairBoard,
     adopt_board: adoptBoard,
     describe_board: describeBoard,
     create_board: createBoard,

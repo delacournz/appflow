@@ -526,6 +526,15 @@ const RAW_TOOLS: ToolDef[] = [
         180_000,
     ),
     passthrough(
+        'repair_board',
+        'Rebuild a board whose background node was deleted. Screens, arrows, flow groups and the group holder still carry the old board id; this draws a new locked background under them, infers a uniform grid from the screens\' stored cells (or uses the holder\'s board backup), relinks every screen, arrow and group to the new id, then settles and reroutes the board. Without boardId it repairs the only missing board on the page. Run dryRun first to see the inferred grid and counts. Returns { boardId, missingBoardId, name, fromBackup, grid, screens, arrows, groups, settled }.',
+        obj({
+            boardId: str('The deleted board background id that screens still point at. Default: the only missing board on the page.').optional(),
+            dryRun: bool('Report what would be rebuilt without changing the file. Default false.').optional(),
+        }),
+        180_000,
+    ),
+    passthrough(
         'ungroup_screens',
         'Make every adopted screen a top-level frame again, so prototype Play and flow starting points work. For each screen in a "Screen · …" group: moves the frame, route text and badge out to the group\'s parent at the group\'s index (absolute positions kept, arrows kept above, empty group deleted), deletes the "Label · …" text unless keepLabels (Figma\'s own frame title is the name), moves the route text to 72 px above the frame at its left edge, right-aligns the badge with the frame centred on that line, and rewrites the screen data with labelId null and groupId null. Idempotent: already ungrouped screens only get route and badge positions normalised. Run once on boards made with screen groups. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, ungrouped, already, skipped, labelsRemoved, details: [{ frameId, name, status: \'ungrouped\' | \'already\' | \'skipped\', labelRemoved, reason? }] }.',
         obj({
