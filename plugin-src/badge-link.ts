@@ -64,3 +64,9 @@ export function badgeSnap(frame: Rect, lines: readonly Rect[], badge: Rect, fall
     const [dx, dy] = [x - badge.x, y - badge.y];
     return Math.abs(dx) <= 0.5 && Math.abs(dy) <= 0.5 ? null : { dx, dy };
 }
+
+/** Badges inside `board` that no screen's meta points at: left behind by renames, duplicates or deletes. Ids, in input order. */
+export function orphanBadges(badges: readonly BadgeCandidate[], referenced: ReadonlySet<string>, board: Rect): string[] {
+    const inside = (r: Rect) => r.x >= board.x && r.y >= board.y && r.x + r.width <= board.x + board.width && r.y + r.height <= board.y + board.height;
+    return badges.filter((b) => !referenced.has(b.id) && inside(b.rect)).map((b) => b.id);
+}
