@@ -11,7 +11,8 @@
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { applyBanded, applyExtras, applyMoves, applyPitch, setSpacing, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
-import { basePitchOf, growPitch, pitchFromNeeds, samePitch, spacingOf } from './pitch';
+import { basePitchOf, pitchFromNeeds, samePitch, spacingOf } from './pitch';
+import { runSettle } from './settle';
 import { addBands, gapDeficits, hasDeficits, type Block, type Deficits } from './gap-fix';
 import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, toLocal, type Board } from './flow';
 import {
@@ -415,43 +416,32 @@ async function internalArrowsOf(board: Board): Promise<{ from: string; to: strin
     return out;
 }
 
-const MAX_SETTLE = 6;
-
 /**
  * After arrows were rerouted, refit again: boxes now wrap the labels that landed inside them, and the conflict check sees the
- * final label positions. Repeats (reroute, refit) until the boxes stop changing, at most 6 times. It also grows the board's extras by whatever the drawn boxes still lack (gap-fix.ts), keeping them on the board
- * so extras only grow within a settle. Returns the last fit.
+ * final label positions. Repeats (redraw, refit) until the boxes stop changing, at most 6 times (`runSettle`). It also grows
+ * the board by whatever the drawn boxes still lack (gap-fix.ts); the growth is recomputed from the base on every call, so
+ * the pitch neither ratchets up across calls nor stays grown once the need is gone. Returns the last fit.
  */
 async function settleBoard(board: Board, screens: Screen[], first: RefitResult, reroute: JsonObject): Promise<{ fit: RefitResult; reroute: JsonObject; passes: number }> {
-    let fit = first;
-    let last = reroute;
-    let passes = 0;
     const uniform = spacingOf(board.meta) === 'uniform';
-    let bonus: Bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
-    let more = { col: 0, row: 0 };
-    let previous: { col: number; row: number } | null = null;
-    let frozen = false;
-    while (fit.active && passes < MAX_SETTLE) {
-        const short = hasDeficits(fit.deficits) && !frozen;
-        if (short && uniform) {
-            const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
-            previous = fit.deficits.uniform;
-            frozen = step.stop;
-            more = step.more;
-        } else if (short) {
-            bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
-            setGapExtra(board, bonus);
-        }
-        const again = await refitGroups(board, screens, uniform ? { pitchExtra: more } : { bonus });
-        passes++;
-        const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
-        fit = again;
-        if (settled && (frozen || !hasDeficits(again.deficits))) break;
-        await resizeBoard(board, screens, false, fit.extent);
-        last = await rerouteBoards([board]);
-    }
-    if (fit.active) await resizeBoard(board, screens, true, fit.extent);
-    return { fit, reroute: last, passes };
+    const out = await runSettle<RefitResult, JsonObject>(
+        {
+            uniform,
+            base: basePitchOf(board.meta),
+            bonus: board.meta.gapExtra ?? { colExtra: [], rowExtra: [] },
+            setBonus: (b) => setGapExtra(board, b),
+            refit: (g) => refitGroups(board, screens, uniform ? { pitchExtra: g.more } : { bonus: g.bonus }),
+            redraw: async (f) => {
+                await resizeBoard(board, screens, false, f.extent);
+                return rerouteBoards([board]);
+            },
+            sameBoxes: (a, b) => sameBoxes(a.boxes, b.boxes),
+        },
+        first,
+        reroute,
+    );
+    if (out.fit.active) await resizeBoard(board, screens, true, out.fit.extent);
+    return out;
 }
 
 /** Refit, grow the background, redraw every arrow, then settle. The tail of every group tool. */

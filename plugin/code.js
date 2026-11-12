@@ -2197,6 +2197,42 @@ ${logs.join(`
   var addBands = (a, b) => cleanExtras([...a, ...b]);
   var hasDeficits = (d) => d.colExtra.length > 0 || d.rowExtra.length > 0 || d.uniform.col > 0 || d.uniform.row > 0;
 
+  // plugin-src/settle.ts
+  var MAX_SETTLE = 6;
+  async function runSettle(ops, first, reroute) {
+    let more = { col: 0, row: 0 };
+    let bonus = ops.bonus;
+    let previous = null;
+    let frozen = false;
+    let passes = 0;
+    let last = reroute;
+    let drawnAgainst = first;
+    const growth = () => ({ more, bonus });
+    let fit = await ops.refit(growth());
+    while (fit.active && passes < MAX_SETTLE) {
+      const short = hasDeficits(fit.deficits) && !frozen;
+      if (short && ops.uniform) {
+        const step = growPitch(ops.base, more, fit.deficits.uniform, previous);
+        previous = fit.deficits.uniform;
+        frozen = step.stop;
+        more = step.more;
+      } else if (short) {
+        bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
+        ops.setBonus(bonus);
+      }
+      const again = short ? await ops.refit(growth()) : fit;
+      passes++;
+      const settled = !short && !again.extrasChanged && ops.sameBoxes(drawnAgainst, again);
+      fit = again;
+      if (settled && (frozen || !hasDeficits(again.deficits)))
+        break;
+      last = await ops.redraw(fit);
+      drawnAgainst = fit;
+      fit = await ops.refit(growth());
+    }
+    return { fit, reroute: last, passes };
+  }
+
   // plugin-src/flow-group-plan.ts
   var unique = (xs) => [...new Set(xs)];
   var ownerOf2 = (groups, screenId) => groups.find((g) => g.screenIds.includes(screenId));
@@ -2743,39 +2779,23 @@ ${logs.join(`
     }
     return out;
   }
-  var MAX_SETTLE = 6;
   async function settleBoard(board, screens, first, reroute) {
-    let fit = first;
-    let last = reroute;
-    let passes = 0;
     const uniform = spacingOf(board.meta) === "uniform";
-    let bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
-    let more = { col: 0, row: 0 };
-    let previous = null;
-    let frozen = false;
-    while (fit.active && passes < MAX_SETTLE) {
-      const short = hasDeficits(fit.deficits) && !frozen;
-      if (short && uniform) {
-        const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
-        previous = fit.deficits.uniform;
-        frozen = step.stop;
-        more = step.more;
-      } else if (short) {
-        bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
-        setGapExtra(board, bonus);
-      }
-      const again = await refitGroups(board, screens, uniform ? { pitchExtra: more } : { bonus });
-      passes++;
-      const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
-      fit = again;
-      if (settled && (frozen || !hasDeficits(again.deficits)))
-        break;
-      await resizeBoard(board, screens, false, fit.extent);
-      last = await rerouteBoards([board]);
-    }
-    if (fit.active)
-      await resizeBoard(board, screens, true, fit.extent);
-    return { fit, reroute: last, passes };
+    const out = await runSettle({
+      uniform,
+      base: basePitchOf(board.meta),
+      bonus: board.meta.gapExtra ?? { colExtra: [], rowExtra: [] },
+      setBonus: (b) => setGapExtra(board, b),
+      refit: (g) => refitGroups(board, screens, uniform ? { pitchExtra: g.more } : { bonus: g.bonus }),
+      redraw: async (f) => {
+        await resizeBoard(board, screens, false, f.extent);
+        return rerouteBoards([board]);
+      },
+      sameBoxes: (a, b) => sameBoxes(a.boxes, b.boxes)
+    }, first, reroute);
+    if (out.fit.active)
+      await resizeBoard(board, screens, true, out.fit.extent);
+    return out;
   }
   async function syncBoard(board, screens, opts = {}) {
     const first = await refitGroups(board, screens, opts);
@@ -4372,7 +4392,7 @@ ${logs.join(`
       out.push(target.y + target.height + 24 + k * LANE_STEP);
     return out.filter((y) => y >= lo && y <= hi);
   };
-  function joinPass(order, routes, items, screens, rowGap, titles, edges, builders, gutter) {
+  function joinPass(order, routes, items, screens, rowGap, titles, edges, builders, gutter, repair = false) {
     const groups = new Map;
     items.forEach((it, i) => {
       const r = routes[i];
@@ -4388,7 +4408,7 @@ ${logs.join(`
       return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
     };
     const joined = [...groups.values()].filter((g) => g.length >= 2);
-    const pending = new Set(joined.flat());
+    const pending = new Set(repair ? [] : joined.flat());
     const lowerFirst = (g) => items[g[0]].ends.target.y;
     let grand = 0;
     const done = [];
@@ -4474,6 +4494,12 @@ ${logs.join(`
     for (const i of best.members) {
       routes[i] = best.routes[i];
       builders[i] = null;
+    }
+    for (let pass = 0;pass < 2; pass++) {
+      const before = routes.slice();
+      const r = joinPass("lower", routes, items, screens, rowGap, titles, edges, builders, gutter, true);
+      if (r.total === 0 || routes.every((x, i) => x === before[i]))
+        break;
     }
   }
 
@@ -8152,7 +8178,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "f7c3f3ee", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "0e170802", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8160,7 +8186,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"f7c3f3ee"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"0e170802"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
