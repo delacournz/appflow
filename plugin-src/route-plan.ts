@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
 import { boxEdges, crowdedRunLength, laneConflicts, screensCrossed, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaGap, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
+import { EDGE_MARGIN, FORK_ROW, FORK_STEP, FORK_X0, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaGap, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -142,6 +142,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
     separateLines(final, builders, titles, edges);
+    forkStarts(final, items);
     return items.map((it, i) => {
         const r = final[i] as Routed;
         if (!r.ok) return { id: it.id, route: null, error: r.error };
@@ -149,6 +150,61 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width, bottomEdge: it.ends.source.y + it.ends.source.height }, error: null, ...(warning ? { warning } : {}) };
     });
 }
+
+/**
+ * Arrows that leave one dot for different targets would share their first horizontal run and their labels would sit side
+ * by side on one line. Each of them instead keeps a short stub from the dot, turns to a row of its own (rows `FORK_ROW`
+ * apart, above the centre for arrows that then go up, below it for arrows that go down) and runs along that row to its
+ * lane. Within a side the arrow whose lane is furthest out takes the outermost row and turns first, so no branch crosses
+ * another. A straight arrow keeps the centre row. Labels go on the branch row (`lead`). Mutates `routes`.
+ */
+function forkStarts(routes: Routed[], items: { id: string; ends: Endpoints }[]): void {
+    const groups = new Map<string, number[]>();
+    routes.forEach((r, i) => {
+        if (!r.ok) return;
+        const p0 = r.points[0] as Pt;
+        const key = `${p0.x}:${p0.y}`;
+        groups.set(key, [...(groups.get(key) ?? []), i]);
+    });
+    for (const idx of groups.values()) {
+        const members = idx.filter((i) => {
+            const r = routes[i] as Routed;
+            const t = (items[i] as (typeof items)[number]).ends.target;
+            return r.ok && idx.some((j) => j !== i && (items[j] as (typeof items)[number]).ends.target !== t);
+        });
+        if (members.length < 2) continue;
+        const forkable = (i: number): { dir: 1 | -1; laneX: number } | null => {
+            const r = routes[i] as Routed;
+            if (!r.ok || r.points.length < 4) return null;
+            const [p0, p1, p2] = r.points as [Pt, Pt, Pt];
+            if (p1.y !== p0.y || p1.x <= p0.x || p2.x !== p1.x || p2.y === p1.y) return null;
+            return { dir: p2.y > p1.y ? 1 : -1, laneX: p1.x };
+        };
+        const straight = members.some((i) => (routes[i] as Routed).ok && (routes[i] as Extract<Routed, { ok: true }>).points.length === 2);
+        const sides = { 1: [] as number[], '-1': [] as number[] };
+        for (const i of members) {
+            const f = forkable(i);
+            if (f) sides[f.dir === 1 ? 1 : '-1'].push(i);
+        }
+        const both = sides[1].length > 0 && sides['-1'].length > 0;
+        for (const dir of [1, -1] as const) {
+            const list = [...sides[dir === 1 ? 1 : '-1']].sort((a, b) => (forkable(b)?.laneX ?? 0) - (forkable(a)?.laneX ?? 0));
+            list.forEach((i, rank) => {
+                const r = routes[i] as Extract<Routed, { ok: true }>;
+                const [p0, p1, p2] = r.points as [Pt, Pt, Pt];
+                const row = straight ? FORK_ROW * (rank + 1) : both ? FORK_ROW / 2 + FORK_ROW * rank : FORK_ROW * rank;
+                if (row === 0) return;
+                const y = p0.y + dir * row;
+                const fx = right((items[i] as (typeof items)[number]).ends.source) + FORK_X0 + FORK_STEP * (list.length - 1 - rank);
+                if ((p2.y - y) * dir < EDGE_MARGIN || p1.x - fx < EDGE_MARGIN) return;
+                const points: Pt[] = [p0, { x: fx, y: p0.y }, { x: fx, y }, { x: p1.x, y }, ...r.points.slice(2)];
+                routes[i] = { ...r, points, labelAnchor: { x: (fx + p1.x) / 2, y }, lead: 2, ...(r.trunkFrom !== undefined ? { trunkFrom: r.trunkFrom + 2 } : {}) };
+            });
+        }
+    }
+}
+
+const right = (r: Rect) => r.x + r.width;
 
 const overlap1d = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
 

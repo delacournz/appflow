@@ -371,7 +371,7 @@ describe('arrow lanes on a uniform board', () => {
         const its = [mk('A', a, cellAt(2, 4)), mk('A2', a, cellAt(2, 1)), mk('B', b, cellAt(2, 3)), mk('B2', b, cellAt(2, 2))];
         const plans = planRoutes({ gutter: PITCH_X - W, limits: its.map(() => undefined) }, its);
         const pts = (id: string) => ((plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route).points;
-        const dropX = (id: string) => (pts(id)[1] as Pt).x;
+        const dropX = (id: string) => (pts(id).at(-3) as Pt).x;
         const xs = [...new Set(['A', 'A2', 'B', 'B2'].map(dropX))];
         expect(xs.length).toBe(4);
         for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) expect(Math.abs((xs[i] as number) - (xs[j] as number))).toBeGreaterThanOrEqual(24);
