@@ -8,7 +8,9 @@ import type { ConflictContent, ConflictGroup } from './flow-group';
 import { footprintOf, loadGroups } from './flow-groups';
 import { orderPath } from './flowlint';
 import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type OrphanBadgeIssue, type TitleText } from './group-lint';
+import { lintPrototype, type ProtoReaction } from './prototype-lint';
 import { titleTextRect } from './route-avoid';
+import type { ReactionLike } from './flowmeta';
 
 /** An arrow's absolute path (rounded like `lintFlowLayout`), or null when its vector is gone or not a single-headed line. */
 async function pathOf(vectorId: string): Promise<{ x: number; y: number }[] | null> {
@@ -38,6 +40,33 @@ async function arrowIssues(board: Board, titles: TitleText[]): Promise<{ issues:
     return lintArrows(arrows, titles, boardScreens(board));
 }
 
+/** Prototype-vs-arrow checks: every NAVIGATE reaction on the board's screens and inside them, against the board's arrows. */
+async function prototypeIssues(board: Board): Promise<{ issues: LayoutIssue[]; counts: Record<string, number> }> {
+    const shown = boardScreens(board);
+    const screens = await Promise.all(shown.map(async (s) => ({ id: s.id, name: (await sceneById(s.id))?.name ?? s.id })));
+    const reactions: ProtoReaction[] = [];
+    for (const s of shown) {
+        const root = await sceneById(s.id);
+        if (!root) continue;
+        const nodes: SceneNode[] = 'findAll' in root ? [root, ...root.findAll((n) => 'reactions' in n)] : [root];
+        for (const n of nodes) {
+            if (!('reactions' in n)) continue;
+            for (const r of n.reactions as unknown as ReactionLike[]) {
+                for (const a of [...(r.action ? [r.action] : []), ...(r.actions ?? [])]) {
+                    if (a.type === 'NODE' && a.navigation === 'NAVIGATE' && typeof a.destinationId === 'string') {
+                        reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? 'NONE', destinationId: a.destinationId });
+                    }
+                }
+            }
+        }
+    }
+    const arrows = listArrows(board).map((a) => ({ id: a.group.id, from: a.meta.from, to: a.meta.to, trigger: a.meta.trigger }));
+    const issues = lintPrototype(screens, arrows, reactions);
+    const counts: Record<string, number> = {};
+    for (const i of issues) counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    return { issues, counts };
+}
+
 /** The layout part of lint_flow_layout for one board: reads the drawn boxes and arrows (never repaints) and checks them against the board's content. */
 /** `orphan-badge`: a build badge on the board that no screen points at. `badge_screens` removes them. */
 function orphanBadgeIssues(board: Board): (OrphanBadgeIssue & { message: string })[] {
@@ -65,6 +94,9 @@ export async function boardLayoutLint(board: Board): Promise<{ boardId: string; 
         if (text) titles.push({ id: g.id, text });
     }
     const arrowPart = await arrowIssues(board, titles);
+    const proto = await prototypeIssues(board);
+    arrowPart.issues.push(...proto.issues);
+    for (const [k, v] of Object.entries(proto.counts)) arrowPart.counts[k] = (arrowPart.counts[k] ?? 0) + v;
     const orphans = orphanBadgeIssues(board);
     if (orphans.length) {
         arrowPart.issues.push(...orphans);

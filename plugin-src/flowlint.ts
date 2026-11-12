@@ -102,11 +102,11 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
     }
     return ok({
         checked,
-        passed: issues.length === 0 && layoutIssues.length === 0,
+        passed: issues.length === 0 && layoutIssues.every((i) => i.severity === 'info'),
         issues,
         layoutIssues,
         counts,
-        fix: layoutIssues.length
+        fix: layoutIssues.some((i) => i.severity !== 'info')
             ? 'Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines.'
             : issues.length
             ? 'Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up.'
