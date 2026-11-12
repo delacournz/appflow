@@ -1687,6 +1687,156 @@ ${logs.join(`
     return cellRect2(meta, b.col, b.row).x - cellRect2(meta, a.col, a.row).x - plain > 0;
   }
 
+  // plugin-src/layout-grid.ts
+  var BOARD_GRID = "board";
+  var POS_TOLERANCE = 2;
+  function cellRectIn(grid, col, row, size) {
+    return { x: grid.originX + col * grid.colWidth, y: grid.originY + row * grid.rowHeight, width: size.width, height: size.height };
+  }
+  function cellOfIn(grid, rect) {
+    return { col: Math.round((rect.x - grid.originX) / grid.colWidth) + 0, row: Math.round((rect.y - grid.originY) / grid.rowHeight) + 0 };
+  }
+  function onGrid(grid, rect) {
+    const { col, row } = cellOfIn(grid, rect);
+    return Math.abs(grid.originX + col * grid.colWidth - rect.x) <= POS_TOLERANCE && Math.abs(grid.originY + row * grid.rowHeight - rect.y) <= POS_TOLERANCE;
+  }
+  var boardGrid = (board) => ({ id: BOARD_GRID, originX: board.originX, originY: board.originY, colWidth: board.colWidth, rowHeight: board.rowHeight });
+  function gridOfScreen(screen, groups, board) {
+    if (!screen.layoutId || screen.layoutId === BOARD_GRID)
+      return boardGrid(board);
+    const group = groups.find((g) => g.id === screen.layoutId);
+    if (!group?.layout)
+      return boardGrid(board);
+    return { id: group.id, originX: group.layout.originX, originY: group.layout.originY, colWidth: board.colWidth, rowHeight: board.rowHeight };
+  }
+  function migrateToGrouped(board, screens, groups) {
+    const known = new Set(groups.map((g) => g.id));
+    const layoutOf = (s) => s.flowGroupId && known.has(s.flowGroupId) ? s.flowGroupId : BOARD_GRID;
+    const grids = [];
+    for (const g of groups) {
+      const members = screens.filter((s) => layoutOf(s) === g.id);
+      if (!members.length)
+        continue;
+      grids.push({ id: g.id, originX: Math.min(...members.map((m) => m.x)), originY: Math.min(...members.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
+    }
+    const loose = screens.filter((s) => layoutOf(s) === BOARD_GRID);
+    if (loose.length) {
+      const atBoard = boardGrid(board);
+      const fits = loose.every((s) => onGrid(atBoard, s));
+      grids.push(fits ? atBoard : { ...atBoard, originX: Math.min(...loose.map((s) => s.x)), originY: Math.min(...loose.map((s) => s.y)) });
+    }
+    const cells = new Map;
+    const offGrid = [];
+    for (const s of screens) {
+      const layoutId = layoutOf(s);
+      const grid = grids.find((g) => g.id === layoutId);
+      cells.set(s.id, { layoutId, ...cellOfIn(grid, s) });
+      if (!onGrid(grid, s))
+        offGrid.push(s.id);
+    }
+    return { grids, cells, offGrid };
+  }
+
+  // plugin-src/grid-plan.ts
+  var inGrid = (screens, layoutId) => screens.filter((s) => s.layoutId === layoutId).map(({ id, col, row }) => ({ id, col, row }));
+  var tag = (moves, from, to) => moves.map((m) => ({ id: m.id, from: { ...m.from, layoutId: from }, to: { ...m.to, layoutId: to } }));
+  function planGridMove(screens, id, col, row, swap, toLayoutId) {
+    const me = screens.find((s) => s.id === id);
+    if (!me)
+      return { ok: false, error: `${id} is not a screen on this board.` };
+    const target = toLayoutId ?? me.layoutId;
+    if (target === me.layoutId) {
+      const plan = planMove(inGrid(screens, target), id, col, row, swap);
+      return plan.ok ? { ok: true, moves: tag(plan.moves, target, target) } : plan;
+    }
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0)
+      return { ok: false, error: "col and row must be whole numbers, 0 or more." };
+    const occupant = screens.find((s) => s.layoutId === target && s.col === col && s.row === row);
+    const mine = { id, from: { layoutId: me.layoutId, col: me.col, row: me.row }, to: { layoutId: target, col, row } };
+    if (!occupant)
+      return { ok: true, moves: [mine] };
+    if (!swap)
+      return { ok: false, error: `Cell (${col},${row}) of that group is occupied by ${occupant.id}. Pass swap: true to trade places.` };
+    return { ok: true, moves: [mine, { id: occupant.id, from: { layoutId: target, col, row }, to: { layoutId: me.layoutId, col: me.col, row: me.row } }] };
+  }
+  function shiftGridPlan(screens, layoutId, axis, after, count) {
+    return tag(shiftPlan(inGrid(screens, layoutId), axis, after, count), layoutId, layoutId);
+  }
+  function compactGridPlan(screens) {
+    const ids = [...new Set(screens.map((s) => s.layoutId))];
+    return ids.flatMap((layoutId) => tag(compactPlan(inGrid(screens, layoutId)), layoutId, layoutId));
+  }
+  function placeJoiners(grid, members, taken) {
+    const used = new Set(taken.map((c) => `${c.col},${c.row}`));
+    const cells = new Map;
+    const snapped = [];
+    for (const m of members) {
+      const near = cellOfIn(grid, m);
+      const rect = cellRectIn(grid, near.col, near.row, { width: 0, height: 0 });
+      let moved = Math.abs(rect.x - m.x) > 2 || Math.abs(rect.y - m.y) > 2;
+      let row = near.row;
+      while (used.has(`${near.col},${row}`)) {
+        row++;
+        moved = true;
+      }
+      used.add(`${near.col},${row}`);
+      cells.set(m.id, { col: near.col, row });
+      if (moved)
+        snapped.push(m.id);
+    }
+    return { cells, snapped };
+  }
+  function groupOriginOf(members) {
+    return { originX: Math.min(...members.map((m) => m.x)), originY: Math.min(...members.map((m) => m.y)) };
+  }
+  function planBlockShifts(moves, groups) {
+    const screens = new Map;
+    const layouts = new Map;
+    for (const m of moves) {
+      const g = groups.find((x) => x.id === m.id);
+      if (!g)
+        continue;
+      for (const id of g.screenIds)
+        screens.set(id, { dx: m.dx, dy: m.dy });
+      if (g.layout)
+        layouts.set(g.id, { originX: g.layout.originX + m.dx, originY: g.layout.originY + m.dy });
+    }
+    return { screens, layouts };
+  }
+  function boundsOfRects(meta, rects) {
+    const reachX = Math.max(0, ...rects.map((r) => r.x + r.width - meta.originX));
+    const reachY = Math.max(0, ...rects.map((r) => r.y + r.height - meta.originY));
+    return { x: meta.originX - meta.margin, y: meta.originY - meta.labelOffset - meta.margin, width: reachX + 2 * meta.margin, height: reachY + meta.labelOffset + 2 * meta.margin };
+  }
+  function planRegrid(board, screens, groups) {
+    const known = new Set(groups.map((g) => g.id));
+    const layoutOf = (s) => s.flowGroupId && known.has(s.flowGroupId) ? s.flowGroupId : BOARD_GRID;
+    const layouts = new Map;
+    for (const g of groups) {
+      if (g.layout)
+        continue;
+      const members = screens.filter((s) => layoutOf(s) === g.id);
+      if (members.length)
+        layouts.set(g.id, groupOriginOf(members));
+    }
+    const withLayouts = groups.map((g) => ({ id: g.id, layout: g.layout ?? layouts.get(g.id) }));
+    const cells = new Map;
+    const snapped = [];
+    for (const layoutId of [BOARD_GRID, ...groups.map((g) => g.id)]) {
+      const members = screens.filter((s) => layoutOf(s) === layoutId);
+      const joiners = members.filter((s) => (s.layoutId ?? BOARD_GRID) !== layoutId);
+      if (!joiners.length)
+        continue;
+      const grid = gridOfScreen({ id: "", layoutId }, withLayouts, board);
+      const taken = members.filter((s) => (s.layoutId ?? BOARD_GRID) === layoutId);
+      const placed = placeJoiners(grid, joiners, taken);
+      for (const [id, cell] of placed.cells)
+        cells.set(id, { layoutId, ...cell });
+      snapped.push(...placed.snapped);
+    }
+    return { layouts, cells, snapped };
+  }
+
   // plugin-src/pitch.ts
   var spacingOf = (m) => m.spacing ?? "uniform";
   var basePitchOf = (m) => ({ colWidth: m.baseColWidth ?? m.colWidth, rowHeight: m.baseRowHeight ?? m.rowHeight });
@@ -1709,7 +1859,7 @@ ${logs.join(`
   }
   var MISMATCH_SHARE = 0.3;
   var AGREE_SHARE = 0.6;
-  var POS_TOLERANCE = 2;
+  var POS_TOLERANCE2 = 2;
   var MIN_SCREENS = 3;
   var median = (xs) => {
     const s = [...xs].sort((a, b) => a - b);
@@ -1724,11 +1874,11 @@ ${logs.join(`
     return near.length >= AGREE_SHARE * usable.length ? Math.round(mid) : null;
   }
   function checkPitch(meta, screens) {
-    if (screens.length < MIN_SCREENS)
+    if (screens.length < MIN_SCREENS || meta.spacing === "grouped")
       return { kind: "ok" };
     const off = screens.filter((s) => {
       const want = cellRect2(meta, s.col, s.row);
-      return Math.abs(want.x - s.x) > POS_TOLERANCE || Math.abs(want.y - s.y) > POS_TOLERANCE;
+      return Math.abs(want.x - s.x) > POS_TOLERANCE2 || Math.abs(want.y - s.y) > POS_TOLERANCE2;
     });
     if (off.length < MISMATCH_SHARE * screens.length)
       return { kind: "ok" };
@@ -1738,8 +1888,8 @@ ${logs.join(`
       return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored banded spacing (${pitchNow}). Restore the board or re-adopt it; reroute_flow will not re-derive cells from these positions.` };
     const col = agreedPitch(screens.map((s) => ({ index: s.col, offset: s.x - meta.originX })));
     const row = agreedPitch(screens.map((s) => ({ index: s.row, offset: s.y - meta.originY })));
-    const colOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).x - s.x) <= POS_TOLERANCE).length >= (1 - MISMATCH_SHARE) * screens.length;
-    const rowOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).y - s.y) <= POS_TOLERANCE).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const colOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).x - s.x) <= POS_TOLERANCE2).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const rowOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).y - s.y) <= POS_TOLERANCE2).length >= (1 - MISMATCH_SHARE) * screens.length;
     const pitch = { colWidth: colOk ? meta.colWidth : col ?? Number.NaN, rowHeight: rowOk ? meta.rowHeight : row ?? Number.NaN };
     if (Number.isNaN(pitch.colWidth) || Number.isNaN(pitch.rowHeight)) {
       return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored pitch (${pitchNow}) and their positions agree on no single pitch. reroute_flow will not re-derive cells from them; restore the board or pass colWidth and rowHeight.` };
@@ -1771,12 +1921,40 @@ ${logs.join(`
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
     return { from, to: verdict.pitch };
   }
+  var isGrouped = (board) => board.meta.spacing === "grouped";
+  function readGroupLayouts(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const holder = parent.children.find((c) => c.type === "FRAME" && c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) === board.node.id);
+    if (!holder || !("children" in holder))
+      return [];
+    const out = [];
+    for (const c of holder.children) {
+      if (c.type !== "RECTANGLE")
+        continue;
+      const meta = parseGroupMeta(c.getSharedPluginData(FLOW_NAMESPACE, GROUP_KEY));
+      if (meta && meta.boardId === board.node.id)
+        out.push({ id: c.id, ...meta.layout ? { layout: meta.layout } : {} });
+    }
+    return out;
+  }
+  var gridLookup = (board, layouts) => (layoutId) => gridOfScreen({ id: "", layoutId }, layouts, board.meta);
+  var layoutOfScreen = (meta) => meta.flowGroupId ?? BOARD_GRID;
+  var gridMetaOf = (meta, grid) => {
+    const { colExtra: _c, rowExtra: _r, ...rest } = meta;
+    return { ...rest, originX: grid.originX, originY: grid.originY, colWidth: grid.colWidth, rowHeight: grid.rowHeight };
+  };
   async function loadScreens(board) {
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
       return { screens: [], stale: [] };
     const pitchRepaired = guardPitch(board, collectScreens(parent.children));
     const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const grouped = isGrouped(board);
+    const layouts = grouped ? readGroupLayouts(board) : [];
+    const lookup = gridLookup(board, layouts);
+    const hasGrid = (stored) => !stored.flowGroupId || layouts.some((g) => g.id === stored.flowGroupId && !!g.layout);
     const screens = [];
     const stale = [];
     for (const entry of collectScreens(parent.children)) {
@@ -1788,7 +1966,9 @@ ${logs.join(`
       const anchorId = stored.labelId ?? stored.routeId;
       const anchor = anchorId ? await sceneById(anchorId) : null;
       const rect = rectOf(c);
-      const reason = staleReason(board.meta, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
+      const grid = grouped && hasGrid(stored) ? lookup(layoutOfScreen({ ...stored, flowGroupId: stored.flowGroupId ?? null })) : null;
+      const against = !grouped ? board.meta : grid ? gridMetaOf(board.meta, grid) : gridMetaOf(board.meta, { id: BOARD_GRID, originX: rect.x - stored.col * board.meta.colWidth, originY: rect.y - stored.row * board.meta.rowHeight, colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight });
+      const reason = staleReason(against, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
       if (!reason) {
         if ((stored.groupId ?? null) === groupId) {
           screens.push({ node: c, meta: stored });
@@ -1799,7 +1979,7 @@ ${logs.join(`
         }
         continue;
       }
-      const cell = cellOf(rect, board.meta);
+      const cell = grouped && grid ? cellOfIn(grid, rect) : cellOf(rect, board.meta);
       const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...await ownBadge(stored, groupId, rect) };
       writeScreen(c, meta);
       stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
@@ -1862,36 +2042,39 @@ ${logs.join(`
     node.x += dx;
     node.y += dy;
   }
-  async function applyMoves(board, screens, moves) {
+  async function shiftScreen(s, dx, dy) {
+    if (dx === 0 && dy === 0)
+      return;
+    const [label, route, badge] = await Promise.all([
+      s.meta.labelId ? sceneById(s.meta.labelId) : null,
+      s.meta.routeId ? sceneById(s.meta.routeId) : null,
+      s.meta.badgeId ? sceneById(s.meta.badgeId) : null
+    ]);
+    const targets = shiftTargets({
+      frameId: s.node.id,
+      groupId: s.meta.groupId,
+      frameParentId: s.node.parent?.id ?? null,
+      labelId: label?.id ?? null,
+      labelParentId: label?.parent?.id ?? null,
+      routeId: route?.id ?? null,
+      routeParentId: route?.parent?.id ?? null,
+      badgeId: badge?.id ?? null,
+      badgeParentId: badge?.parent?.id ?? null
+    });
+    for (const id of targets)
+      shiftNode(await sceneById(id), dx, dy);
+    await snapBadges([s]);
+  }
+  async function applyMoves(board, screens, moves, grids) {
     const out = [];
     for (const m of moves) {
       const s = screens.find((x) => x.node.id === m.id);
       if (!s)
         continue;
-      const want = cellRect2(board.meta, m.to.col, m.to.row);
+      const want = m.to.layoutId !== undefined && grids ? cellRectIn(grids(m.to.layoutId), m.to.col, m.to.row, { width: board.meta.screenW, height: board.meta.screenH }) : cellRect2(board.meta, m.to.col, m.to.row);
       const have = rectOf(s.node);
-      const dx = want.x - have.x;
-      const dy = want.y - have.y;
-      const [label, route, badge] = await Promise.all([
-        s.meta.labelId ? sceneById(s.meta.labelId) : null,
-        s.meta.routeId ? sceneById(s.meta.routeId) : null,
-        s.meta.badgeId ? sceneById(s.meta.badgeId) : null
-      ]);
-      const targets = shiftTargets({
-        frameId: s.node.id,
-        groupId: s.meta.groupId,
-        frameParentId: s.node.parent?.id ?? null,
-        labelId: label?.id ?? null,
-        labelParentId: label?.parent?.id ?? null,
-        routeId: route?.id ?? null,
-        routeParentId: route?.parent?.id ?? null,
-        badgeId: badge?.id ?? null,
-        badgeParentId: badge?.parent?.id ?? null
-      });
-      for (const id of targets)
-        shiftNode(await sceneById(id), dx, dy);
-      s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
-      await snapBadges([s]);
+      await shiftScreen(s, want.x - have.x, want.y - have.y);
+      s.meta = { ...s.meta, col: m.to.col, row: m.to.row, ...m.to.layoutId !== undefined ? { layoutId: m.to.layoutId } : {} };
       writeScreen(s.node, s.meta);
       out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
     }
@@ -1902,7 +2085,7 @@ ${logs.join(`
     const rect = rectOf(bg);
     if (!("resize" in bg))
       return { width: rect.width, height: rect.height };
-    const b = boardBounds(board.meta, screens.map((s) => s.meta));
+    const b = isGrouped(board) ? boundsOfRects(board.meta, screens.map((s) => rectOf(s.node))) : boardBounds(board.meta, screens.map((s) => s.meta));
     const needW = b.x + b.width - rect.x;
     const needH = b.y + b.height - rect.y;
     const width = Math.max(1, shrink ? needW : Math.max(rect.width, needW));
@@ -1950,6 +2133,61 @@ ${logs.join(`
   function setSpacing(board, mode) {
     board.meta = { ...board.meta, spacing: mode };
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+  }
+
+  // plugin-src/group-place.ts
+  var MAX_PASSES = 1000;
+  var right = (r) => r.x + r.width;
+  var bottom = (r) => r.y + r.height;
+  function separation(a, b, clear) {
+    const inX = Math.min(right(a), right(b)) - Math.max(a.x, b.x) + clear;
+    const inY = Math.min(bottom(a), bottom(b)) - Math.max(a.y, b.y) + clear;
+    if (inX <= 0 || inY <= 0)
+      return null;
+    const toX = Math.min(right(a) + clear - b.x, right(b) + clear - a.x);
+    const toY = Math.min(bottom(a) + clear - b.y, bottom(b) + clear - a.y);
+    return { x: toX, y: toY };
+  }
+  function resolveOverlaps(boxes, clear) {
+    const sorted = [...boxes].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const at = new Map(sorted.map((b) => [b.id, { ...b.rect }]));
+    const kidsOf = (id) => sorted.filter((b) => b.parentId === id).flatMap((b) => [b.id, ...kidsOf(b.id)]);
+    const shift = (id, dx, dy) => {
+      for (const k of [id, ...kidsOf(id)]) {
+        const r = at.get(k);
+        at.set(k, { ...r, x: r.x + dx, y: r.y + dy });
+      }
+    };
+    for (let pass = 0;pass < MAX_PASSES; pass++) {
+      let changed = false;
+      for (let i = 0;i < sorted.length && !changed; i++) {
+        for (let j = i + 1;j < sorted.length && !changed; j++) {
+          const [a, b] = [sorted[i], sorted[j]];
+          if (a.parentId !== b.parentId)
+            continue;
+          const ra = at.get(a.id);
+          const rb = at.get(b.id);
+          const sep = separation(ra, rb, clear);
+          if (!sep)
+            continue;
+          const alongX = sep.x <= sep.y;
+          const [fixed, mover] = alongX ? ra.x + ra.width / 2 <= rb.x + rb.width / 2 ? [ra, b] : [rb, a] : ra.y + ra.height / 2 <= rb.y + rb.height / 2 ? [ra, b] : [rb, a];
+          const fixedRect = fixed;
+          const moverRect = at.get(mover.id);
+          const need = alongX ? right(fixedRect) + clear - moverRect.x : bottom(fixedRect) + clear - moverRect.y;
+          shift(mover.id, alongX ? need : 0, alongX ? 0 : need);
+          changed = true;
+        }
+      }
+      if (!changed)
+        break;
+    }
+    return sorted.flatMap((b) => {
+      const now = at.get(b.id);
+      const dx = now.x - b.rect.x;
+      const dy = now.y - b.rect.y;
+      return dx === 0 && dy === 0 ? [] : [{ id: b.id, dx, dy }];
+    });
   }
 
   // plugin-src/flow-group.ts
@@ -2215,8 +2453,8 @@ ${logs.join(`
   // plugin-src/gap-fix.ts
   var GROUP_GAP = 160;
   var CONTENT_GAP = 2 * GROUP_CLEAR;
-  var right = (r) => r.x + r.width;
-  var bottom = (r) => r.y + r.height;
+  var right2 = (r) => r.x + r.width;
+  var bottom2 = (r) => r.y + r.height;
   var span = (cells, key) => [Math.min(...cells.map((c) => c[key])), Math.max(...cells.map((c) => c[key]))];
   var interleaved = (a, b) => {
     const [ac, bc, ar, br] = [span(a, "col"), span(b, "col"), span(a, "row"), span(b, "row")];
@@ -2246,11 +2484,11 @@ ${logs.join(`
           continue;
         if (interleaved(a.cells, b.cells))
           continue;
-        const overlapX = Math.min(right(a.rect), right(b.rect)) - Math.max(a.rect.x, b.rect.x);
-        const overlapY = Math.min(bottom(a.rect), bottom(b.rect)) - Math.max(a.rect.y, b.rect.y);
+        const overlapX = Math.min(right2(a.rect), right2(b.rect)) - Math.max(a.rect.x, b.rect.x);
+        const overlapY = Math.min(bottom2(a.rect), bottom2(b.rect)) - Math.max(a.rect.y, b.rect.y);
         if (overlapX > 0 && overlapY > 0 ? overlapY <= overlapX : overlapX > 0) {
           const [upper, lower] = a.rect.y <= b.rect.y ? [a, b] : [b, a];
-          const have = lower.rect.y - bottom(upper.rect);
+          const have = lower.rect.y - bottom2(upper.rect);
           const [r0] = span(lower.cells, "row");
           if (have >= gap || span(upper.cells, "row")[1] >= r0)
             continue;
@@ -2259,7 +2497,7 @@ ${logs.join(`
           uniform.row = Math.max(uniform.row, Math.ceil((gap - have) / (r0 - span(upper.cells, "row")[1])));
         } else if (overlapY > 0) {
           const [left, rightB] = a.rect.x <= b.rect.x ? [a, b] : [b, a];
-          const have = rightB.rect.x - right(left.rect);
+          const have = rightB.rect.x - right2(left.rect);
           const [c0] = span(rightB.cells, "col");
           if (have >= gap || span(left.cells, "col")[1] >= c0)
             continue;
@@ -2607,6 +2845,10 @@ ${logs.join(`
     return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight, titleChars: g.meta.name.length };
   });
   var writeGroup = (g) => g.rect.setSharedPluginData(FLOW_NAMESPACE, GROUP_KEY, JSON.stringify(g.meta));
+  function setGroupLayout(g, layout) {
+    g.meta = { ...g.meta, layout };
+    writeGroup(g);
+  }
   function setFlowGroup(s, id) {
     if ((s.meta.flowGroupId ?? null) === id)
       return;
@@ -2710,12 +2952,19 @@ ${logs.join(`
     writeGroup(g);
     return bar;
   }
-  var INACTIVE = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
+  var INACTIVE = { active: false, extent: null, extrasChanged: false, shifted: 0, snapped: [], issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
   var json = (v) => v;
   async function refitGroups(board, screens, opts = {}) {
     const groups = await loadGroups(board);
     const holder = findHolder(board);
     const leftovers = !!(board.meta.colExtra || board.meta.rowExtra || board.meta.gapExtra || board.meta.baseColWidth !== undefined);
+    if (!groups.length && isGrouped(board)) {
+      const orphans = screens.some((s) => (s.meta.layoutId ?? BOARD_GRID) !== layoutOfScreen(s.meta));
+      const snapped = orphans ? await regridBoard(board, groups, screens) : [];
+      if (holder && !holder.children.length)
+        holder.remove();
+      return { ...INACTIVE, shifted: snapped.length, snapped };
+    }
     if (!groups.length && !(opts.releaseExtras && leftovers)) {
       if (holder && !holder.children.length)
         holder.remove();
@@ -2726,7 +2975,13 @@ ${logs.join(`
     let extrasChanged = false;
     let shifted = 0;
     const allMoves = () => cells.map((c) => ({ id: c.id, from: { col: c.col, row: c.row }, to: { col: c.col, row: c.row } }));
-    if (spacingOf(board.meta) === "uniform") {
+    let snapped = [];
+    if (isGrouped(board)) {
+      if (groups.length) {
+        snapped = await regridBoard(board, groups, screens);
+        shifted = snapped.length + await placeGroups(board, groups, screens);
+      }
+    } else if (spacingOf(board.meta) === "uniform") {
       const base = basePitchOf(board.meta);
       const needs = groups.length ? groupBoundaryNeeds(groups.map(recOf), cells, { ...base, screenW: board.meta.screenW, screenH: board.meta.screenH }) : { col: 0, row: 0 };
       const more = opts.pitchExtra ?? { col: 0, row: 0 };
@@ -2755,39 +3010,16 @@ ${logs.join(`
     if (!groups.length) {
       if (holder && !holder.children.length)
         holder.remove();
-      return { ...INACTIVE, extrasChanged, shifted };
+      return { ...INACTIVE, extrasChanged, shifted, snapped };
     }
     const layer = ensureHolder(board);
     board.node.locked = true;
     layer.locked = true;
     layer.setSharedPluginData(FLOW_NAMESPACE, BOARD_BACKUP_KEY, JSON.stringify({ meta: board.meta, name: board.node.name, rect: rectOf(board.node) }));
     await snapBadges(screens);
-    const prints = new Map;
-    for (const s of screens)
-      prints.set(s.node.id, await footprintOf(s));
-    const arrowRects = await internalArrowsOf(board);
-    const inside = internalArrowRects(groups.map(recOf), arrowRects);
-    const membersOf = (g) => [
-      ...g.meta.screenIds.flatMap((id) => {
-        const p = prints.get(id);
-        return p ? [p.content] : [];
-      }),
-      ...inside.get(g.id) ?? []
-    ];
-    const fitted = new Map;
+    const { prints, fitted } = await measureBoxes(board, groups, screens);
     const children = groups.filter((g) => g.meta.parentId);
     const tops = groups.filter((g) => !g.meta.parentId);
-    for (const g of children) {
-      const m = membersOf(g);
-      if (m.length)
-        fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
-    }
-    for (const g of tops) {
-      const m = membersOf(g);
-      const kids = children.flatMap((k) => k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id)] : []);
-      if (m.length || kids.length)
-        fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
-    }
     const emptyGroups = [];
     const boxes = [];
     for (const g of [...tops, ...children]) {
@@ -2843,11 +3075,102 @@ ${logs.join(`
       count: groups.length,
       extrasChanged,
       shifted,
+      ...snapped.length ? { snapped: json(snapped) } : {},
       ...issues.length ? { issues: json(issues) } : {},
       ...nesting.length ? { nesting: json(nesting) } : {},
       ...emptyGroups.length ? { emptyGroups } : {}
     };
-    return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
+    return { active: true, extent, extrasChanged, shifted, snapped, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
+  }
+  async function measureBoxes(board, groups, screens) {
+    const prints = new Map;
+    for (const s of screens)
+      prints.set(s.node.id, await footprintOf(s));
+    const arrowRects = await internalArrowsOf(board);
+    const inside = internalArrowRects(groups.map(recOf), arrowRects);
+    const membersOf = (g) => [
+      ...g.meta.screenIds.flatMap((id) => {
+        const p = prints.get(id);
+        return p ? [p.content] : [];
+      }),
+      ...inside.get(g.id) ?? []
+    ];
+    const fitted = new Map;
+    const children = groups.filter((g) => g.meta.parentId);
+    const tops = groups.filter((g) => !g.meta.parentId);
+    for (const g of children) {
+      const m = membersOf(g);
+      if (m.length)
+        fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
+    }
+    for (const g of tops) {
+      const m = membersOf(g);
+      const kids = children.flatMap((k) => k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id)] : []);
+      if (m.length || kids.length)
+        fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
+    }
+    return { prints, fitted };
+  }
+  var MAX_PLACE_PASSES = 8;
+  var groupGrids = (board, groups) => gridLookup(board, groups.map((g) => ({ id: g.id, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+  async function regridBoard(board, groups, screens) {
+    const plan = planRegrid(board.meta, screens.map((s) => {
+      const r = rectOf(s.node);
+      return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, ...s.meta.layoutId ? { layoutId: s.meta.layoutId } : {}, col: s.meta.col, row: s.meta.row, x: r.x, y: r.y };
+    }), groups.map((g) => ({ id: g.id, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+    for (const [id, layout] of plan.layouts) {
+      const g = groups.find((x) => x.id === id);
+      if (!g)
+        continue;
+      g.meta = { ...g.meta, layout };
+      writeGroup(g);
+    }
+    const grids = groupGrids(board, groups);
+    const out = [];
+    for (const [id, cell] of plan.cells) {
+      const s = screens.find((x) => x.node.id === id);
+      if (!s)
+        continue;
+      if (plan.snapped.includes(id)) {
+        const want = cellRectIn(grids(cell.layoutId), cell.col, cell.row, { width: board.meta.screenW, height: board.meta.screenH });
+        const have = rectOf(s.node);
+        await shiftScreen(s, want.x - have.x, want.y - have.y);
+        out.push({ id, name: s.node.name, to: { ...cell } });
+      }
+      s.meta = { ...s.meta, ...cell };
+      writeScreen(s.node, s.meta);
+    }
+    return out;
+  }
+  async function placeGroups(board, groups, screens) {
+    let moved = 0;
+    for (let pass = 0;pass < MAX_PLACE_PASSES; pass++) {
+      const { fitted } = await measureBoxes(board, groups, screens);
+      const boxes = groups.flatMap((g) => {
+        const fit = fitted.get(g.id);
+        const rect = fit ? unionRect([fit.box, fit.title]) : null;
+        return rect ? [{ id: g.id, rect, ...g.meta.parentId ? { parentId: g.meta.parentId } : {} }] : [];
+      });
+      const moves = resolveOverlaps(boxes, GROUP_CLEAR);
+      if (!moves.length)
+        break;
+      const plan = planBlockShifts(moves, groups.map((g) => ({ id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, screenIds: g.meta.screenIds, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+      for (const [id, d] of plan.screens) {
+        const s = screens.find((x) => x.node.id === id);
+        if (!s)
+          continue;
+        await shiftScreen(s, d.dx, d.dy);
+        moved++;
+      }
+      for (const [id, layout] of plan.layouts) {
+        const g = groups.find((x) => x.id === id);
+        if (!g)
+          continue;
+        g.meta = { ...g.meta, layout };
+        writeGroup(g);
+      }
+    }
+    return moved;
   }
   async function internalArrowsOf(board) {
     const out = [];
@@ -2858,6 +3181,8 @@ ${logs.join(`
     return out;
   }
   async function settleBoard(board, screens, first, reroute) {
+    if (isGrouped(board))
+      return settleGrouped(board, screens, first, reroute);
     const uniform = spacingOf(board.meta) === "uniform";
     const out = await runSettle({
       uniform,
@@ -2874,6 +3199,25 @@ ${logs.join(`
     if (out.fit.active)
       await resizeBoard(board, screens, true, out.fit.extent);
     return out;
+  }
+  var MAX_GROUPED_PASSES = 3;
+  async function settleGrouped(board, screens, first, reroute) {
+    let fit = first;
+    let drawn = reroute;
+    let passes = 0;
+    while (passes < MAX_GROUPED_PASSES) {
+      const next = await refitGroups(board, screens);
+      passes++;
+      const same = sameBoxes(fit.boxes, next.boxes);
+      fit = next;
+      if (same && next.shifted === 0)
+        break;
+      await resizeBoard(board, screens, false, next.extent);
+      drawn = await rerouteBoards([board]);
+    }
+    if (fit.active)
+      await resizeBoard(board, screens, true, fit.extent);
+    return { fit, reroute: drawn, passes };
   }
   async function syncBoard(board, screens, opts = {}) {
     const first = await refitGroups(board, screens, opts);
@@ -2965,6 +3309,18 @@ ${logs.join(`
         ...groups.map(recOf).map((g) => g.id === plan.parentId ? { ...g, screenIds: g.screenIds.filter((id) => !plan.takeFromParent.includes(id)) } : g),
         { id: "new", name: plan.name, ...plan.parentId ? { parentId: plan.parentId } : {}, screenIds: plan.screenIds, style: styled.style }
       ];
+      if (isGrouped(board)) {
+        return ok({
+          dryRun: true,
+          boardId: board.node.id,
+          name: plan.name,
+          ...plan.parentId ? { parentId: plan.parentId } : {},
+          screens: describeScreens(screens, plan.screenIds),
+          movedFromParent: plan.takeFromParent,
+          spacing: "grouped",
+          screensShifted: 0
+        });
+      }
       const base = { ...basePitchOf(board.meta), screenW: board.meta.screenW, screenH: board.meta.screenH };
       if (spacingOf(board.meta) === "uniform") {
         const pitch = pitchFromNeeds(base, groupBoundaryNeeds(next, cellsOf(screens), base));
@@ -3017,6 +3373,7 @@ ${logs.join(`
       ...boxOf(fit, rect.id),
       extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
       screensShifted: fit.shifted,
+      ...fit.snapped.length ? { snapped: json(fit.snapped) } : {},
       board: size,
       issues: json(fit.issues),
       nesting: json(fit.nesting),
@@ -3076,6 +3433,7 @@ ${logs.join(`
       ...boxOf(fit, group.id),
       extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
       screensShifted: fit.shifted,
+      ...fit.snapped.length ? { snapped: json(fit.snapped) } : {},
       board: size,
       issues: json(fit.issues),
       nesting: json(fit.nesting),
@@ -3164,14 +3522,69 @@ ${logs.join(`
     const { fit, size, reroute } = await syncBoard(board, screens);
     return { ...fit.summary, board: size, reroute: rerouteBrief(reroute) };
   }
+  async function convertToGrouped(board, screens, groups, dryRun) {
+    const plan = migrateToGrouped(board.meta, screens.map((s) => {
+      const r = rectOf(s.node);
+      return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, x: r.x, y: r.y };
+    }), groups.map((g) => ({ id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {} })));
+    const report = {
+      boardId: board.node.id,
+      dryRun,
+      from: spacingOf(board.meta),
+      grids: plan.grids.map((g) => ({ id: g.id, ...g.id === BOARD_GRID ? {} : { name: groups.find((x) => x.id === g.id)?.meta.name ?? g.id }, originX: g.originX, originY: g.originY })),
+      screensMoved: 0,
+      offGrid: plan.offGrid.map((id) => ({ id, name: screens.find((s) => s.node.id === id)?.node.name ?? id }))
+    };
+    if (dryRun)
+      return report;
+    for (const g of plan.grids) {
+      if (g.id === BOARD_GRID)
+        continue;
+      const group = groups.find((x) => x.id === g.id);
+      if (!group)
+        continue;
+      group.meta = { ...group.meta, layout: { originX: g.originX, originY: g.originY } };
+      writeGroup(group);
+    }
+    const loose = plan.grids.find((g) => g.id === BOARD_GRID);
+    const { colExtra: _c, rowExtra: _r, gapExtra: _g, baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...rest, spacing: "grouped", ...loose ? { originX: loose.originX, originY: loose.originY } : {} };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    for (const s of screens) {
+      const cell = plan.cells.get(s.node.id);
+      if (!cell)
+        continue;
+      s.meta = { ...s.meta, ...cell };
+      writeScreen(s.node, s.meta);
+    }
+    return report;
+  }
   var rerouteFlowWithGroups = async (args) => {
     const boards = await boardsFor(args);
     const mode = str(args, "spacing");
-    if (mode !== undefined && mode !== "uniform" && mode !== "banded")
-      return fail('spacing must be "uniform" or "banded".');
-    if (mode)
+    if (mode !== undefined && mode !== "uniform" && mode !== "banded" && mode !== "grouped")
+      return fail('spacing must be "uniform", "banded" or "grouped".');
+    const dryRun = bool(args, "dryRun", false);
+    const conversions = [];
+    if (mode === "grouped") {
+      for (const board of boards) {
+        if (isGrouped(board))
+          continue;
+        const groups = await loadGroups(board);
+        if (!groups.length)
+          return fail(`Board ${board.node.id} has no flow groups: spacing "grouped" lays each group out on its own grid. Create groups first.`);
+        const { screens } = await loadScreens(board);
+        reconcile(groups, screens, !dryRun);
+        conversions.push(await convertToGrouped(board, screens, groups, dryRun));
+      }
+      if (dryRun)
+        return ok({ dryRun: true, conversions });
+    } else if (mode) {
+      if (boards.some((b) => isGrouped(b)))
+        return fail("A grouped board cannot go back to uniform or banded spacing: its screens have group-local cells.");
       for (const board of boards)
         setSpacing(board, mode);
+    }
     const fits = [];
     const first = new Map;
     for (const board of boards) {
@@ -3194,7 +3607,7 @@ ${logs.join(`
     }
     if (!reply.ok || !fits.length || typeof reply.result !== "object" || reply.result === null || Array.isArray(reply.result))
       return reply;
-    return ok({ ...reply.result, groups: fits });
+    return ok({ ...reply.result, groups: fits, ...conversions.length ? { conversions } : {} });
   };
   var connectWithGroups = async (args) => {
     const reply = await connect(args);
@@ -3969,7 +4382,7 @@ ${logs.join(`
   var DOT_INSET = 12;
   function triggerDot(trigger, source) {
     const narrow = trigger.width < NARROW_TRIGGER * source.width;
-    return { x: narrow ? trigger.x + trigger.width / 2 : right2(trigger) - DOT_INSET, y: midY(trigger) };
+    return { x: narrow ? trigger.x + trigger.width / 2 : right3(trigger) - DOT_INSET, y: midY(trigger) };
   }
   var LANE_STEP = 24;
   var BACKWARDS_DROP = 60;
@@ -3994,29 +4407,29 @@ ${logs.join(`
   var EDGE_MARGIN = 8;
   var ROW_TOLERANCE = 2;
   var laneOffset = (lane) => lane <= 0 ? 0 : (lane % 2 === 1 ? 1 : -1) * Math.ceil(lane / 2) * LANE_STEP;
-  var right2 = (r) => r.x + r.width;
-  var bottom2 = (r) => r.y + r.height;
+  var right3 = (r) => r.x + r.width;
+  var bottom3 = (r) => r.y + r.height;
   var midY = (r) => r.y + r.height / 2;
   function relation(source, target) {
-    const overlapX = Math.min(right2(source), right2(target)) - Math.max(source.x, target.x);
+    const overlapX = Math.min(right3(source), right3(target)) - Math.max(source.x, target.x);
     if (overlapX > 0) {
-      if (target.y >= bottom2(source) - 0.5)
+      if (target.y >= bottom3(source) - 0.5)
         return "below";
-      if (bottom2(target) <= source.y + 0.5)
+      if (bottom3(target) <= source.y + 0.5)
         return "above";
       return "overlap";
     }
-    return target.x >= right2(source) - 0.5 ? "right" : "left";
+    return target.x >= right3(source) - 0.5 ? "right" : "left";
   }
   function gutterKey(source, target) {
     switch (relation(source, target)) {
       case "right":
-        return `h:${right2(source)}`;
+        return `h:${right3(source)}`;
       case "below":
       case "above":
         return `v:${Math.max(source.x, target.x)}`;
       case "left":
-        return `b:${Math.max(bottom2(source), bottom2(target))}`;
+        return `b:${Math.max(bottom3(source), bottom3(target))}`;
       case "overlap":
         return `o:${source.x}:${source.y}`;
     }
@@ -4096,13 +4509,13 @@ ${logs.join(`
       case "right": {
         const tx = target.x;
         const ty = midY(target);
-        const sx = right2(source);
+        const sx = right3(source);
         const bx = labelLimitX !== undefined && labelLimitX < tx ? Math.max(labelLimitX, sx) : tx;
-        if (exit === "bottom" && target.y >= bottom2(source)) {
+        if (exit === "bottom" && target.y >= bottom3(source)) {
           const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
-          const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right2(source) - EDGE_MARGIN);
+          const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right3(source) - EDGE_MARGIN);
           const y = fan && fan.count > 1 ? ty : ty + off;
-          const r = done("elbow", [{ x, y: bottom2(source) }, { x, y }, { x: tx, y }]);
+          const r = done("elbow", [{ x, y: bottom3(source) }, { x, y }, { x: tx, y }]);
           return { ...r, labelAnchor: { x: (x + bx) / 2, y } };
         }
         if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
@@ -4121,13 +4534,13 @@ ${logs.join(`
         const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
         const start = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) + toward };
         const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
-        const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+        const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
         const jog = done(trigger ? "trigger" : "gutter", [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
         return bx < tx && bx > midX ? { ...jog, labelAnchor: { x: (midX + bx) / 2, y: ey } } : jog;
       }
       case "below": {
-        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right2(source), right2(target)) - EDGE_MARGIN);
-        return done("below", [{ x, y: bottom2(source) }, { x, y: target.y }]);
+        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right3(source), right3(target)) - EDGE_MARGIN);
+        return done("below", [{ x, y: bottom3(source) }, { x, y: target.y }]);
       }
       case "above":
         return routeViaGap(source, target, trigger, gutter, lane, { kind: "around" });
@@ -4136,10 +4549,10 @@ ${logs.join(`
     }
   }
   function routeViaGap(source, target, trigger, gutter, lane, opts = {}) {
-    const start = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom2(source) };
-    const gapY = bottom2(source) + BACKWARDS_DROP + lane * LANE_STEP;
+    const start = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom3(source) };
+    const gapY = bottom3(source) + BACKWARDS_DROP + lane * LANE_STEP;
     const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
-    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
     const r = done(opts.kind ?? "around", [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);
     const at = opts.shared ? r.points.findIndex((p) => p.x === x && p.y === gapY) : -1;
     const first = r.points[0];
@@ -4147,20 +4560,20 @@ ${logs.join(`
     return { ...r, ...at >= 0 ? { trunkFrom: at } : {}, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
   }
   function routeViaBand(source, target, trigger, bandY, lane) {
-    const start = trigger ? triggerDot(trigger, source) : { x: right2(source), y: midY(source) };
-    const x1 = right2(source) + FAN_EDGE + lane * LANE_STEP;
+    const start = trigger ? triggerDot(trigger, source) : { x: right3(source), y: midY(source) };
+    const x1 = right3(source) + FAN_EDGE + lane * LANE_STEP;
     const x2 = target.x - FAN_EDGE - lane * LANE_STEP;
-    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
     const r = done("gutter", [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: x2, y: bandY }, { x: x2, y: ey }, { x: target.x, y: ey }]);
     return { ...r, labelAnchor: { x: (x2 + target.x) / 2, y: ey } };
   }
   var TRUNK_GAP = 48;
   var LABEL_GAP = 8;
   function routeJoin(source, target, trigger, trunkX, bandY, lane = 0) {
-    const start = trigger ? triggerDot(trigger, source) : { x: right2(source), y: midY(source) };
-    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const start = trigger ? triggerDot(trigger, source) : { x: right3(source), y: midY(source) };
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
     const joinY = bandY ?? start.y;
-    const x1 = right2(source) + FAN_EDGE + lane * LANE_STEP;
+    const x1 = right3(source) + FAN_EDGE + lane * LANE_STEP;
     const pts = bandY === null ? [start, { x: trunkX, y: start.y }, { x: trunkX, y: ey }, { x: target.x, y: ey }] : [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: trunkX, y: bandY }, { x: trunkX, y: ey }, { x: target.x, y: ey }];
     const r = done("gutter", pts);
     const at = r.points.findIndex((p) => p.x === trunkX && p.y === joinY);
@@ -4359,7 +4772,7 @@ ${logs.join(`
           if (row === 0)
             return;
           const y = p0.y + dir * row;
-          const fx = right3(items[i].ends.source) + FORK_X0 + FORK_STEP * (list.length - 1 - rank);
+          const fx = right4(items[i].ends.source) + FORK_X0 + FORK_STEP * (list.length - 1 - rank);
           if ((p2.y - y) * dir < EDGE_MARGIN || p1.x - fx < EDGE_MARGIN)
             return;
           const points = [p0, { x: fx, y: p0.y }, { x: fx, y }, { x: p1.x, y }, ...r.points.slice(2)];
@@ -4368,7 +4781,7 @@ ${logs.join(`
       }
     }
   }
-  var right3 = (r) => r.x + r.width;
+  var right4 = (r) => r.x + r.width;
   var overlap1d = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
   function verticalLeg(r) {
     if (!r.ok || r.kind !== "below" && r.kind !== "above")
@@ -6039,10 +6452,11 @@ ${logs.join(`
   // plugin-src/gridtools.ts
   var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
   var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
-  async function finish(board, screens, stale, moves, shrink, extras) {
+  var gridScreens = (screens) => screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), col: s.meta.col, row: s.meta.row }));
+  async function finish(board, screens, stale, moves, shrink, extras, grids) {
     if (extras)
       applyExtras(board, extras);
-    const moved = await applyMoves(board, screens, moves);
+    const moved = await applyMoves(board, screens, moves, grids);
     const fit = await refitGroups(board, screens);
     const size = await resizeBoard(board, screens, shrink, fit.extent);
     const reroute = await rerouteBoards([board]);
@@ -6066,19 +6480,42 @@ ${logs.join(`
       return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
     const board = await loadBoard(stored.boardId);
     const { screens, stale } = await loadScreens(board);
-    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, "swap", false));
+    const swap = bool(args, "swap", false);
+    const groupArg = str(args, "group");
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok)
+      return fail(target.error);
+    if (!isGrouped(board)) {
+      const plan = planMove(cellsOf(screens), node.id, col, row, swap);
+      if (!plan.ok)
+        return fail(plan.error);
+      if (target) {
+        const set = await setScreenGroup(board, screens, node.id, target.groupId);
+        if (!set.ok)
+          return fail(set.error);
+      }
+      return finish(board, screens, stale, plan.moves, false);
+    }
+    const groups = await loadGroups(board);
+    const toLayout = target ? target.groupId ?? BOARD_GRID : undefined;
+    const plan = planGridMove(gridScreens(screens), node.id, col, row, swap, toLayout);
     if (!plan.ok)
       return fail(plan.error);
-    const groupArg = str(args, "group");
-    if (groupArg !== undefined) {
-      const target = await checkGroupArg(board.node.id, groupArg);
-      if (!target.ok)
-        return fail(target.error);
+    if (plan.moves.some((m) => m.id !== node.id && m.from.layoutId !== m.to.layoutId))
+      return fail("A swap across two groups would change both screens' groups. Move them one at a time.");
+    const grids = groupGrids(board, groups);
+    const into = toLayout ? groups.find((g) => g.id === toLayout) : undefined;
+    if (into && !into.meta.layout) {
+      const at = rectOf(node);
+      const pitch = grids(BOARD_GRID);
+      setGroupLayout(into, { originX: at.x - col * pitch.colWidth, originY: at.y - row * pitch.rowHeight });
+    }
+    if (target) {
       const set = await setScreenGroup(board, screens, node.id, target.groupId);
       if (!set.ok)
         return fail(set.error);
     }
-    return finish(board, screens, stale, plan.moves, false);
+    return finish(board, screens, stale, plan.moves, false, undefined, groupGrids(board, groups));
   };
   async function insertAlong(args, axis) {
     const tool = axis === "col" ? "insert_columns" : "insert_rows";
@@ -6093,7 +6530,18 @@ ${logs.join(`
       return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
     const board = await loadBoard(boardId);
     const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+    const groupArg = str(args, "groupId");
+    if (!isGrouped(board)) {
+      if (groupArg !== undefined)
+        return fail(`${tool}: groupId only applies to a board with spacing "grouped".`);
+      return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+    }
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok)
+      return fail(target.error);
+    const layoutId = target?.ok ? target.groupId ?? BOARD_GRID : BOARD_GRID;
+    const grids = groupGrids(board, await loadGroups(board));
+    return finish(board, screens, stale, shiftGridPlan(gridScreens(screens), layoutId, axis, after, count), false, undefined, grids);
   }
   var insertColumns = (args) => insertAlong(args, "col");
   var insertRows = (args) => insertAlong(args, "row");
@@ -6103,6 +6551,8 @@ ${logs.join(`
       return fail("compact_board needs boardId.");
     const board = await loadBoard(boardId);
     const { screens, stale } = await loadScreens(board);
+    if (isGrouped(board))
+      return finish(board, screens, stale, compactGridPlan(gridScreens(screens)), true, undefined, groupGrids(board, await loadGroups(board)));
     return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
   };
   async function fontFor2(text) {
@@ -7124,7 +7574,18 @@ ${body}
     if (!wanted.ok)
       return fail(wanted.error);
     const flowGroupId = wanted.groupId;
-    const target = cellRect(board, col, row);
+    const groupedBoard = board.spacing === "grouped";
+    const layoutId = flowGroupId ?? BOARD_GRID;
+    let target;
+    if (groupedBoard) {
+      const loaded = await loadBoard(meta.boardId);
+      const groups = await loadGroups(loaded);
+      if (flowGroupId && !groups.find((g) => g.id === flowGroupId)?.meta.layout)
+        return fail(`The group ${flowGroupId} has no grid yet (it has no screens of its own). Add a screen to it first.`);
+      target = cellRectIn(groupGrids(loaded, groups)(layoutId), col, row, { width: board.screenW, height: board.screenH });
+    } else {
+      target = cellRect(board, col, row);
+    }
     const grouped = src.parent?.type === "GROUP" && isScreenGroupName(src.parent.name) ? src.parent : null;
     const container = grouped ? grouped.parent : src.parent;
     const siblings = container && "children" in container ? container.children : [];
@@ -7206,7 +7667,8 @@ ${body}
       groupId: groupCopy?.id ?? null,
       build: { status: "not-built" },
       badgeId: badgeCopy?.id ?? null,
-      flowGroupId
+      flowGroupId,
+      ...groupedBoard ? { layoutId } : {}
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build)
@@ -8338,7 +8800,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a681c203", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "b7197cf3", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8346,7 +8808,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a681c203"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"b7197cf3"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

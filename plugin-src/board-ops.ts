@@ -2,9 +2,11 @@ import { assignScreenTexts } from './adopt';
 import { badgeSnap, linkBadges } from './badge-link';
 import { growBounds } from './duplicate-plan';
 import { collectBadges, collectScreens, collectTexts, groupIdOf, readMeta, rectOf, sceneById, type Board } from './flow';
-import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type ScreenMeta } from './flowmeta';
+import { BOARD_KEY, FLOW_NAMESPACE, GROUP_KEY, GROUP_LAYER_KEY, SCREEN_KEY, parseGroupMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { JsonObject } from '../shared/protocol';
-import { boardBounds, cellOf, cellRect, staleReason, type ExtrasPair, type Move } from './grid';
+import { boardBounds, cellOf, cellRect, staleReason, type ExtrasPair, type GridMeta, type Move } from './grid';
+import { boundsOfRects } from './grid-plan';
+import { BOARD_GRID, cellOfIn, cellRectIn, gridOfScreen, type LayoutGrid } from './layout-grid';
 import type { Rect } from './rect';
 import { checkPitch, uniformFields, type Pitch, type Spacing } from './pitch';
 import { badgeBelongsTo, badgeFallbackOffset, shiftTargets } from './screen-group';
@@ -40,6 +42,38 @@ function guardPitch(board: Board, entries: { frame: FrameNode }[]): { from: Pitc
     return { from, to: verdict.pitch };
 }
 
+export type GroupLayout = { id: string; layout?: { originX: number; originY: number } };
+/** Resolves a layout id (`board` or a group id) to its grid. */
+export type GridLookup = (layoutId: string) => LayoutGrid;
+
+export const isGrouped = (board: Board): boolean => board.meta.spacing === 'grouped';
+
+/** The layout origin stored on each flow group of the board. Read straight from the group rectangles. */
+export function readGroupLayouts(board: Board): GroupLayout[] {
+    const parent = board.node.parent;
+    if (!parent || !('children' in parent)) return [];
+    const holder = parent.children.find((c) => c.type === 'FRAME' && c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) === board.node.id);
+    if (!holder || !('children' in holder)) return [];
+    const out: GroupLayout[] = [];
+    for (const c of holder.children) {
+        if (c.type !== 'RECTANGLE') continue;
+        const meta = parseGroupMeta(c.getSharedPluginData(FLOW_NAMESPACE, GROUP_KEY));
+        if (meta && meta.boardId === board.node.id) out.push({ id: c.id, ...(meta.layout ? { layout: meta.layout } : {}) });
+    }
+    return out;
+}
+
+export const gridLookup = (board: Board, layouts: readonly GroupLayout[]): GridLookup => (layoutId) => gridOfScreen({ id: '', layoutId }, layouts, board.meta);
+
+/** The layout a screen belongs to on a grouped board: its flow group, else the board grid. */
+export const layoutOfScreen = (meta: ScreenMeta): string => meta.flowGroupId ?? BOARD_GRID;
+
+/** A grid as the `GridMeta` the cell maths (`cellOf`, `staleReason`) expects: no extras, the grid's own origin and pitch. */
+export const gridMetaOf = (meta: GridMeta, grid: LayoutGrid): GridMeta => {
+    const { colExtra: _c, rowExtra: _r, ...rest } = meta;
+    return { ...rest, originX: grid.originX, originY: grid.originY, colWidth: grid.colWidth, rowHeight: grid.rowHeight };
+};
+
 /**
  * The screens of a board. Duplicating a frame in Figma copies its plugin data, so a screen's meta is trusted only
  * when its label text sits at the frame's x and its cell matches its position. Anything else is re-derived from the
@@ -50,6 +84,10 @@ export async function loadScreens(board: Board): Promise<{ screens: Screen[]; st
     if (!parent || !('children' in parent)) return { screens: [], stale: [] };
     const pitchRepaired = guardPitch(board, collectScreens(parent.children));
     const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const grouped = isGrouped(board);
+    const layouts = grouped ? readGroupLayouts(board) : [];
+    const lookup = gridLookup(board, layouts);
+    const hasGrid = (stored: ScreenMeta): boolean => !stored.flowGroupId || layouts.some((g) => g.id === stored.flowGroupId && !!g.layout);
     const screens: Screen[] = [];
     const stale: StaleFix[] = [];
     for (const entry of collectScreens(parent.children)) {
@@ -60,7 +98,9 @@ export async function loadScreens(board: Board): Promise<{ screens: Screen[]; st
         const anchorId = stored.labelId ?? stored.routeId;
         const anchor = anchorId ? await sceneById(anchorId) : null;
         const rect = rectOf(c);
-        const reason = staleReason(board.meta, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
+        const grid = grouped && hasGrid(stored) ? lookup(layoutOfScreen({ ...stored, flowGroupId: stored.flowGroupId ?? null })) : null;
+        const against: GridMeta = !grouped ? board.meta : grid ? gridMetaOf(board.meta, grid) : gridMetaOf(board.meta, { id: BOARD_GRID, originX: rect.x - stored.col * board.meta.colWidth, originY: rect.y - stored.row * board.meta.rowHeight, colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight });
+        const reason = staleReason(against, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
         if (!reason) {
             if ((stored.groupId ?? null) === groupId) {
                 screens.push({ node: c, meta: stored });
@@ -71,7 +111,7 @@ export async function loadScreens(board: Board): Promise<{ screens: Screen[]; st
             }
             continue;
         }
-        const cell = cellOf(rect, board.meta);
+        const cell = grouped && grid ? cellOfIn(grid, rect) : cellOf(rect, board.meta);
         const meta: ScreenMeta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...(await ownBadge(stored, groupId, rect)) };
         writeScreen(c, meta);
         stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
@@ -148,34 +188,42 @@ function shiftNode(node: SceneNode | null, dx: number, dy: number): void {
     node.y += dy;
 }
 
-export async function applyMoves(board: Board, screens: Screen[], moves: Move[]): Promise<JsonObject[]> {
+/** Shifts a screen's frame, label, route and badge by the same delta, and snaps the badge back into its slot. */
+export async function shiftScreen(s: Screen, dx: number, dy: number): Promise<void> {
+    if (dx === 0 && dy === 0) return;
+    const [label, route, badge] = await Promise.all([
+        s.meta.labelId ? sceneById(s.meta.labelId) : null,
+        s.meta.routeId ? sceneById(s.meta.routeId) : null,
+        s.meta.badgeId ? sceneById(s.meta.badgeId) : null,
+    ]);
+    const targets = shiftTargets({
+        frameId: s.node.id,
+        groupId: s.meta.groupId,
+        frameParentId: s.node.parent?.id ?? null,
+        labelId: label?.id ?? null,
+        labelParentId: label?.parent?.id ?? null,
+        routeId: route?.id ?? null,
+        routeParentId: route?.parent?.id ?? null,
+        badgeId: badge?.id ?? null,
+        badgeParentId: badge?.parent?.id ?? null,
+    });
+    for (const id of targets) shiftNode(await sceneById(id), dx, dy);
+    await snapBadges([s]);
+}
+
+/**
+ * Moves screens to the cells in `moves`. A move whose target names a layout (`to.layoutId`) lands on that grid via `grids`;
+ * any other cell is on the board's single shared grid. The screen's `layoutId` follows the move.
+ */
+export async function applyMoves(board: Board, screens: Screen[], moves: Move[], grids?: GridLookup): Promise<JsonObject[]> {
     const out: JsonObject[] = [];
     for (const m of moves) {
         const s = screens.find((x) => x.node.id === m.id);
         if (!s) continue;
-        const want = cellRect(board.meta, m.to.col, m.to.row);
+        const want = m.to.layoutId !== undefined && grids ? cellRectIn(grids(m.to.layoutId), m.to.col, m.to.row, { width: board.meta.screenW, height: board.meta.screenH }) : cellRect(board.meta, m.to.col, m.to.row);
         const have = rectOf(s.node);
-        const dx = want.x - have.x;
-        const dy = want.y - have.y;
-        const [label, route, badge] = await Promise.all([
-            s.meta.labelId ? sceneById(s.meta.labelId) : null,
-            s.meta.routeId ? sceneById(s.meta.routeId) : null,
-            s.meta.badgeId ? sceneById(s.meta.badgeId) : null,
-        ]);
-        const targets = shiftTargets({
-            frameId: s.node.id,
-            groupId: s.meta.groupId,
-            frameParentId: s.node.parent?.id ?? null,
-            labelId: label?.id ?? null,
-            labelParentId: label?.parent?.id ?? null,
-            routeId: route?.id ?? null,
-            routeParentId: route?.parent?.id ?? null,
-            badgeId: badge?.id ?? null,
-            badgeParentId: badge?.parent?.id ?? null,
-        });
-        for (const id of targets) shiftNode(await sceneById(id), dx, dy);
-        s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
-        await snapBadges([s]);
+        await shiftScreen(s, want.x - have.x, want.y - have.y);
+        s.meta = { ...s.meta, col: m.to.col, row: m.to.row, ...(m.to.layoutId !== undefined ? { layoutId: m.to.layoutId } : {}) };
         writeScreen(s.node, s.meta);
         out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
     }
@@ -191,7 +239,7 @@ export async function resizeBoard(board: Board, screens: Screen[], shrink: boole
     const bg = board.node;
     const rect = rectOf(bg);
     if (!('resize' in bg)) return { width: rect.width, height: rect.height };
-    const b = boardBounds(board.meta, screens.map((s) => s.meta));
+    const b = isGrouped(board) ? boundsOfRects(board.meta, screens.map((s) => rectOf(s.node))) : boardBounds(board.meta, screens.map((s) => s.meta));
     const needW = b.x + b.width - rect.x;
     const needH = b.y + b.height - rect.y;
     const width = Math.max(1, shrink ? needW : Math.max(rect.width, needW));

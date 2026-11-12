@@ -75,7 +75,7 @@ function agreedPitch(samples: readonly { index: number; offset: number }[]): num
  * board, or screens that agree on nothing, is refused.
  */
 export function checkPitch(meta: GridMeta & { spacing?: Spacing }, screens: readonly ScreenPos[]): PitchCheck {
-    if (screens.length < MIN_SCREENS) return { kind: 'ok' };
+    if (screens.length < MIN_SCREENS || meta.spacing === 'grouped') return { kind: 'ok' };
     const off = screens.filter((s) => {
         const want = cellRect(meta, s.col, s.row);
         return Math.abs(want.x - s.x) > POS_TOLERANCE || Math.abs(want.y - s.y) > POS_TOLERANCE;

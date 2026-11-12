@@ -1,17 +1,22 @@
 import type { JsonObject } from '../shared/protocol';
-import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, writeScreen, type Screen, type StaleFix } from './board-ops';
+import { applyExtras, applyMoves, cellsOf, isGrouped, layoutOfScreen, loadScreens, resizeBoard, writeScreen, type GridLookup, type Screen, type StaleFix } from './board-ops';
 import { loadBoard, readMeta, rectOf, rerouteBoards, sceneById, type Board } from './flow';
-import { checkGroupArg, refitGroups, setScreenGroup } from './flow-groups';
+import { checkGroupArg, groupGrids, loadGroups, refitGroups, setGroupLayout, setScreenGroup } from './flow-groups';
 import { BOARD_KEY, FLOW_NAMESPACE, parseBoardMeta, SCREEN_KEY, parseScreenMeta, type BoardMeta } from './flowmeta';
 import { boardBounds, compactedExtras, compactPlan, planMove, shiftedExtras, shiftPlan, type GridMeta, type Move, type ExtrasPair } from './grid';
+import { compactGridPlan, planGridMove, shiftGridPlan, type GridScreen } from './grid-plan';
+import { BOARD_GRID } from './layout-grid';
 import { fail, num, ok, str, bool, type Handler, type MainReply } from './types';
 
 export const DEFAULT_ARROW_STYLE: BoardMeta['arrowStyle'] = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
 export const DARK_FILL: SolidPaint = { type: 'SOLID', color: { r: 0.067, g: 0.067, b: 0.067 } };
 
-async function finish(board: Board, screens: Screen[], stale: StaleFix[], moves: Move[], shrink: boolean, extras?: ExtrasPair): Promise<MainReply> {
+/** The screens as cells of their layout grids (`board` for ungrouped screens). Only meaningful on a grouped board. */
+const gridScreens = (screens: Screen[]): GridScreen[] => screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), col: s.meta.col, row: s.meta.row }));
+
+async function finish(board: Board, screens: Screen[], stale: StaleFix[], moves: Move[], shrink: boolean, extras?: ExtrasPair, grids?: GridLookup): Promise<MainReply> {
     if (extras) applyExtras(board, extras);
-    const moved = await applyMoves(board, screens, moves);
+    const moved = await applyMoves(board, screens, moves, grids);
     const fit = await refitGroups(board, screens);
     const size = await resizeBoard(board, screens, shrink, fit.extent);
     const reroute = await rerouteBoards([board]);
@@ -34,16 +39,37 @@ export const moveScreen: Handler = async (args) => {
     if (!stored) return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
     const board = await loadBoard(stored.boardId);
     const { screens, stale } = await loadScreens(board);
-    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, 'swap', false));
-    if (!plan.ok) return fail(plan.error);
+    const swap = bool(args, 'swap', false);
     const groupArg = str(args, 'group');
-    if (groupArg !== undefined) {
-        const target = await checkGroupArg(board.node.id, groupArg);
-        if (!target.ok) return fail(target.error);
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok) return fail(target.error);
+    if (!isGrouped(board)) {
+        const plan = planMove(cellsOf(screens), node.id, col, row, swap);
+        if (!plan.ok) return fail(plan.error);
+        if (target) {
+            const set = await setScreenGroup(board, screens, node.id, target.groupId);
+            if (!set.ok) return fail(set.error);
+        }
+        return finish(board, screens, stale, plan.moves, false);
+    }
+
+    const groups = await loadGroups(board);
+    const toLayout = target ? target.groupId ?? BOARD_GRID : undefined;
+    const plan = planGridMove(gridScreens(screens), node.id, col, row, swap, toLayout);
+    if (!plan.ok) return fail(plan.error);
+    if (plan.moves.some((m) => m.id !== node.id && m.from.layoutId !== m.to.layoutId)) return fail('A swap across two groups would change both screens\' groups. Move them one at a time.');
+    const grids = groupGrids(board, groups);
+    const into = toLayout ? groups.find((g) => g.id === toLayout) : undefined;
+    if (into && !into.meta.layout) {
+        const at = rectOf(node as FrameNode);
+        const pitch = grids(BOARD_GRID);
+        setGroupLayout(into, { originX: at.x - col * pitch.colWidth, originY: at.y - row * pitch.rowHeight });
+    }
+    if (target) {
         const set = await setScreenGroup(board, screens, node.id, target.groupId);
         if (!set.ok) return fail(set.error);
     }
-    return finish(board, screens, stale, plan.moves, false);
+    return finish(board, screens, stale, plan.moves, false, undefined, groupGrids(board, groups));
 };
 
 async function insertAlong(args: JsonObject, axis: 'col' | 'row'): Promise<MainReply> {
@@ -56,7 +82,16 @@ async function insertAlong(args: JsonObject, axis: 'col' | 'row'): Promise<MainR
     if (!Number.isInteger(after) || after < -1) return fail('after must be a whole number, -1 or more (-1 inserts before the first).');
     const board = await loadBoard(boardId);
     const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+    const groupArg = str(args, 'groupId');
+    if (!isGrouped(board)) {
+        if (groupArg !== undefined) return fail(`${tool}: groupId only applies to a board with spacing "grouped".`);
+        return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+    }
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok) return fail(target.error);
+    const layoutId = target?.ok ? target.groupId ?? BOARD_GRID : BOARD_GRID;
+    const grids = groupGrids(board, await loadGroups(board));
+    return finish(board, screens, stale, shiftGridPlan(gridScreens(screens), layoutId, axis, after, count), false, undefined, grids);
 }
 
 export const insertColumns: Handler = (args) => insertAlong(args, 'col');
@@ -67,6 +102,7 @@ export const compactBoard: Handler = async (args) => {
     if (!boardId) return fail('compact_board needs boardId.');
     const board = await loadBoard(boardId);
     const { screens, stale } = await loadScreens(board);
+    if (isGrouped(board)) return finish(board, screens, stale, compactGridPlan(gridScreens(screens)), true, undefined, groupGrids(board, await loadGroups(board)));
     return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
 };
 

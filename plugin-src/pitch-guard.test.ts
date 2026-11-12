@@ -15,6 +15,11 @@ describe('checkPitch', () => {
         expect(checkPitch(meta, grid({ col: 1140, row: 1112 }))).toEqual({ kind: 'ok' });
     });
 
+    test('a grouped board has no single pitch grid to check: local cells are not board cells', () => {
+        const scattered = grid({ col: 1140, row: 1112 }).map((s, i) => ({ ...s, x: s.x + i * 97, y: s.y + i * 53 }));
+        expect(checkPitch({ ...meta, spacing: 'grouped' }, scattered)).toEqual({ kind: 'ok' });
+    });
+
     test('a few hand-moved screens are not a pitch problem', () => {
         const screens = grid({ col: 1140, row: 1112 });
         screens[3] = { ...(screens[3] as ScreenPos), x: (screens[3] as ScreenPos).x + 500 };

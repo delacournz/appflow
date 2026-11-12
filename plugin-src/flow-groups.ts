@@ -10,7 +10,10 @@
  * `finish` or `rerouteBoards`, so hooks can call it freely; callers reroute afterwards when `extrasChanged`.
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { applyBanded, applyExtras, applyMoves, applyPitch, setSpacing, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
+import { applyBanded, applyExtras, applyMoves, applyPitch, gridLookup, isGrouped, layoutOfScreen, setSpacing, shiftScreen, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type GridLookup, type Screen } from './board-ops';
+import { planBlockShifts, planRegrid } from './grid-plan';
+import { resolveOverlaps, type PlaceBox } from './group-place';
+import { BOARD_GRID, cellRectIn, migrateToGrouped } from './layout-grid';
 import { basePitchOf, pitchFromNeeds, samePitch, spacingOf } from './pitch';
 import { runSettle } from './settle';
 import { addBands, gapDeficits, hasDeficits, type Block, type Deficits } from './gap-fix';
@@ -19,6 +22,7 @@ import {
     TITLE_COLOR,
     TITLE_FILL,
     TITLE_PAD_X,
+    GROUP_CLEAR,
     fitBox,
     groupConflicts,
     memberContentRect,
@@ -51,7 +55,7 @@ import {
     titleName,
     type GroupRec,
 } from './flow-group-plan';
-import { FLOW_NAMESPACE, GROUP_KEY, GROUP_LAYER_KEY, SCREEN_KEY, parseGroupMeta, parseScreenMeta, type GroupMeta, type GroupStyle } from './flowmeta';
+import { BOARD_KEY, FLOW_NAMESPACE, GROUP_KEY, GROUP_LAYER_KEY, SCREEN_KEY, parseGroupMeta, parseScreenMeta, type GroupMeta, type GroupStyle } from './flowmeta';
 import { defaultMetrics } from './flow-group';
 import type { Rect } from './rect';
 import { cleanExtras, type ExtrasInput } from './tracks';
@@ -133,6 +137,12 @@ export const groupObstacles = async (board: Board) =>
     });
 
 const writeGroup = (g: LoadedGroup): void => g.rect.setSharedPluginData(FLOW_NAMESPACE, GROUP_KEY, JSON.stringify(g.meta));
+
+/** Stores where a group's own grid starts (its cell 0,0). */
+export function setGroupLayout(g: LoadedGroup, layout: { originX: number; originY: number }): void {
+    g.meta = { ...g.meta, layout };
+    writeGroup(g);
+}
 
 function setFlowGroup(s: Screen, id: string | null): void {
     if ((s.meta.flowGroupId ?? null) === id) return;
@@ -252,8 +262,10 @@ export type RefitResult = {
     /** Union of every box and title, or null. The board background must hold it (see `resizeBoard`). */
     extent: Rect | null;
     extrasChanged: boolean;
-    /** Screens shifted because the boundaries changed. */
+    /** Screens shifted because the boundaries changed (or, on a grouped board, pushed by a growing neighbour or snapped onto a grid). */
     shifted: number;
+    /** Grouped boards: screens that joined a grid and did not land on it, moved to the nearest free cell. */
+    snapped: { id: string; name: string; to: { layoutId: string; col: number; row: number } }[];
     issues: GroupIssue[];
     nesting: NestingIssue[];
     emptyGroups: string[];
@@ -263,7 +275,7 @@ export type RefitResult = {
     summary: JsonObject;
 };
 
-const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
+const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, snapped: [], issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
 
 const json = (v: unknown): JsonValue => v as JsonValue;
 
@@ -276,6 +288,12 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     const groups = await loadGroups(board);
     const holder = findHolder(board);
     const leftovers = !!(board.meta.colExtra || board.meta.rowExtra || board.meta.gapExtra || board.meta.baseColWidth !== undefined);
+    if (!groups.length && isGrouped(board)) {
+        const orphans = screens.some((s) => (s.meta.layoutId ?? BOARD_GRID) !== layoutOfScreen(s.meta));
+        const snapped = orphans ? await regridBoard(board, groups, screens) : [];
+        if (holder && !holder.children.length) holder.remove();
+        return { ...INACTIVE, shifted: snapped.length, snapped };
+    }
     if (!groups.length && !(opts.releaseExtras && leftovers)) {
         if (holder && !holder.children.length) holder.remove();
         return INACTIVE;
@@ -286,7 +304,13 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     let extrasChanged = false;
     let shifted = 0;
     const allMoves = () => cells.map((c) => ({ id: c.id, from: { col: c.col, row: c.row }, to: { col: c.col, row: c.row } }));
-    if (spacingOf(board.meta) === 'uniform') {
+    let snapped: RefitResult['snapped'] = [];
+    if (isGrouped(board)) {
+        if (groups.length) {
+            snapped = await regridBoard(board, groups, screens);
+            shifted = snapped.length + (await placeGroups(board, groups, screens));
+        }
+    } else if (spacingOf(board.meta) === 'uniform') {
         const base = basePitchOf(board.meta);
         const needs = groups.length ? groupBoundaryNeeds(groups.map(recOf), cells, { ...base, screenW: board.meta.screenW, screenH: board.meta.screenH }) : { col: 0, row: 0 };
         const more = opts.pitchExtra ?? { col: 0, row: 0 };
@@ -312,7 +336,7 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     }
     if (!groups.length) {
         if (holder && !holder.children.length) holder.remove();
-        return { ...INACTIVE, extrasChanged, shifted };
+        return { ...INACTIVE, extrasChanged, shifted, snapped };
     }
 
     const layer = ensureHolder(board);
@@ -320,30 +344,9 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     layer.locked = true;
     layer.setSharedPluginData(FLOW_NAMESPACE, BOARD_BACKUP_KEY, JSON.stringify({ meta: board.meta, name: board.node.name, rect: rectOf(board.node) }));
     await snapBadges(screens);
-    const prints = new Map<string, Footprint>();
-    for (const s of screens) prints.set(s.node.id, await footprintOf(s));
-    const arrowRects = await internalArrowsOf(board);
-    const inside = internalArrowRects(groups.map(recOf), arrowRects);
-    const membersOf = (g: LoadedGroup): Rect[] => [
-        ...g.meta.screenIds.flatMap((id) => {
-            const p = prints.get(id);
-            return p ? [p.content] : [];
-        }),
-        ...(inside.get(g.id) ?? []),
-    ];
-
-    const fitted = new Map<string, FittedBox>();
+    const { prints, fitted } = await measureBoxes(board, groups, screens);
     const children = groups.filter((g) => g.meta.parentId);
     const tops = groups.filter((g) => !g.meta.parentId);
-    for (const g of children) {
-        const m = membersOf(g);
-        if (m.length) fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
-    }
-    for (const g of tops) {
-        const m = membersOf(g);
-        const kids = children.flatMap((k) => (k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id) as FittedBox] : []));
-        if (m.length || kids.length) fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
-    }
 
     const emptyGroups: string[] = [];
     const boxes: RefitResult['boxes'] = [];
@@ -399,11 +402,118 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
         count: groups.length,
         extrasChanged,
         shifted,
+        ...(snapped.length ? { snapped: json(snapped) } : {}),
         ...(issues.length ? { issues: json(issues) } : {}),
         ...(nesting.length ? { nesting: json(nesting) } : {}),
         ...(emptyGroups.length ? { emptyGroups } : {}),
     };
-    return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
+    return { active: true, extent, extrasChanged, shifted, snapped, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
+}
+
+
+type Measured = { prints: Map<string, Footprint>; fitted: Map<string, FittedBox> };
+
+/** Every screen's footprint, and every group's box fitted around its members, its internal arrows and its children. */
+async function measureBoxes(board: Board, groups: LoadedGroup[], screens: Screen[]): Promise<Measured> {
+    const prints = new Map<string, Footprint>();
+    for (const s of screens) prints.set(s.node.id, await footprintOf(s));
+    const arrowRects = await internalArrowsOf(board);
+    const inside = internalArrowRects(groups.map(recOf), arrowRects);
+    const membersOf = (g: LoadedGroup): Rect[] => [
+        ...g.meta.screenIds.flatMap((id) => {
+            const p = prints.get(id);
+            return p ? [p.content] : [];
+        }),
+        ...(inside.get(g.id) ?? []),
+    ];
+    const fitted = new Map<string, FittedBox>();
+    const children = groups.filter((g) => g.meta.parentId);
+    const tops = groups.filter((g) => !g.meta.parentId);
+    for (const g of children) {
+        const m = membersOf(g);
+        if (m.length) fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
+    }
+    for (const g of tops) {
+        const m = membersOf(g);
+        const kids = children.flatMap((k) => (k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id) as FittedBox] : []));
+        if (m.length || kids.length) fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
+    }
+    return { prints, fitted };
+}
+
+const MAX_PLACE_PASSES = 8;
+
+/** The grid lookup for a loaded set of groups. */
+export const groupGrids = (board: Board, groups: readonly LoadedGroup[]): GridLookup => gridLookup(board, groups.map((g) => ({ id: g.id, ...(g.meta.layout ? { layout: g.meta.layout } : {}) })));
+
+/**
+ * Grouped boards: brings layout ids and cells in line with membership (`planRegrid`). New group grids start at their
+ * members' top-left; screens that joined a grid take the nearest cell, and a joiner off the pitch is moved onto it. Returns the
+ * screens that had to move.
+ */
+async function regridBoard(board: Board, groups: LoadedGroup[], screens: Screen[]): Promise<RefitResult['snapped']> {
+    const plan = planRegrid(
+        board.meta,
+        screens.map((s) => {
+            const r = rectOf(s.node);
+            return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, ...(s.meta.layoutId ? { layoutId: s.meta.layoutId } : {}), col: s.meta.col, row: s.meta.row, x: r.x, y: r.y };
+        }),
+        groups.map((g) => ({ id: g.id, ...(g.meta.layout ? { layout: g.meta.layout } : {}) })),
+    );
+    for (const [id, layout] of plan.layouts) {
+        const g = groups.find((x) => x.id === id);
+        if (!g) continue;
+        g.meta = { ...g.meta, layout };
+        writeGroup(g);
+    }
+    const grids = groupGrids(board, groups);
+    const out: RefitResult['snapped'] = [];
+    for (const [id, cell] of plan.cells) {
+        const s = screens.find((x) => x.node.id === id);
+        if (!s) continue;
+        if (plan.snapped.includes(id)) {
+            const want = cellRectIn(grids(cell.layoutId), cell.col, cell.row, { width: board.meta.screenW, height: board.meta.screenH });
+            const have = rectOf(s.node);
+            await shiftScreen(s, want.x - have.x, want.y - have.y);
+            out.push({ id, name: s.node.name, to: { ...cell } });
+        }
+        s.meta = { ...s.meta, ...cell };
+        writeScreen(s.node, s.meta);
+    }
+    return out;
+}
+
+/**
+ * Grouped boards: groups stay where they are, and a box that has grown into a sibling pushes it right or down by the least
+ * amount that restores `GROUP_CLEAR` (`resolveOverlaps`), cascading. A push moves the group's own screens and its grid origin;
+ * a child group goes with its parent. Repeats because a push can grow a parent box. Returns how many screens moved.
+ */
+async function placeGroups(board: Board, groups: LoadedGroup[], screens: Screen[]): Promise<number> {
+    let moved = 0;
+    for (let pass = 0; pass < MAX_PLACE_PASSES; pass++) {
+        const { fitted } = await measureBoxes(board, groups, screens);
+        const boxes: PlaceBox[] = groups.flatMap((g) => {
+            const fit = fitted.get(g.id);
+            const rect = fit ? unionRect([fit.box, fit.title]) : null;
+            return rect ? [{ id: g.id, rect, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}) }] : [];
+        });
+        const moves = resolveOverlaps(boxes, GROUP_CLEAR);
+        if (!moves.length) break;
+        const plan = planBlockShifts(moves, groups.map((g) => ({ id: g.id, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), screenIds: g.meta.screenIds, ...(g.meta.layout ? { layout: g.meta.layout } : {}) })));
+        for (const [id, d] of plan.screens) {
+            const s = screens.find((x) => x.node.id === id);
+            if (!s) continue;
+            await shiftScreen(s, d.dx, d.dy);
+            moved++;
+        }
+        for (const [id, layout] of plan.layouts) {
+            const g = groups.find((x) => x.id === id);
+            if (!g) continue;
+            g.meta = { ...g.meta, layout };
+            writeGroup(g);
+        }
+    }
+    return moved;
 }
 
 /** Each arrow's ends and the rects of its label and line, for boxes that must wrap arrows running inside them. */
@@ -423,6 +533,7 @@ async function internalArrowsOf(board: Board): Promise<{ from: string; to: strin
  * the pitch neither ratchets up across calls nor stays grown once the need is gone. Returns the last fit.
  */
 async function settleBoard(board: Board, screens: Screen[], first: RefitResult, reroute: JsonObject): Promise<{ fit: RefitResult; reroute: JsonObject; passes: number }> {
+    if (isGrouped(board)) return settleGrouped(board, screens, first, reroute);
     const uniform = spacingOf(board.meta) === 'uniform';
     const out = await runSettle<RefitResult, JsonObject>(
         {
@@ -442,6 +553,29 @@ async function settleBoard(board: Board, screens: Screen[], first: RefitResult, 
     );
     if (out.fit.active) await resizeBoard(board, screens, true, out.fit.extent);
     return out;
+}
+
+const MAX_GROUPED_PASSES = 3;
+
+/**
+ * Grouped boards have no pitch or extras to converge: after the arrows are drawn, refit once more so boxes wrap the labels
+ * that landed inside them (and a box that grew pushes its neighbours), and redraw only when a box changed.
+ */
+async function settleGrouped(board: Board, screens: Screen[], first: RefitResult, reroute: JsonObject): Promise<{ fit: RefitResult; reroute: JsonObject; passes: number }> {
+    let fit = first;
+    let drawn = reroute;
+    let passes = 0;
+    while (passes < MAX_GROUPED_PASSES) {
+        const next = await refitGroups(board, screens);
+        passes++;
+        const same = sameBoxes(fit.boxes, next.boxes);
+        fit = next;
+        if (same && next.shifted === 0) break;
+        await resizeBoard(board, screens, false, next.extent);
+        drawn = await rerouteBoards([board]);
+    }
+    if (fit.active) await resizeBoard(board, screens, true, fit.extent);
+    return { fit, reroute: drawn, passes };
 }
 
 /** Refit, grow the background, redraw every arrow, then settle. The tail of every group tool. */
@@ -538,6 +672,18 @@ export const createFlowGroup: Handler = async (args) => {
             ...groups.map(recOf).map((g) => (g.id === plan.parentId ? { ...g, screenIds: g.screenIds.filter((id) => !plan.takeFromParent.includes(id)) } : g)),
             { id: 'new', name: plan.name, ...(plan.parentId ? { parentId: plan.parentId } : {}), screenIds: plan.screenIds, style: styled.style },
         ];
+        if (isGrouped(board)) {
+            return ok({
+                dryRun: true,
+                boardId: board.node.id,
+                name: plan.name,
+                ...(plan.parentId ? { parentId: plan.parentId } : {}),
+                screens: describeScreens(screens, plan.screenIds),
+                movedFromParent: plan.takeFromParent,
+                spacing: 'grouped',
+                screensShifted: 0,
+            });
+        }
         const base = { ...basePitchOf(board.meta), screenW: board.meta.screenW, screenH: board.meta.screenH };
         if (spacingOf(board.meta) === 'uniform') {
             const pitch = pitchFromNeeds(base, groupBoundaryNeeds(next, cellsOf(screens), base));
@@ -591,6 +737,7 @@ export const createFlowGroup: Handler = async (args) => {
         ...boxOf(fit, rect.id),
         extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
         screensShifted: fit.shifted,
+        ...(fit.snapped.length ? { snapped: json(fit.snapped) } : {}),
         board: size,
         issues: json(fit.issues),
         nesting: json(fit.nesting),
@@ -652,6 +799,7 @@ export const updateFlowGroup: Handler = async (args) => {
         ...boxOf(fit, group.id),
         extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
         screensShifted: fit.shifted,
+        ...(fit.snapped.length ? { snapped: json(fit.snapped) } : {}),
         board: size,
         issues: json(fit.issues),
         nesting: json(fit.nesting),
@@ -744,11 +892,69 @@ export async function joinAndRefit(boardId: string, screenId: string, groupId: s
 }
 
 /** reroute_flow: refits every grouped board first, so a hand-moved screen pulls its box along. */
+/**
+ * Converts a board from one shared grid to group-local grids without moving a screen (`migrateToGrouped`): each group's grid
+ * starts at its members' top-left, every screen gets its local cell, and the shared extras, base pitch and bands go. A dry
+ * run changes nothing and reports what would happen. Screens that do not sit on their grid's pitch are listed in `offGrid`.
+ */
+async function convertToGrouped(board: Board, screens: Screen[], groups: LoadedGroup[], dryRun: boolean): Promise<JsonObject> {
+    const plan = migrateToGrouped(
+        board.meta,
+        screens.map((s) => {
+            const r = rectOf(s.node);
+            return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, x: r.x, y: r.y };
+        }),
+        groups.map((g) => ({ id: g.id, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}) })),
+    );
+    const report: JsonObject = {
+        boardId: board.node.id,
+        dryRun,
+        from: spacingOf(board.meta),
+        grids: plan.grids.map((g) => ({ id: g.id, ...(g.id === BOARD_GRID ? {} : { name: groups.find((x) => x.id === g.id)?.meta.name ?? g.id }), originX: g.originX, originY: g.originY })),
+        screensMoved: 0,
+        offGrid: plan.offGrid.map((id) => ({ id, name: screens.find((s) => s.node.id === id)?.node.name ?? id })),
+    };
+    if (dryRun) return report;
+    for (const g of plan.grids) {
+        if (g.id === BOARD_GRID) continue;
+        const group = groups.find((x) => x.id === g.id);
+        if (!group) continue;
+        group.meta = { ...group.meta, layout: { originX: g.originX, originY: g.originY } };
+        writeGroup(group);
+    }
+    const loose = plan.grids.find((g) => g.id === BOARD_GRID);
+    const { colExtra: _c, rowExtra: _r, gapExtra: _g, baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...rest, spacing: 'grouped', ...(loose ? { originX: loose.originX, originY: loose.originY } : {}) };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    for (const s of screens) {
+        const cell = plan.cells.get(s.node.id);
+        if (!cell) continue;
+        s.meta = { ...s.meta, ...cell };
+        writeScreen(s.node, s.meta);
+    }
+    return report;
+}
+
 export const rerouteFlowWithGroups: Handler = async (args) => {
     const boards = await boardsFor(args);
     const mode = str(args, 'spacing');
-    if (mode !== undefined && mode !== 'uniform' && mode !== 'banded') return fail('spacing must be "uniform" or "banded".');
-    if (mode) for (const board of boards) setSpacing(board, mode);
+    if (mode !== undefined && mode !== 'uniform' && mode !== 'banded' && mode !== 'grouped') return fail('spacing must be "uniform", "banded" or "grouped".');
+    const dryRun = bool(args, 'dryRun', false);
+    const conversions: JsonObject[] = [];
+    if (mode === 'grouped') {
+        for (const board of boards) {
+            if (isGrouped(board)) continue;
+            const groups = await loadGroups(board);
+            if (!groups.length) return fail(`Board ${board.node.id} has no flow groups: spacing "grouped" lays each group out on its own grid. Create groups first.`);
+            const { screens } = await loadScreens(board);
+            reconcile(groups, screens, !dryRun);
+            conversions.push(await convertToGrouped(board, screens, groups, dryRun));
+        }
+        if (dryRun) return ok({ dryRun: true, conversions });
+    } else if (mode) {
+        if (boards.some((b) => isGrouped(b))) return fail('A grouped board cannot go back to uniform or banded spacing: its screens have group-local cells.');
+        for (const board of boards) setSpacing(board, mode);
+    }
     const fits: JsonObject[] = [];
     const first = new Map<string, RefitResult>();
     for (const board of boards) {
@@ -768,7 +974,7 @@ export const rerouteFlowWithGroups: Handler = async (args) => {
         fits.push({ boardId: board.node.id, spacing: spacingOf(board.meta), pitch: { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight }, settlePasses: settled.passes, ...settled.fit.summary });
     }
     if (!reply.ok || !fits.length || typeof reply.result !== 'object' || reply.result === null || Array.isArray(reply.result)) return reply;
-    return ok({ ...reply.result, groups: fits });
+    return ok({ ...reply.result, groups: fits, ...(conversions.length ? { conversions } : {}) });
 };
 
 /** connect: after the arrow and its label exist, refit and report any box the label now crosses. */
