@@ -375,7 +375,7 @@ describe('arrow lanes on a uniform board', () => {
     });
 });
 
-describe('same-row arrows across occupied cells and fan-in', () => {
+describe('same-row arrows across occupied cells and merged fan-in', () => {
     const cellAt = (col: number, row: number): Rect => ({ x: 164 + col * PITCH_X, y: 2174 + row * PITCH_Y, width: W, height: H });
     const PITCH_X = 1140;
     const board: Rect[] = [];
@@ -409,23 +409,46 @@ describe('same-row arrows across occupied cells and fan-in', () => {
         expect(routeOf(plans, 'next')).toHaveLength(2);
     });
 
-    test('four arrows into Home enter at distinct heights, share no line and cross no screen', () => {
-        const home = cellAt(11, 0);
-        const pairs: [string, Rect, Rect][] = [
-            ['a', cellAt(4, 0), home],
-            ['b', cellAt(9, 0), home],
-            ['c', cellAt(10, 0), home],
-            ['d', cellAt(8, 1), home],
-        ];
-        const plans = plan(pairs);
-        expect(noScreenHits(plans, pairs)).toBe(true);
-        const ys = pairs.map(([id]) => (routeOf(plans, id).at(-1) as Pt).y).sort((p, q) => p - q);
-        for (let i = 1; i < ys.length; i++) expect((ys[i] as number) - (ys[i - 1] as number)).toBeGreaterThanOrEqual(24);
-        const issues = lintArrows(
+    const lintOf = (plans: ReturnType<typeof plan>, pairs: [string, Rect, Rect][]) =>
+        lintArrows(
             pairs.map(([id, s, t]) => ({ id, points: routeOf(plans, id), label: null, from: `${s.x}:${s.y}`, to: `${t.x}:${t.y}` })),
             [],
             board.map((r) => ({ id: `${r.x}:${r.y}`, rect: r })),
         ).issues;
+
+    test('three sources from different columns merge into Home: one trunk, one final run, no screen crossed', () => {
+        const home = cellAt(11, 0);
+        const pairs: [string, Rect, Rect][] = [
+            ['a', cellAt(4, 0), home],
+            ['b', cellAt(9, 0), home],
+            ['d', cellAt(8, 1), home],
+        ];
+        const plans = plan(pairs);
+        expect(noScreenHits(plans, pairs)).toBe(true);
+        const ends = pairs.map(([id]) => routeOf(plans, id).slice(-2));
+        for (const e of ends) expect(e).toEqual(ends[0] as Pt[]);
+        const issues = lintOf(plans, pairs);
         expect(issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen')).toEqual([]);
+        for (const [id] of pairs) {
+            const r = (plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route;
+            expect(r.trunkFrom).toBeGreaterThanOrEqual(1);
+        }
+    });
+
+    test('four sources in the next column join one trunk before the target, branches ordered by source height', () => {
+        const target = cellAt(5, 3);
+        const srcs = [cellAt(4, 0), cellAt(4, 1), cellAt(4, 2), cellAt(4, 3)];
+        const pairs: [string, Rect, Rect][] = srcs.map((s, i) => [`s${i}`, s, target]);
+        const plans = plan(pairs);
+        expect(noScreenHits(plans, pairs)).toBe(true);
+        const trunkXs = new Set(pairs.flatMap(([id]) => { const p = routeOf(plans, id); return p.length > 2 ? [(p[p.length - 2] as Pt).x] : []; }));
+        expect(routeOf(plans, 's3')).toHaveLength(2);
+        expect(trunkXs.size).toBe(1);
+        const trunkX = [...trunkXs][0] as number;
+        expect(trunkX).toBeLessThan(target.x);
+        expect(trunkX).toBeGreaterThan(srcs[0]!.x + W);
+        expect(lintOf(plans, pairs).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+        const joinYs = pairs.slice(0, 3).map(([id]) => { const p = routeOf(plans, id); return (p[p.length - 3] as Pt).y; });
+        expect(joinYs).toEqual([...joinYs].sort((p, q) => p - q));
     });
 });

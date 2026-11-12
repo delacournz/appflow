@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
 import { boxEdges, crowdedRunLength, laneConflicts, screensCrossed, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, routeViaBand, routeViaLeftGutter, spreadEntries, type Exit, type Pt, type Rect, type Route } from './route';
+import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaLeftGutter, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -31,11 +31,9 @@ type Routed = ReturnType<typeof routeArrow>;
 export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints }[]): Plan[] {
     const { gutter, limits } = cfg;
     const edges: Edge[] = (cfg.boxes ?? []).flatMap(boxEdges);
-    const entries = spreadEntries(items.map((it) => ({ id: it.id, source: it.ends.source, target: it.ends.target, trigger: it.ends.trigger })));
-    const withLimit = <T extends object>(i: number, input: T): T & { labelLimitX?: number; entryY?: number } => {
+    const withLimit = <T extends object>(i: number, input: T): T & { labelLimitX?: number } => {
         const labelLimitX = limits[i];
-        const entryY = entries.get((items[i] as (typeof items)[number]).id);
-        return { ...input, ...(labelLimitX === undefined ? {} : { labelLimitX }), ...(entryY === undefined ? {} : { entryY }) };
+        return labelLimitX === undefined ? input : { ...input, labelLimitX };
     };
     const first = items.map((it, i) => routeArrow(withLimit(i, { ...it.ends, gutter, lane: 0 })));
     const fanGroupOf = new Map<string, string>();
@@ -130,14 +128,15 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         if (!r.ok || r.kind === 'straight' || fans.has(it.id)) return null;
         return (lane: number) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
     });
-    detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, entries);
+    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
     separateLines(final, builders, titles, edges);
     return items.map((it, i) => {
         const r = final[i] as Routed;
         if (!r.ok) return { id: it.id, route: null, error: r.error };
         const warning = warnings.get(i);
-        return { id: it.id, route: r, error: null, ...(warning ? { warning } : {}) };
+        return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width }, error: null, ...(warning ? { warning } : {}) };
     });
 }
 
@@ -305,7 +304,6 @@ function detourAroundScreens(
     titles: readonly Rect[],
     edges: readonly Edge[],
     builders: (((lane: number) => Routed) | null)[],
-    entries: ReadonlyMap<string, number>,
 ): void {
     if (!screens.length) return;
     routes.forEach((r, i) => {
@@ -313,7 +311,6 @@ function detourAroundScreens(
         const { source, target, trigger } = (items[i] as (typeof items)[number]).ends;
         if (target.x < source.x + source.width) return;
         if (screensCrossed(r.points, screens, [source, target]) === 0) return;
-        const entryY = entries.get((items[i] as (typeof items)[number]).id);
         const cost = (pts: readonly Pt[]): number => {
             let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
             routes.forEach((o, j) => {
@@ -332,7 +329,7 @@ function detourAroundScreens(
         for (let lane = 0; lane <= 4 && (!best || best.c >= 1); lane++) {
             for (const y of bands) {
                 if (y < lo || y > hi) continue;
-                const cand = routeViaBand(source, target, trigger, y, lane, entryY);
+                const cand = routeViaBand(source, target, trigger, y, lane);
                 const c = cost(cand.points);
                 if (!best || c < best.c) best = { route: cand, c, y, lane };
             }
@@ -340,6 +337,96 @@ function detourAroundScreens(
         const chosen = best as { route: Routed; c: number; y: number; lane: number } | null;
         if (!chosen || chosen.c >= SCREEN_COST) return;
         routes[i] = chosen.route;
-        builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane, entryY);
+        builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane);
     });
+}
+
+const bandsFor = (target: Rect, rowGap: number): number[] => {
+    const out: number[] = [];
+    const lo = target.y - rowGap + 8;
+    const hi = target.y + target.height + rowGap - 8;
+    for (let k = 0; k <= 8; k++) out.push(target.y - 72 - 32 - k * LANE_STEP);
+    for (let k = 0; k <= 8; k++) out.push(target.y + target.height + 24 + k * LANE_STEP);
+    return out.filter((y) => y >= lo && y <= hi);
+};
+
+/**
+ * Arrows entering the same target from the left merge: each runs from its dot to one trunk lane in the gutter in front
+ * of the target, along it to the entry height, and into the target on a final run they all share, so heads coincide.
+ * A branch whose straight run to the trunk would cross a screen leaves through its source's gutter into a row-gap band
+ * instead. The trunk moves out lane by lane until the whole group is clear of screens, titles, strokes and other lines
+ * (the shared trunk and final run themselves are deliberate). Merged routes have no lane builder: they stay put and
+ * other arrows move around them. Replaces routes of arrows entering a target together with at least one other.
+ */
+function joinTargets(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    screens: readonly Rect[],
+    rowGap: number,
+    titles: readonly Rect[],
+    edges: readonly Edge[],
+    builders: (((lane: number) => Routed) | null)[],
+): void {
+    const groups = new Map<string, number[]>();
+    items.forEach((it, i) => {
+        const r = routes[i] as Routed;
+        const { source, target, exit } = it.ends;
+        if (!r.ok || exit === 'bottom' || relation(source, target) !== 'right') return;
+        const key = `${target.x}:${target.y}`;
+        groups.set(key, [...(groups.get(key) ?? []), i]);
+    });
+    const startY = (i: number) => {
+        const { source, trigger } = (items[i] as (typeof items)[number]).ends;
+        return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
+    };
+    for (const idx of groups.values()) {
+        if (idx.length < 2) continue;
+        const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
+        const members = new Set(idx);
+        const target = (items[idx[0] as number] as (typeof items)[number]).ends.target;
+        const ey = target.y + target.height / 2;
+        let best: { total: number; chosen: Routed[] } | null = null;
+        for (let k = 0; k <= MAX_NUDGE; k++) {
+            const trunkX = target.x - TRUNK_GAP - k * LANE_STEP;
+            const trial = new Map<number, Routed>();
+            let total = 0;
+            for (const i of ordered) {
+                const { source, trigger } = (items[i] as (typeof items)[number]).ends;
+                const cost = (pts: readonly Pt[]): number => {
+                    let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+                    const against = (o: Routed, ignore: { v?: number; h?: number }) => {
+                        if (!o.ok) return;
+                        if (sharedRunLength(pts, o.points, ignore) > 1) c += 1000;
+                        else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0) c += 0.5;
+                    };
+                    routes.forEach((o, j) => {
+                        if (j !== i && !members.has(j)) against(o, {});
+                    });
+                    for (const [j, o] of trial) if (j !== i) against(o, { v: trunkX, h: ey });
+                    return c;
+                };
+                const plain = routeJoin(source, target, trigger, trunkX, null);
+                let pick: { route: Routed; c: number } = { route: plain, c: cost(plain.points) };
+                if (pick.c >= SCREEN_COST) {
+                    for (let lane = 0; lane <= 4; lane++) {
+                        for (const y of bandsFor(target, rowGap)) {
+                            const cand = routeJoin(source, target, trigger, trunkX, y, lane);
+                            const c = cost(cand.points);
+                            if (c < pick.c) pick = { route: cand, c };
+                        }
+                        if (pick.c < 1) break;
+                    }
+                }
+                trial.set(i, pick.route);
+                total += pick.c;
+            }
+            if (!best || total < best.total) best = { total, chosen: ordered.map((i) => trial.get(i) as Routed) };
+            if (total < 1) break;
+        }
+        const chosen = best as { total: number; chosen: Routed[] };
+        ordered.forEach((i, n) => {
+            routes[i] = chosen.chosen[n] as Routed;
+            builders[i] = null;
+        });
+    }
 }

@@ -28,7 +28,7 @@ import { fitRoute } from './anatomy';
 import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
-import { type Exit, type Pt, type Rect, type Route } from './route';
+import { leadRoute, startLabelAnchor, type Exit, type Pt, type Rect, type Route } from './route';
 import { clearLabel, labelObstacles, LABEL_PAD, separateLabels, titleTextRect, type GroupObstacle } from './route-avoid';
 import { widenedBetween } from './grid';
 import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
@@ -315,12 +315,14 @@ async function partsOf(meta: ArrowMeta): Promise<{ vector: VectorNode; dot: Elli
 async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: FrameNode }, route: Route, style: Style, groups: readonly GroupObstacle[] = []): Promise<string | null> {
     await writeVector(parts.vector, route.points, style);
     centre(parts.dot, route.dot);
+    const size = { width: parts.label.width, height: parts.label.height };
+    const anchor = startLabelAnchor(route, size);
     if (!groups.length) {
-        centre(parts.label, route.labelAnchor);
+        centre(parts.label, anchor);
         return null;
     }
-    const placed = clearLabel(route, { width: parts.label.width, height: parts.label.height }, labelObstacles(groups));
-    centre(parts.label, placed.ok ? placed.anchor : route.labelAnchor);
+    const placed = clearLabel(leadRoute(route, anchor), size, labelObstacles(groups));
+    centre(parts.label, placed.ok ? placed.anchor : anchor);
     return placed.ok ? null : placed.blocked;
 }
 
@@ -332,7 +334,8 @@ async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: 
 async function separateBoardLabels(placed: { id: string; route: Route; label: FrameNode }[], fixed: readonly FrameNode[], groups: readonly GroupObstacle[]): Promise<string[]> {
     const items = placed.map((p) => {
         const r = rectOf(p.label);
-        return { id: p.id, route: p.route, anchor: { x: r.x + r.width / 2, y: r.y + r.height / 2 }, size: { width: r.width, height: r.height } };
+        const anchor = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        return { id: p.id, route: leadRoute(p.route, anchor), anchor, size: { width: r.width, height: r.height } };
     });
     const res = separateLabels(items, labelObstacles(groups), LABEL_PAD, fixed.map(rectOf));
     for (const [i, p] of placed.entries()) {
