@@ -174,11 +174,17 @@ function runsOf(points: readonly Pt[]): Run[] {
     return out;
 }
 
-/** Total length two routes share on one line (same axis, same coordinate), the quantity `lines-overlap` measures. */
-export function sharedRunLength(a: readonly Pt[], b: readonly Pt[]): number {
+/**
+ * Total length two routes share on one line (same axis, same coordinate), the quantity `lines-overlap` measures.
+ * `ignore` leaves out the lines of a deliberately merged trunk (`v`: its x) and final run (`h`: its y).
+ */
+export function sharedRunLength(a: readonly Pt[], b: readonly Pt[], ignore: { v?: number; h?: number } = {}): number {
     const rb = runsOf(b);
     let total = 0;
-    for (const s of runsOf(a)) for (const t of rb) if (s.axis === t.axis && s.at === t.at) total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    for (const s of runsOf(a)) {
+        if (s.at === (s.axis === 'v' ? ignore.v : ignore.h)) continue;
+        for (const t of rb) if (s.axis === t.axis && s.at === t.at) total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    }
     return total;
 }
 

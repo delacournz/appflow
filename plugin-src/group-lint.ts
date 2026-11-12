@@ -83,6 +83,33 @@ const segHitsRect = (s: Seg, r: Rect): boolean =>
     s.axis === 'v' ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
 
 /**
+ * Lines two arrows deliberately share, which `lines-overlap` must not flag: for arrows into the same target, the merged
+ * trunk (the vertical both turn off just before the target) and the final run into it; for arrows that start on the same
+ * dot, the first horizontal stub.
+ */
+function mergedLines(a: ArrowShape, b: ArrowShape): { axis: 'v' | 'h'; at: number }[] {
+    const out: { axis: 'v' | 'h'; at: number }[] = [];
+    const pa = a.points;
+    const pb = b.points;
+    if (a.to !== undefined && a.to === b.to && pa.length >= 2 && pb.length >= 2) {
+        const la = pa[pa.length - 1] as Pt;
+        const lb = pb[pb.length - 1] as Pt;
+        if (la.x === lb.x && la.y === lb.y) {
+            out.push({ axis: 'h', at: la.y });
+            const ca = pa[pa.length - 2] as Pt;
+            const cb = pb[pb.length - 2] as Pt;
+            const turnA = pa.length >= 3 && (pa[pa.length - 3] as Pt).x === ca.x;
+            const turnB = pb.length >= 3 && (pb[pb.length - 3] as Pt).x === cb.x;
+            if (turnA && turnB && ca.x === cb.x) out.push({ axis: 'v', at: ca.x });
+        }
+    }
+    const sa = pa[0] as Pt | undefined;
+    const sb = pb[0] as Pt | undefined;
+    if (sa && sb && sa.x === sb.x && sa.y === sb.y) out.push({ axis: 'h', at: sa.y });
+    return out;
+}
+
+/**
  * Arrow-vs-arrow and arrow-vs-title checks for lint_flow_layout, in the order the arrows are given:
  * `label-overlaps-label` (label rects intersect), `lines-overlap` (collinear segments sharing more than
  * `LINES_OVERLAP_MIN` px), `line-crosses-title` (any segment through a title's text area) and `line-crosses-screen`
@@ -96,8 +123,10 @@ export function lintArrows(arrows: readonly ArrowShape[], titles: readonly Title
         for (let j = i + 1; j < arrows.length; j++) {
             const b = arrows[j] as ArrowShape;
             if (a.label && b.label && rectsIntersect(a.label, b.label)) raw.push({ kind: 'label-overlaps-label', arrowId: a.id, otherId: b.id });
+            const merged = mergedLines(a, b);
             let shared = 0;
             for (const s of segs[i] as Seg[]) {
+                if (merged.some((m) => m.axis === s.axis && m.at === s.at)) continue;
                 for (const t of segs[j] as Seg[]) {
                     if (s.axis === t.axis && s.at === t.at) shared += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
                 }

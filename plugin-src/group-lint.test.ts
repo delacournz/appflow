@@ -86,3 +86,17 @@ describe('lintArrows line-crosses-screen', () => {
         expect(lintArrows([through], [], []).issues).toEqual([]);
     });
 });
+
+describe('lintArrows merged arrows', () => {
+    const mk = (id: string, to: string, pts: [number, number][]) => ({ id, to, label: null, points: pts.map(([x, y]) => ({ x, y })) });
+    test('arrows into one target may share trunk and final run; different targets may not; a shared dot stub is ignored', () => {
+        const a = mk('a', 'T', [[0, 0], [900, 0], [900, 500], [1000, 500]]);
+        const b = mk('b', 'T', [[0, 1000], [900, 1000], [900, 500], [1000, 500]]);
+        expect(lintArrows([a, b], []).issues).toEqual([]);
+        const c = mk('c', 'U', [[0, 1000], [900, 1000], [900, 500], [1000, 500]]);
+        expect(lintArrows([a, c], []).counts['lines-overlap']).toBe(1);
+        const d = mk('d', 'X', [[0, 0], [300, 0], [300, 800]]);
+        const e = mk('e', 'Y', [[0, 0], [300, 0], [300, -800]]);
+        expect(lintArrows([d, e], []).issues).toEqual([]);
+    });
+});

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { assignLanes, clearOfLanes, fanIndex, gutterKey, laneOffset, routeArrow, spreadEntries, type Pt, type Rect, type Route } from './route';
+import { assignLanes, clearOfLanes, fanIndex, gutterKey, laneOffset, leadRoute, routeArrow, routeJoin, startLabelAnchor, TRUNK_GAP, type Pt, type Rect, type Route } from './route';
 
 const W = 393;
 const H = 852;
@@ -437,20 +437,25 @@ describe('start dot on a trigger', () => {
     });
 });
 
-describe('spreadEntries', () => {
-    const home = screen(1, 0);
-    const from = (col: number, row: number): Rect => ({ ...screen(0, row), x: screen(0, 0).x - col * 100 });
-    test('one arrow keeps the target middle; several enter 24px apart ordered by start height', () => {
-        const one = spreadEntries([{ id: 'a', source: screen(0, 0), target: home, trigger: null }]);
-        expect(one.size).toBe(0);
-        const many = spreadEntries([
-            { id: 'low', source: screen(0, 2), target: home, trigger: null },
-            { id: 'high', source: screen(0, 0), target: home, trigger: null },
-            { id: 'mid', source: from(1, 1), target: home, trigger: null },
-        ]);
-        const mid = home.y + H / 2;
-        expect(many.get('high')).toBe(mid - 24);
-        expect(many.get('mid')).toBe(mid);
-        expect(many.get('low')).toBe(mid + 24);
+describe('start labels', () => {
+    const s = screen(0, 0);
+    const size = { width: 120, height: 32 };
+    test('sit on the first segment just right of the source edge, centred on the line', () => {
+        const r = must(routeArrow({ source: s, target: screen(1, 0), trigger: null, gutter: GUTTER, lane: 0 }));
+        const at = startLabelAnchor({ ...r, edge: s.x + W }, size);
+        expect(at).toEqual({ x: s.x + W + 8 + 60, y: s.y + H / 2 });
+    });
+    test('a trigger dot inside the screen still puts the label past the screen edge', () => {
+        const trigger: Rect = { x: s.x + 20, y: s.y + 700, width: 353, height: 56 };
+        const r = must(routeArrow({ source: s, target: screen(1, 3), trigger, gutter: GUTTER, lane: 0 }));
+        const at = startLabelAnchor({ ...r, edge: s.x + W }, size);
+        expect(at.x).toBe(s.x + W + 8 + 60);
+        expect(at.y).toBe(trigger.y + 28);
+    });
+    test('leadRoute stops at the shared trunk', () => {
+        const r = routeJoin(s, screen(1, 2), null, screen(1, 2).x - TRUNK_GAP, null);
+        const lead = leadRoute(r, { x: 0, y: 0 });
+        expect(lead.points.length).toBe((r.trunkFrom as number) + 1);
+        expect(lead.points.at(-1)).toEqual({ x: screen(1, 2).x - TRUNK_GAP, y: s.y + H / 2 });
     });
 });

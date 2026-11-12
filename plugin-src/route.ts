@@ -28,11 +28,14 @@ export type RouteInput = {
     labelLimitX?: number;
     /** Extra px added to the fan's vertical lanes, to keep them clear of a group stroke; see `planRoutes`. */
     fanShift?: number;
-    /** Absolute y at which the arrow enters the target's left edge; set when several arrows enter one target (`spreadEntries`). Absent = the target's vertical middle. */
-    entryY?: number;
 };
 
-export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean };
+/**
+ * `edge` is the x of the source screen's right edge (set by the planner), where the first segment leaves the screen.
+ * `trunkFrom` is the index of the first point of the part shared with other arrows into the same target (`routeJoin`);
+ * labels never sit past it. Absent = nothing is shared.
+ */
+export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean; edge?: number; trunkFrom?: number };
 export type RouteError = { ok: false; error: string };
 
 export const ENTRY_OFFSET = 340;
@@ -175,21 +178,21 @@ export function clearOfLanes(route: Route, laneXs: readonly number[], labelLimit
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 export function routeArrow(input: RouteInput): Route | RouteError {
-    const { source, target, trigger, gutter, lane, exit = 'side', fan, labelLimitX, fanShift = 0, entryY } = input;
+    const { source, target, trigger, gutter, lane, exit = 'side', fan, labelLimitX, fanShift = 0 } = input;
     const off = laneOffset(lane);
     switch (relation(source, target)) {
         case 'overlap':
             return { ok: false, error: 'Source and target screens overlap; move one so they sit in separate cells.' };
         case 'right': {
             const tx = target.x;
-            const ty = entryY ?? midY(target);
+            const ty = midY(target);
             const sx = right(source);
             const bx = labelLimitX !== undefined && labelLimitX < tx ? Math.max(labelLimitX, sx) : tx;
             if (exit === 'bottom' && target.y >= bottom(source)) {
                 // Fanned drops step left from the highest target's lane, so a lower drop never crosses a higher turn.
                 const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
                 const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
-                const y = (fan && fan.count > 1) || entryY !== undefined ? ty : ty + off;
+                const y = fan && fan.count > 1 ? ty : ty + off;
                 const r = done('elbow', [{ x, y: bottom(source) }, { x, y }, { x: tx, y }]);
                 // The label sits on the leg entering the target, so drops that run side by side keep their labels apart.
                 return { ...r, labelAnchor: { x: (x + bx) / 2, y } };
@@ -212,7 +215,7 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
             const start: Pt = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) + toward };
             const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
-            const ey = clamp(entryY !== undefined ? ty : ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+            const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
             const jog = done(trigger ? 'trigger' : 'gutter', [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
             return bx < tx && bx > midX ? { ...jog, labelAnchor: { x: (midX + bx) / 2, y: ey } } : jog;
         }
@@ -249,42 +252,60 @@ export function routeViaLeftGutter(source: Rect, target: Rect, gutter: number, l
     return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
 }
 
-/** Vertical gap between arrows entering one target's left edge. */
-export const ENTRY_STEP = 24;
-
-/**
- * Entry heights for targets that several arrows enter from the left: spread around the target's middle, `ENTRY_STEP`
- * apart, in order of where each arrow starts (higher start, higher entry) so entries never cross. Targets with one
- * arrow get no entry (they keep the middle).
- */
-export function spreadEntries(items: { id: string; source: Rect; target: Rect; trigger: Rect | null }[]): Map<string, number> {
-    const byTarget = new Map<string, typeof items>();
-    for (const it of items) {
-        if (relation(it.source, it.target) !== 'right') continue;
-        const key = `${it.target.x}:${it.target.y}`;
-        byTarget.set(key, [...(byTarget.get(key) ?? []), it]);
-    }
-    const out = new Map<string, number>();
-    for (const list of byTarget.values()) {
-        if (list.length < 2) continue;
-        const startY = (it: (typeof items)[number]) => (it.trigger ? midY(it.trigger) : midY(it.source));
-        const sorted = [...list].sort((a, b) => startY(a) - startY(b) || a.source.x - b.source.x);
-        const t = (sorted[0] as (typeof items)[number]).target;
-        sorted.forEach((it, k) => out.set(it.id, clamp(midY(t) + (k - (sorted.length - 1) / 2) * ENTRY_STEP, t.y + EDGE_MARGIN, bottom(t) - EDGE_MARGIN)));
-    }
-    return out;
-}
-
 /**
  * Route that leaves the source's right edge, drops or rises in the gutter beside it into a horizontal band at `bandY`
  * (a row gap, clear of every screen), runs along the band to the gutter in front of the target, then enters the target's
  * left edge at `entryY`. `lane` moves both vertical legs one lane step further from the screens.
  */
-export function routeViaBand(source: Rect, target: Rect, trigger: Rect | null, bandY: number, lane: number, entryY?: number): Route {
+export function routeViaBand(source: Rect, target: Rect, trigger: Rect | null, bandY: number, lane: number): Route {
     const start: Pt = trigger ? triggerDot(trigger, source) : { x: right(source), y: midY(source) };
     const x1 = right(source) + FAN_EDGE + lane * LANE_STEP;
     const x2 = target.x - FAN_EDGE - lane * LANE_STEP;
-    const ey = clamp(entryY ?? midY(target), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
     const r = done('gutter', [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: x2, y: bandY }, { x: x2, y: ey }, { x: target.x, y: ey }]);
     return { ...r, labelAnchor: { x: (x2 + target.x) / 2, y: ey } };
+}
+
+/** How far in front of the target's left edge the shared trunk lane sits. */
+export const TRUNK_GAP = 48;
+/** Gap between the source's right edge and the start of a label on the first segment. */
+export const LABEL_GAP = 8;
+
+/**
+ * Arrow into a target that other arrows also enter: runs from its dot to the trunk lane at `trunkX` (in the gutter
+ * before the target), along the trunk to the target's entry height, and into the left edge on the final run all merged
+ * arrows share. With `bandY` it first leaves through the source's gutter into that row-gap band, so it crosses no
+ * screen. `trunkFrom` marks where the shared part begins.
+ */
+export function routeJoin(source: Rect, target: Rect, trigger: Rect | null, trunkX: number, bandY: number | null, lane = 0): Route {
+    const start: Pt = trigger ? triggerDot(trigger, source) : { x: right(source), y: midY(source) };
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+    const joinY = bandY ?? start.y;
+    const x1 = right(source) + FAN_EDGE + lane * LANE_STEP;
+    const pts: Pt[] =
+        bandY === null
+            ? [start, { x: trunkX, y: start.y }, { x: trunkX, y: ey }, { x: target.x, y: ey }]
+            : [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: trunkX, y: bandY }, { x: trunkX, y: ey }, { x: target.x, y: ey }];
+    const r = done('gutter', pts);
+    const at = r.points.findIndex((p) => p.x === trunkX && p.y === joinY);
+    const first = r.points[0] as Pt;
+    const second = r.points[1] as Pt;
+    return { ...r, trunkFrom: at >= 0 ? at : r.points.length - 1, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
+}
+
+/**
+ * Where an arrow's label goes: on its first segment, just right of the source screen's right edge (after the dot's stub
+ * crosses it), centred on the line. A first segment that runs vertically puts the label just past its start.
+ */
+export function startLabelAnchor(route: Route, size: { width: number; height: number }): Pt {
+    const a = route.points[0] as Pt;
+    const b = route.points[1] as Pt;
+    if (a.y === b.y) return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
+    return { x: a.x, y: a.y + (b.y >= a.y ? 1 : -1) * (LABEL_GAP + size.height / 2) };
+}
+
+/** The part of a route a label may sit on: everything before the shared trunk (`trunkFrom`), anchored at `anchor`. */
+export function leadRoute(route: Route, anchor: Pt): Route {
+    const end = Math.max(1, route.trunkFrom ?? route.points.length - 1);
+    return { ...route, points: route.points.slice(0, end + 1), labelAnchor: anchor };
 }
