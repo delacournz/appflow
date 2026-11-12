@@ -27,7 +27,7 @@ export type BoardMeta = {
      * 'uniform' (default): one column pitch and one row pitch for the whole board; `colWidth`/`rowHeight` are the effective
      * pitch and no extras apply. 'banded': base pitch plus per-region extras.
      */
-    spacing?: 'uniform' | 'banded';
+    spacing?: 'uniform' | 'banded' | 'grouped';
     /** The pitch without group needs (uniform spacing only); `colWidth`/`rowHeight` are base plus the largest need. */
     baseColWidth?: number;
     baseRowHeight?: number;
@@ -60,6 +60,8 @@ export type ScreenMeta = {
     badgeId?: string | null;
     /** The flow group (labelled box) this screen belongs to: the id of the group's rect. Distinct from the legacy `groupId`. */
     flowGroupId?: string | null;
+    /** The layout grid `col`/`row` are local to: a flow group's id, or `board` / absent for the board grid. Only on boards with `spacing: 'grouped'`. */
+    layoutId?: string;
 };
 
 /**
@@ -84,6 +86,8 @@ export type GroupMeta = {
     /** Set on a nested child. One level only. */
     parentId?: string;
     style: GroupStyle;
+    /** Where this group's own layout grid starts (cell 0,0) in absolute coordinates; the pitch is the board's. Only on grouped boards. */
+    layout?: { originX: number; originY: number };
 };
 
 export type BuildStatus =
@@ -156,7 +160,7 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
         else delete meta[k];
     }
     if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId)) delete meta.labelsGroupId;
-    if (o.spacing !== undefined && o.spacing !== 'uniform' && o.spacing !== 'banded') delete meta.spacing;
+    if (o.spacing !== undefined && o.spacing !== 'uniform' && o.spacing !== 'banded' && o.spacing !== 'grouped') delete meta.spacing;
     for (const k of ['baseColWidth', 'baseRowHeight'] as const) if (o[k] !== undefined && !(isNum(o[k]) && (o[k] as number) > 0)) delete meta[k];
     const gap = o.gapExtra;
     if (gap !== undefined) {
@@ -175,6 +179,7 @@ export function parseScreenMeta(raw: string): ScreenMeta | null {
     if (o.groupId !== undefined && !strOrNull(o.groupId)) return null;
     if (o.badgeId !== undefined && !strOrNull(o.badgeId)) return null;
     if (o.flowGroupId !== undefined && !strOrNull(o.flowGroupId)) return null;
+    if (o.layoutId !== undefined && !isStr(o.layoutId)) return null;
     if (o.build !== undefined && !parseBuildStatus(o.build)) return null;
     return o as unknown as ScreenMeta;
 }
@@ -203,6 +208,7 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
     if (!titleFill || !titleColor) return null;
     if (s.padding !== undefined && (!isNum(s.padding) || s.padding <= 0)) return null;
     const legacy = s.padding === undefined;
+    const layout = isObj(o.layout) && isNum(o.layout.originX) && isNum(o.layout.originY) ? { originX: o.layout.originX, originY: o.layout.originY } : null;
     return {
         boardId: o.boardId,
         name: o.name,
@@ -210,6 +216,7 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
         rectId: o.rectId,
         titleId: o.titleId,
         ...(o.parentId ? { parentId: o.parentId } : {}),
+        ...(layout ? { layout } : {}),
         style: {
             color: s.color,
             strokeWeight: legacy && s.strokeWeight === LEGACY_STROKE ? STYLE_DEFAULTS.strokeWeight : s.strokeWeight,
