@@ -508,4 +508,40 @@ describe('same-row arrows across occupied cells and merged fan-in', () => {
         expect((pts[0] as Pt[]).at(-2)).toEqual((pts[1] as Pt[]).at(-2));
         expect(pairs.every(([id, s, tt]) => screensCrossed(routeOf(plans, id), board, [s, tt]) === 0)).toBe(true);
     });
+
+    describe('gap routes into merged targets', () => {
+        const key = (r: Rect) => `${r.x}:${r.y}`;
+        const run = (pairs: [string, Rect, Rect][]) => {
+            const screens: Rect[] = [];
+            for (let c = 14; c <= 22; c++) for (let r = 0; r <= 8; r++) screens.push(cellAt(c, r));
+            const plans = planRoutes({ gutter: PITCH_X - W, limits: pairs.map(() => undefined), screens, rowGap: PITCH_Y - H }, pairs.map(([id, s, t]) => ({ id, ends: ends(s, t) })));
+            const shapes = pairs.map(([id, s, t]) => ({ id, points: ((plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route).points, label: null, from: key(s), to: key(t) }));
+            return lintArrows(shapes, [], screens.map((r) => ({ id: key(r), rect: r }))).issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen');
+        };
+
+        test('two up-and-left arrows leaving one row gap each get their own gap y and gutter x (Remove the last passkey / Cancel)', () => {
+            const none = cellAt(16, 1);
+            const sheet = cellAt(20, 1);
+            const issues = run([
+                ['remove', cellAt(21, 2), none],
+                ['account', cellAt(15, 1), none],
+                ['cancel', cellAt(20, 2), sheet],
+                ['detail', cellAt(19, 1), sheet],
+            ]);
+            expect(issues).toEqual([]);
+        });
+
+        test('trunks of two targets in one column do not share a vertical when one arrow starts at the other entry height (Trusted devices)', () => {
+            const t1 = cellAt(17, 4);
+            const t2 = cellAt(17, 6);
+            const left = cellAt(16, 4);
+            const issues = run([
+                ['again', cellAt(17, 5), t1],
+                ['straight', left, t1],
+                ['setup', left, t2],
+                ['face', cellAt(16, 6), t2],
+            ]);
+            expect(issues).toEqual([]);
+        });
+    });
 });
