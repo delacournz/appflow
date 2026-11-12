@@ -3,7 +3,7 @@ import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigge
 import { boardMissingMessage } from './board-missing';
 import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
 import { arrowsContainerName, isArrowsContainerType, recoverableArrowIds, recoveryIndex } from './arrow-recovery';
-import { isLabelsContainerName, labelsContainerName, labelsToMigrate, stackingNeeds } from './arrow-labels';
+import { isLabelsContainerName, labelsContainerName, labelsInsertIndex, labelsToMigrate, stackingNeeds } from './arrow-labels';
 import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
 import {
@@ -440,11 +440,7 @@ export function raiseArrows(board: Board): void {
         return !!k && k.id !== labels?.id && holdsScreen(k, board.node.id);
     }, board.arrows.id, labels?.id ?? null);
     if (need.raiseArrows) parent.insertChild(parent.children.length - 1, board.arrows as SceneNode);
-    if (need.placeLabels && labels) {
-        const a = parent.children.indexOf(board.arrows as SceneNode);
-        const l = parent.children.indexOf(labels as SceneNode);
-        parent.insertChild(l > a ? a + 1 : a, labels as SceneNode);
-    }
+    if (need.placeLabels && labels) parent.insertChild(labelsInsertIndex(parent.children.map((k) => k.id), board.arrows.id), labels as SceneNode);
 }
 
 function writeArrowMeta(group: GroupNode, meta: ArrowMeta): void {

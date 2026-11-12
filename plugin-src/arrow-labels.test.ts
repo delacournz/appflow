@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { isLabelsContainerName, labelsContainerName, labelsToMigrate, stackingNeeds } from './arrow-labels';
+import { isLabelsContainerName, labelsContainerName, labelsInsertIndex, labelsToMigrate, labelStackIssue, stackingNeeds } from './arrow-labels';
 
 describe('labelsContainerName', () => {
     test('takes the board part from the board name, else the arrows container name', () => {
@@ -39,5 +39,35 @@ describe('stackingNeeds', () => {
     });
     test('without a labels container only the arrows matter', () => {
         expect(stackingNeeds(['A', 's1'], screen, 'A', null)).toEqual({ raiseArrows: true, placeLabels: false });
+    });
+});
+
+describe('labelsInsertIndex', () => {
+    const move = (ids: string[], id: string, index: number): string[] => {
+        const rest = ids.filter((x) => x !== id);
+        const before = ids.slice(0, index).filter((x) => x !== id).length;
+        return [...rest.slice(0, before), id, ...rest.slice(before)];
+    };
+    test('labels below the arrows end directly above them', () => {
+        const ids = ['s1', 'L', 'A', 'b1'];
+        expect(move(ids, 'L', labelsInsertIndex(ids, 'A'))).toEqual(['s1', 'A', 'L', 'b1']);
+    });
+    test('labels far above the arrows end directly above them', () => {
+        const ids = ['A', 'x', 'L'];
+        expect(move(ids, 'L', labelsInsertIndex(ids, 'A'))).toEqual(['A', 'L', 'x']);
+    });
+});
+
+describe('labelStackIssue', () => {
+    test('labels directly or anywhere above the arrows are fine', () => {
+        expect(labelStackIssue(['A', 'L'], 'A', 'L')).toBeNull();
+        expect(labelStackIssue(['A', 'b', 'L'], 'A', 'L')).toBeNull();
+    });
+    test('labels under the arrows are an issue', () => {
+        expect(labelStackIssue(['L', 'A', 'b'], 'A', 'L')).toEqual({ kind: 'labels-under-lines', arrowsId: 'A', labelsId: 'L' });
+    });
+    test('no labels container or a different parent is not checked', () => {
+        expect(labelStackIssue(['A'], 'A', null)).toBeNull();
+        expect(labelStackIssue(['A'], 'A', 'L')).toBeNull();
     });
 });

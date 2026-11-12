@@ -31,3 +31,22 @@ export function stackingNeeds(ids: readonly string[], isScreen: (id: string) => 
     const placeLabels = labelsId !== null && (raiseArrows || ids.indexOf(labelsId) !== at + 1);
     return { raiseArrows, placeLabels };
 }
+
+/**
+ * The `insertChild` index that puts the labels container directly above the arrows container. Always the slot right
+ * after the arrows, whether the labels start below or above them (`ids` bottom to top).
+ */
+export function labelsInsertIndex(ids: readonly string[], arrowsId: string): number {
+    return ids.indexOf(arrowsId) + 1;
+}
+
+export type LabelStackIssue = { kind: 'labels-under-lines'; arrowsId: string; labelsId: string };
+
+/** `labels-under-lines`: the labels container paints below the arrows container, so lines cut through label text. */
+export function labelStackIssue(ids: readonly string[], arrowsId: string, labelsId: string | null): LabelStackIssue | null {
+    if (labelsId === null) return null;
+    const a = ids.indexOf(arrowsId);
+    const l = ids.indexOf(labelsId);
+    if (a < 0 || l < 0 || l > a) return null;
+    return { kind: 'labels-under-lines', arrowsId, labelsId };
+}
