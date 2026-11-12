@@ -30,7 +30,7 @@ export type ProtoScreen = { id: string; name: string };
 /** `triggerName` is the name of the control holding the reaction, when known. */
 export type PrototypeIssue =
     | { kind: 'prototype-mismatch'; severity: 'warning'; arrowId: string; sourceName: string; targetName: string; reactionNodeId: string; triggerName: string | null; destinationId: string | null }
-    | { kind: 'prototype-without-arrow'; severity: 'warning'; sourceName: string; targetName: string; reactionNodeId: string; triggerName: string | null; destinationId: string }
+    | { kind: 'prototype-without-arrow'; severity: 'info'; sourceName: string; targetName: string; reactionNodeId: string; triggerName: string | null; destinationId: string }
     | { kind: 'auto-arrow-no-prototype'; severity: 'info'; arrowId: string; sourceName: string; targetName: string; reactionNodeId: string; triggerName: string | null; destinationId: string };
 
 export type PrototypeLintIssue = PrototypeIssue & { message: string };
@@ -101,7 +101,7 @@ export function lintPrototype(screens: readonly ProtoScreen[], arrows: readonly 
         }
         out.push({
             kind: 'prototype-without-arrow',
-            severity: 'warning',
+            severity: 'info',
             sourceName: name(r.screenId),
             targetName: name(r.destinationId),
             reactionNodeId: r.nodeId,

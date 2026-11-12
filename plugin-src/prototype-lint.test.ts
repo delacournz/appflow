@@ -43,7 +43,8 @@ describe('lintPrototype', () => {
     test('the Remove device button linked to Passkeys is caught when no arrow covers that pair', () => {
         const r = lintPrototype(screens, [arrow('a1', 's4', 's2', 'cta')], [click('cta', 's4', 's2'), click('remove', 's4', 's3')]);
         expect(r).toHaveLength(1);
-        expect(r[0]).toMatchObject({ kind: 'prototype-without-arrow', reactionNodeId: 'remove', targetName: 'Passkeys · none' });
+        expect(r[0]).toMatchObject({ kind: 'prototype-without-arrow', severity: 'info', reactionNodeId: 'remove', targetName: 'Passkeys · none' });
+        expect(r.every((i) => isInformational(i))).toBe(true);
     });
 
     test('reactions to nodes that are not board screens, and to the same screen, are ignored', () => {
