@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
-import { boxEdges, laneConflicts, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, type Exit, type Pt, type Rect, type Route } from './route';
+import { boxEdges, crowdedRunLength, laneConflicts, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
+import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, routeViaLeftGutter, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -117,7 +117,14 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         if (r.ok && fans.has(it.id)) fanLanes.set(edgeOf(it.ends), [...(fanLanes.get(edgeOf(it.ends)) ?? []), (r.points[1] as Pt).x]);
     });
     const final: Routed[] = routes.map((r, i) => (r.ok && r.kind === 'straight' ? clearOfLanes(r, fanLanes.get(edgeOf((items[i] as (typeof items)[number]).ends)) ?? [], limits[i]) : r));
-    const warnings = cfg.titles?.length ? shiftOffTitles(final, items, cfg.titles) : new Map<number, string>();
+    const titles = cfg.titles ?? [];
+    const builders: (((lane: number) => Routed) | null)[] = items.map((it, i) => {
+        const r = final[i] as Routed;
+        if (!r.ok || r.kind === 'straight' || fans.has(it.id)) return null;
+        return (lane: number) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+    });
+    const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
+    separateLines(final, builders, titles, edges);
     return items.map((it, i) => {
         const r = final[i] as Routed;
         if (!r.ok) return { id: it.id, route: null, error: r.error };
@@ -140,7 +147,14 @@ function verticalLeg(r: Routed): { x: number; y0: number; y1: number } | null {
  * the x range both screens allow and at least a lane step from other vertical lines that share its y range. When no x
  * qualifies the line stays and a warning is recorded for its index. Mutates `routes`.
  */
-function shiftOffTitles(routes: Routed[], items: { id: string; ends: Endpoints }[], titles: readonly Rect[]): Map<number, string> {
+function shiftOffTitles(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    titles: readonly Rect[],
+    gutter: number,
+    edges: readonly Edge[],
+    builders: (((lane: number) => Routed) | null)[],
+): Map<number, string> {
     const warnings = new Map<number, string>();
     const crosses = (x: number, y0: number, y1: number, t: Rect) => x > t.x - TITLE_MARGIN && x < t.x + t.width + TITLE_MARGIN && overlap1d(y0, y1, t.y, t.y + t.height);
     routes.forEach((r, i) => {
@@ -157,6 +171,16 @@ function shiftOffTitles(routes: Routed[], items: { id: string; ends: Endpoints }
             });
         const cands = titles.flatMap((t) => [t.x - TITLE_MARGIN, t.x + t.width + TITLE_MARGIN]).filter(free);
         if (!cands.length) {
+            // No x inside both screens works: drop down the gutter left of the columns and enter the target from its side.
+            for (let k = 0; k <= MAX_NUDGE; k++) {
+                const dx = k === 0 ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
+                const side = routeViaLeftGutter(source, target, gutter, 0, dx);
+                if (side.ok && titleHitCount(side.points, titles) === 0 && !laneConflicts(side.points, edges)) {
+                    routes[i] = side;
+                    builders[i] = (lane) => routeViaLeftGutter(source, target, gutter, lane, dx);
+                    return;
+                }
+            }
             warnings.set(i, `line crosses a group title's text and no lane within both screens avoids it`);
             return;
         }
@@ -164,4 +188,43 @@ function shiftOffTitles(routes: Routed[], items: { id: string; ends: Endpoints }
         routes[i] = { ...r, points: r.points.map((p) => ({ ...p, x })), dot: { ...r.dot, x }, labelAnchor: { ...r.labelAnchor, x } };
     });
     return warnings;
+}
+
+/**
+ * Last pass over every route: a line that shares a collinear stretch with another arrow (`lines-overlap`), runs through
+ * a title's text, or runs along a group stroke tries the next lanes of its own builder and keeps the cheapest. Lines
+ * that cannot move (straight, fanned, title-shifted) stay; the arrow they collide with moves instead. Mutates `routes`.
+ */
+function separateLines(routes: Routed[], builders: (((lane: number) => Routed) | null)[], titles: readonly Rect[], edges: readonly Edge[]): void {
+    const cost = (i: number, pts: readonly Pt[]): number => {
+        let c = 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+            if (j === i || !o.ok) return;
+            if (sharedRunLength(pts, o.points) > 1) c += 1000;
+            else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0) c += 0.5;
+        });
+        return c;
+    };
+    for (let pass = 0; pass < 3; pass++) {
+        let moved = false;
+        routes.forEach((r, i) => {
+            const build = builders[i];
+            if (!r.ok || !build) return;
+            const current = cost(i, r.points);
+            if (current < 1) return;
+            let best: { route: Routed; c: number } | null = null;
+            for (let lane = 0; lane <= MAX_NUDGE; lane++) {
+                const cand = build(lane);
+                if (!cand.ok) continue;
+                const c = cost(i, cand.points);
+                if (c < current && (!best || c < best.c)) best = { route: cand, c };
+                if (best && best.c < 1) break;
+            }
+            if (best) {
+                routes[i] = best.route;
+                moved = true;
+            }
+        });
+        if (!moved) break;
+    }
 }

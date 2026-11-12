@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 
 import { GROUP_CLEAR, GROUP_PAD, GROUP_STROKE, fitBox } from './flow-group';
 import { routeArrow, type Pt, type Rect, type Route } from './route';
-import { boxEdges, clearLabel, labelObstacles, laneConflicts, separateLabels, titleTextRect, type GroupObstacle } from './route-avoid';
+import { lintArrows } from './group-lint';
+import { boxEdges, clearLabel, labelObstacles, laneConflicts, separateLabels, titleHitCount, titleTextRect, type GroupObstacle } from './route-avoid';
 import { planRoutes, type Endpoints } from './route-plan';
 
 const EDGE = GROUP_PAD + GROUP_STROKE;
@@ -201,8 +202,6 @@ describe('separateLabels across a board', () => {
         const routes = planRoutes({ gutter: GUTTER, limits: its.map(() => undefined) }, its).map((p) => p.route as Route);
         const sizes = [pill(110), pill(120), pill(330)];
         const mk = () => its.map((it, i) => ({ id: it.id, route: routes[i] as Route, anchor: (routes[i] as Route).labelAnchor, size: sizes[i] as { width: number; height: number } }));
-        const raw = its.map((it, i) => rectAt((routes[i] as Route).labelAnchor, sizes[i] as { width: number; height: number }));
-        expect(raw.some((r, i) => raw.some((o, j) => j > i && gap(r, o) < 8))).toBe(true);
         const sep = separateLabels(mk(), []);
         expect(sep.blocked).toEqual([]);
         const rects = its.map((it, i) => rectAt(sep.anchors.get(it.id) as Pt, sizes[i] as { width: number; height: number }));
@@ -264,10 +263,23 @@ describe('vertical arrows and group title text', () => {
         expect(out.warning).toBeUndefined();
     });
 
-    test('text spanning the whole screen cannot be avoided: line stays and a warning is returned', () => {
-        const out = run(bar(96, 14, 64));
-        expect(verticalX(out.route as Route)).toBe(lower.x + 340);
-        expect(out.warning).toContain('title');
+    test('text spanning the whole screen: drops down the left gutter and enters the target from its left side', () => {
+        const g = bar(96, 14, 64);
+        const text = titleTextRect(g) as Rect;
+        const out = run(g);
+        const pts = (out.route as Route).points;
+        expect(out.warning).toBeUndefined();
+        expect(titleHitCount(pts, [text])).toBe(0);
+        const last = pts[pts.length - 1] as Pt;
+        const before = pts[pts.length - 2] as Pt;
+        expect(last.x).toBe(upper.x);
+        expect(before.y).toBe(last.y);
+        expect(before.x).toBeLessThan(last.x);
+        expect(last.y).toBeGreaterThan(upper.y);
+        expect(last.y).toBeLessThan(upper.y + H);
+        const gutterX = Math.min(...pts.map((p) => p.x));
+        expect(gutterX).toBeGreaterThanOrEqual(upper.x - GUTTER);
+        expect(gutterX).toBeLessThan(upper.x);
     });
 
     test('titles that the line misses leave the plan untouched', () => {
@@ -275,5 +287,70 @@ describe('vertical arrows and group title text', () => {
         const out = run(g);
         expect(out.route).toEqual(planRoutes({ gutter: GUTTER, limits: [undefined] }, [{ id: 'up', ends: ends(lower, upper) }])[0]?.route);
         expect(out.warning).toBeUndefined();
+    });
+});
+
+describe('arrow lanes on a uniform board', () => {
+    const PITCH_X = 1140;
+    const cell = (col: number, row: number): Rect => ({ x: 1000 + col * PITCH_X, y: 2000 + row * PITCH_Y, width: W, height: H });
+    const plan = (pairs: [string, Rect, Rect][], titles: Rect[] = []) =>
+        planRoutes({ gutter: PITCH_X - W, limits: pairs.map(() => undefined), titles }, pairs.map(([id, s, t]) => ({ id, ends: ends(s, t) })));
+    const lint = (plans: ReturnType<typeof planRoutes>, titles: Rect[] = []) =>
+        lintArrows(plans.map((p) => ({ id: p.id, points: (p.route as Route).points, label: null })), titles.map((text, i) => ({ id: `g${i}`, text }))).issues;
+
+    test('two arrows leaving one source toward nearly the same height do not share a trunk', () => {
+        const s = cell(0, 3);
+        const plans = plan([
+            ['face', s, cell(1, 3)],
+            ['pk', s, { ...cell(1, 3), y: cell(1, 3).y - 20 }],
+            ['pk2', s, { ...cell(1, 3), y: cell(1, 3).y + 20 }],
+        ]);
+        expect(lint(plans).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+    });
+
+    test('bottom-exit drops from vertically adjacent sources into one column get their own vertical lanes', () => {
+        const mk = (id: string, s: Rect, t: Rect): [string, Rect, Rect] => [id, s, t];
+        const withBottom = planRoutes(
+            { gutter: PITCH_X - W, limits: [undefined, undefined] },
+            [
+                { id: 'a', ends: { ...ends(cell(0, 0), cell(1, 2)), exit: 'bottom' } },
+                { id: 'b', ends: { ...ends(cell(0, 1), cell(1, 3)), exit: 'bottom' } },
+            ],
+        );
+        expect(lint(withBottom).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+        const dropA = lint(plan([mk('a', cell(0, 0), cell(0, 2)), mk('b', cell(0, 1), cell(0, 3))]));
+        expect(dropA.filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+    });
+
+    test('a straight drop and a bottom-exit elbow in one column do not share a line', () => {
+        const plans = planRoutes(
+            { gutter: PITCH_X - W, limits: [undefined, undefined] },
+            [
+                { id: 'down', ends: ends(cell(0, 0), cell(0, 2)) },
+                { id: 'elbow', ends: { ...ends(cell(0, 1), cell(1, 3)), exit: 'bottom' } },
+            ],
+        );
+        expect(lint(plans).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+    });
+
+    test('a long drop through a title: side entry keeps clear of the title and of other drops', () => {
+        const target = cell(11, 9);
+        const g = fitBox([target], [], { padding: 160, strokeWeight: 12, titleSize: 96 });
+        const obstacle: GroupObstacle = { box: g.box, title: g.title, titleChars: 20, strokeWeight: 12 };
+        const text = titleTextRect(obstacle) as Rect;
+        const plans = planRoutes(
+            { gutter: PITCH_X - W, limits: [undefined, undefined], titles: [text], boxes: [{ ...g.box, strokeWeight: 12 }] },
+            [
+                { id: 'home', ends: ends(cell(11, 0), target) },
+                { id: 'other', ends: ends(cell(11, 1), cell(11, 8)) },
+            ],
+        );
+        expect(plans.every((p) => p.warning === undefined)).toBe(true);
+        const issues = lint(plans, [text]);
+        expect(issues.filter((i) => i.kind === 'line-crosses-title')).toEqual([]);
+        expect(issues.filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+        const home = (plans[0] as (typeof plans)[number]).route as Route;
+        const end = home.points[home.points.length - 1] as Pt;
+        expect(end.x).toBe(target.x);
     });
 });

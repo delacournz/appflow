@@ -35,6 +35,16 @@ export type RouteError = { ok: false; error: string };
 
 export const ENTRY_OFFSET = 340;
 export const DOT_GAP = 10;
+/** A trigger narrower than this fraction of its screen's width is a tab or icon: the dot sits at its horizontal centre. */
+export const NARROW_TRIGGER = 0.4;
+/** Wide triggers (rows, buttons) put the dot this far inside their right edge. */
+export const DOT_INSET = 12;
+
+/** Where an arrow starts on its trigger: always the trigger's vertical centre, never shifted for lane separation. */
+export function triggerDot(trigger: Rect, source: Rect): Pt {
+    const narrow = trigger.width < NARROW_TRIGGER * source.width;
+    return { x: narrow ? trigger.x + trigger.width / 2 : right(trigger) - DOT_INSET, y: midY(trigger) };
+}
 export const LANE_STEP = 24;
 export const BACKWARDS_DROP = 60;
 export const FAN_STEP = 16;
@@ -188,8 +198,8 @@ export function routeArrow(input: RouteInput): Route | RouteError {
                 return bx < tx ? { ...straight, labelAnchor: { x: (sx + bx) / 2, y } } : straight;
             }
             if (fan && fan.count > 1) {
-                const base: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
-                const start: Pt = { x: base.x, y: base.y + fan.index * FAN_STEP };
+                const base: Pt = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) };
+                const start: Pt = trigger ? base : { x: base.x, y: base.y + fan.index * FAN_STEP };
                 // Lanes hug the source edge so the labels, which sit right of them, get most of the gutter.
                 const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP + fanShift, tx - EDGE_MARGIN);
                 const r = done(trigger ? 'trigger' : 'gutter', [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
@@ -198,7 +208,7 @@ export function routeArrow(input: RouteInput): Route | RouteError {
                 return { ...r, labelAnchor: { x: (last.x + bx) / 2, y: ty } };
             }
             const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
-            const start: Pt = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
+            const start: Pt = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) + toward };
             const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
             const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
             const jog = done(trigger ? 'trigger' : 'gutter', [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
@@ -219,4 +229,20 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             return done('backwards', [{ x: sx, y: bottom(source) }, { x: sx, y: dropY }, { x: tx, y: dropY }, { x: tx, y: bottom(target) }], true);
         }
     }
+}
+
+/**
+ * Fallback for a vertical arrow whose straight line would run through a group title's text: leaves the source's left
+ * edge, drops down the gutter left of both columns (lane `lane` steps further left of its centre) and enters the target
+ * from its left side, heading right. The only leftward stretch is the short hop from the source edge into the gutter.
+ * `dx` shifts the drop sideways, `lane` also staggers the exit and entry heights so parallel fallbacks never share a line.
+ */
+export function routeViaLeftGutter(source: Rect, target: Rect, gutter: number, lane: number, dx = 0): Route {
+    const left = Math.min(source.x, target.x);
+    const off = laneOffset(lane);
+    const x = left - gutter / 2 - lane * LANE_STEP + dx;
+    const sy = clamp(midY(source) + off, source.y + EDGE_MARGIN, bottom(source) - EDGE_MARGIN);
+    const ey = clamp(midY(target) + off, target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+    const r = done('gutter', [{ x: source.x, y: sy }, { x, y: sy }, { x, y: ey }, { x: target.x, y: ey }]);
+    return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
 }
