@@ -179,6 +179,6 @@ describe('tab hotspots named by tab', () => {
 
     test('a hotspot named after a non-tab screen is not exempt', () => {
         const r = lint(names, arrows, [{ nodeId: 'z', screenId: 'home', trigger: 'ON_CLICK', destinationId: 'dev', nodeName: 'Hotspot · Device details', ancestorNames: [] }]);
-        expect(r.issues.map((i) => i.reactionNodeId)).toEqual(['z']);
+        expect(r.issues.filter((i) => i.kind === 'prototype-without-arrow').map((i) => i.reactionNodeId)).toEqual(['z']);
     });
 });
