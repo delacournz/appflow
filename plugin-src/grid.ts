@@ -3,7 +3,8 @@ import { cellOfRect, type BoardMeta } from './flowmeta';
 import { compactExtras, shiftExtras, shiftRanges, trackStart, type Extras } from './tracks';
 
 export type GridMeta = Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra' | 'screenW' | 'screenH' | 'labelOffset' | 'margin'>;
-export type Cell = { col: number; row: number };
+/** `layoutId` names the layout grid the cell is local to; absent on boards with one shared grid. */
+export type Cell = { col: number; row: number; layoutId?: string };
 export type CellScreen = { id: string; col: number; row: number };
 export type Move = { id: string; from: Cell; to: Cell };
 export type Bounds = { x: number; y: number; width: number; height: number };
