@@ -430,12 +430,13 @@ async function settleBoard(board: Board, screens: Screen[], first: RefitResult, 
     let bonus: Bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
     let more = { col: 0, row: 0 };
     let previous: { col: number; row: number } | null = null;
+    let frozen = false;
     while (fit.active && passes < MAX_SETTLE) {
-        const short = hasDeficits(fit.deficits);
+        const short = hasDeficits(fit.deficits) && !frozen;
         if (short && uniform) {
             const step = growPitch(basePitchOf(board.meta), more, fit.deficits.uniform, previous);
             previous = fit.deficits.uniform;
-            if (step.stop && step.more.col === more.col && step.more.row === more.row) break;
+            frozen = step.stop;
             more = step.more;
         } else if (short) {
             bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
@@ -445,10 +446,11 @@ async function settleBoard(board: Board, screens: Screen[], first: RefitResult, 
         passes++;
         const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
         fit = again;
-        if (settled && !hasDeficits(again.deficits)) break;
+        if (settled && (frozen || !hasDeficits(again.deficits))) break;
         await resizeBoard(board, screens, false, fit.extent);
         last = await rerouteBoards([board]);
     }
+    if (fit.active) await resizeBoard(board, screens, true, fit.extent);
     return { fit, reroute: last, passes };
 }
 
