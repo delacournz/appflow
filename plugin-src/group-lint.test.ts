@@ -100,3 +100,27 @@ describe('lintArrows merged arrows', () => {
         expect(lintArrows([d, e], []).issues).toEqual([]);
     });
 });
+
+describe('lintArrows starts-wrong-side and ends-wrong-side', () => {
+    const screens = [
+        { id: 'a', rect: { x: 1000, y: 0, width: 393, height: 852 } },
+        { id: 'b', rect: { x: 2140, y: 0, width: 393, height: 852 } },
+    ];
+    const run = (points: [number, number][]) => lintArrows([{ id: 'x', from: 'a', to: 'b', label: null, points: points.map(([x, y]) => ({ x, y })) }], [], screens).issues.map((i) => i.kind);
+
+    test('right-edge start and left-edge end are fine; a dot inside the screen is fine', () => {
+        expect(run([[1393, 400], [2140, 400]])).toEqual([]);
+        expect(run([[1300, 400], [1400, 400], [2140, 400]])).toEqual([]);
+    });
+    test('bottom start and top end are fine', () => {
+        expect(run([[1200, 852], [1200, 900], [2300, 900], [2300, 0]])).toEqual([]);
+    });
+    test('a start on the left or top edge is flagged', () => {
+        expect(run([[1000, 400], [900, 400], [2140, 400]])).toEqual(['starts-wrong-side']);
+        expect(run([[1200, 0], [1200, -60], [2140, -60], [2140, 400]])).toEqual(['starts-wrong-side']);
+    });
+    test('an end on the right or bottom edge is flagged', () => {
+        expect(run([[1393, 400], [2600, 400], [2533, 400]])).toEqual(['ends-wrong-side']);
+        expect(run([[1393, 400], [2300, 400], [2300, 900], [2300, 852]])).toEqual(['ends-wrong-side']);
+    });
+});

@@ -58,15 +58,16 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 ## Rules
 
 1. **The main path runs left to right.** Each next screen goes in the column to the right of the screen before it, on the same row.
-2. **Arrows point right, down or up. Never left.** No segment of an arrow may move left, not even a short jog into a gutter.
+2. **Arrows point right or down at the head, and never run left,** with one exception: a bottom-exit detour (rule 11) runs left once, inside a row gap, never through a screen.
 3. **Branches go straight down.** A failure, an alternate outcome or a retry goes in the same column directly under its source screen. A second branch from the same screen goes in the next row down, or in the next column to the right.
 4. **Overlays and entry points may go straight up.** A sheet or modal that opens over a screen, or a banner screen that leads into a step, sits directly above its target.
 5. **A screen with an inbound arrow sits right of, or directly above or below, its source.** If a target would be to the left, move the target, don't bend the arrow. Move the screen's route text and badge with it.
-6. **Never route an arrow through a screen or its label.** Vertical arrows into a screen enter its top edge on the right side (about 340 px into a 393 px frame), clear of the route text. Horizontal arrows enter the left edge.
+6. **Never route an arrow through a screen or its label.** A target directly below its source is entered on its top edge (a straight bottom-to-top line). Every other target is entered on its left edge, heading right. Arrows never start on a screen's left or top edge and never end on its right or bottom edge (`starts-wrong-side`, `ends-wrong-side`).
 7. **Arrows don't cross.** If two must, reorder their start points so they don't. When they can't be separated, cross once, at right angles.
 8. **Labels sit on top of lines,** centred on a straight segment, and above every vector in z-order.
 9. **Start an arrow at the control that triggers it.** When a button, row, tab or link causes the move, put the start dot just outside that control's edge (about 10 px, so it doesn't blend into the fill) and route from there: across to the gutter, then up or down, then into the target. Only an automatic transition (a timer, a webhook, a redirect) starts from the screen's edge. Keep arrow groups above the screens in layer order so start dots stay visible.
-10. **One arrowhead per destination per source.** Don't merge two sources into one line. Draw each with its own arrowhead and label.
+10. **Arrows into one target merge.** Each runs into one shared trunk lane in the gutter before the target, then one shared final run into the left edge, so the heads coincide. Merged runs are not `lines-overlap`. Labels sit on each arrow's own first segment next to its source, never on shared runs.
+11. **Start only on a bottom or right edge; end only on a left or top edge.** A target in the same column that is not directly below (above it, far below it, or to the left) is reached by leaving the source's bottom (at the trigger's x, else the centre), dropping into the row gap below the source, running left along the gap into the gutter left of the target, running up or down to the target's middle and entering its left edge.
 
 ## Grid
 

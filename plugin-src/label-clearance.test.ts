@@ -84,7 +84,7 @@ describe('labels between groups', () => {
         const lowerFit = fitBox([lower]);
         const boxes: ConflictGroup[] = [{ id: 'u', ...upperFit }, { id: 'l', ...lowerFit }];
         const size = { width: 114, height: 31 };
-        const { placed } = withRoute(lower, upper, boxes, size);
+        const { placed } = withRoute(upper, lower, boxes, size);
         expect(placed.ok).toBe(true);
         if (!placed.ok) return;
         const at = rectAt(placed.anchor, size);
