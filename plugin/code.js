@@ -1703,13 +1703,75 @@ ${logs.join(`
     const capped = { col: Math.min(col, base.colWidth), row: Math.min(row, base.rowHeight) };
     return { more: capped, stop: capped.col !== col || capped.row !== row };
   }
+  var MISMATCH_SHARE = 0.3;
+  var AGREE_SHARE = 0.6;
+  var POS_TOLERANCE = 2;
+  var MIN_SCREENS = 3;
+  var median = (xs) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  function agreedPitch(samples) {
+    const usable = samples.filter((s) => s.index >= 1).map((s) => s.offset / s.index);
+    if (usable.length < 2)
+      return null;
+    const mid = median(usable);
+    const near = usable.filter((p) => Math.abs(p - mid) <= 1);
+    return near.length >= AGREE_SHARE * usable.length ? Math.round(mid) : null;
+  }
+  function checkPitch(meta, screens) {
+    if (screens.length < MIN_SCREENS)
+      return { kind: "ok" };
+    const off = screens.filter((s) => {
+      const want = cellRect2(meta, s.col, s.row);
+      return Math.abs(want.x - s.x) > POS_TOLERANCE || Math.abs(want.y - s.y) > POS_TOLERANCE;
+    });
+    if (off.length < MISMATCH_SHARE * screens.length)
+      return { kind: "ok" };
+    const banded = !!(meta.colExtra?.length || meta.rowExtra?.length) || meta.spacing === "banded";
+    const pitchNow = `${meta.colWidth} x ${meta.rowHeight}`;
+    if (banded)
+      return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored banded spacing (${pitchNow}). Restore the board or re-adopt it; reroute_flow will not re-derive cells from these positions.` };
+    const col = agreedPitch(screens.map((s) => ({ index: s.col, offset: s.x - meta.originX })));
+    const row = agreedPitch(screens.map((s) => ({ index: s.row, offset: s.y - meta.originY })));
+    const colOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).x - s.x) <= POS_TOLERANCE).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const rowOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).y - s.y) <= POS_TOLERANCE).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const pitch = { colWidth: colOk ? meta.colWidth : col ?? Number.NaN, rowHeight: rowOk ? meta.rowHeight : row ?? Number.NaN };
+    if (Number.isNaN(pitch.colWidth) || Number.isNaN(pitch.rowHeight)) {
+      return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored pitch (${pitchNow}) and their positions agree on no single pitch. reroute_flow will not re-derive cells from them; restore the board or pass colWidth and rowHeight.` };
+    }
+    if (pitch.colWidth === meta.colWidth && pitch.rowHeight === meta.rowHeight)
+      return { kind: "ok" };
+    return { kind: "repair", pitch };
+  }
 
   // plugin-src/board-ops.ts
   var writeScreen = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+  function guardPitch(board, entries) {
+    const screens = entries.flatMap((e) => {
+      const stored = readMeta(e.frame, SCREEN_KEY, parseScreenMeta);
+      if (!stored || stored.boardId !== board.node.id)
+        return [];
+      const r = rectOf(e.frame);
+      return [{ col: stored.col, row: stored.row, x: r.x, y: r.y }];
+    });
+    const verdict = checkPitch(board.meta, screens);
+    if (verdict.kind === "ok")
+      return null;
+    if (verdict.kind === "refuse")
+      throw new Error(verdict.reason);
+    const from = { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight };
+    const base = board.meta.baseColWidth !== undefined && board.meta.baseRowHeight !== undefined && board.meta.baseColWidth <= verdict.pitch.colWidth && board.meta.baseRowHeight <= verdict.pitch.rowHeight;
+    const { baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...base ? board.meta : rest, colWidth: verdict.pitch.colWidth, rowHeight: verdict.pitch.rowHeight };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return { from, to: verdict.pitch };
+  }
   async function loadScreens(board) {
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
       return { screens: [], stale: [] };
+    const pitchRepaired = guardPitch(board, collectScreens(parent.children));
     const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const screens = [];
     const stale = [];
@@ -1740,7 +1802,7 @@ ${logs.join(`
       screens.push({ node: c, meta });
     }
     await healBadges(screens, collectBadges(parent.children));
-    return { screens, stale };
+    return { screens, stale, ...pitchRepaired ? { pitchRepaired } : {} };
   }
   async function healBadges(screens, badgeNodes) {
     if (!badgeNodes.length)
@@ -8272,7 +8334,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "f107757e", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "15095910", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8280,7 +8342,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"f107757e"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"15095910"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

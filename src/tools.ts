@@ -408,7 +408,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'reroute_flow',
-        'Redraw flow arrows from the current positions of their screens and triggers, after moving screens. Updates each vector, dot and label in place, assigns lanes per gutter in a stable order, and reports arrows whose screens were deleted and arrows that run backwards. Without boardId it covers every adopted board on the current page.',
+        'Redraw flow arrows from the current positions of their screens and triggers, after moving screens. Updates each vector, dot and label in place, assigns lanes per gutter in a stable order, and reports arrows whose screens were deleted and arrows that run backwards. Without boardId it covers every adopted board on the current page. Refuses with pitch-mismatch when the board\'s stored pitch no longer matches where its screens sit (re-deriving cells from those positions would stack screens in one cell); a uniform board whose screens agree on one pitch is repaired from their positions instead.',
         obj({
             boardId: str('Board node ID.').optional(),
             arrowIds: z.array(z.string()).describe('Only redraw these arrow group IDs (as returned by connect).').optional(),

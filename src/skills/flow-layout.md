@@ -74,6 +74,7 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 ## Grid
 
 - Use a fixed grid: one column per screen (screen width + a 300 px gutter) and one row per screen height + about 260 px for the route text and arrows.
+- Never edit the board's pitch data by hand: cells are re-derived from positions and screens would stack. If the stored pitch no longer matches where the screens sit, `reroute_flow` repairs a uniform board from the positions or stops with `pitch-mismatch`; restore the board instead of forcing it.
 - Start the main path in the top-left cell. Put entry points (where the user arrives from) in the first column.
 - When a branch needs room, push the later columns right. Grow the board to fit. Don't squeeze a screen into a gap on the left.
 - After moving screens, close up any empty rows and columns the move leaves behind.

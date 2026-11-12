@@ -6,7 +6,7 @@ import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type ScreenMeta
 import type { JsonObject } from '../shared/protocol';
 import { boardBounds, cellOf, cellRect, staleReason, type ExtrasPair, type Move } from './grid';
 import type { Rect } from './rect';
-import { uniformFields, type Pitch, type Spacing } from './pitch';
+import { checkPitch, uniformFields, type Pitch, type Spacing } from './pitch';
 import { badgeBelongsTo, badgeFallbackOffset, shiftTargets } from './screen-group';
 
 /** Board plumbing shared by the grid tools and the flow group refit. Kept apart from both so neither imports the other. */
@@ -17,13 +17,38 @@ export type StaleFix = { id: string; name: string; reason: string; fixedTo: { co
 export const writeScreen = (node: SceneNode, meta: ScreenMeta): void => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
 
 /**
+ * Before any cell is re-derived from a position: checks the board's stored pitch against where its screens sit
+ * (`checkPitch`). A uniform board whose pitch is wrong is repaired from the positions (the meta is rewritten, no screen
+ * moves); anything else that does not match throws a `pitch-mismatch` error, because re-deriving cells from positions at
+ * the wrong pitch stacks screens in the same cell.
+ */
+function guardPitch(board: Board, entries: { frame: FrameNode }[]): { from: Pitch; to: Pitch } | null {
+    const screens = entries.flatMap((e) => {
+        const stored = readMeta(e.frame, SCREEN_KEY, parseScreenMeta);
+        if (!stored || stored.boardId !== board.node.id) return [];
+        const r = rectOf(e.frame);
+        return [{ col: stored.col, row: stored.row, x: r.x, y: r.y }];
+    });
+    const verdict = checkPitch(board.meta, screens);
+    if (verdict.kind === 'ok') return null;
+    if (verdict.kind === 'refuse') throw new Error(verdict.reason);
+    const from = { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight };
+    const base = board.meta.baseColWidth !== undefined && board.meta.baseRowHeight !== undefined && board.meta.baseColWidth <= verdict.pitch.colWidth && board.meta.baseRowHeight <= verdict.pitch.rowHeight;
+    const { baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...(base ? board.meta : rest), colWidth: verdict.pitch.colWidth, rowHeight: verdict.pitch.rowHeight };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return { from, to: verdict.pitch };
+}
+
+/**
  * The screens of a board. Duplicating a frame in Figma copies its plugin data, so a screen's meta is trusted only
  * when its label text sits at the frame's x and its cell matches its position. Anything else is re-derived from the
  * frame's position and the texts above it, written back, and reported.
  */
-export async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: StaleFix[] }> {
+export async function loadScreens(board: Board): Promise<{ screens: Screen[]; stale: StaleFix[]; pitchRepaired?: { from: Pitch; to: Pitch } }> {
     const parent = board.node.parent;
     if (!parent || !('children' in parent)) return { screens: [], stale: [] };
+    const pitchRepaired = guardPitch(board, collectScreens(parent.children));
     const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const screens: Screen[] = [];
     const stale: StaleFix[] = [];
@@ -53,7 +78,7 @@ export async function loadScreens(board: Board): Promise<{ screens: Screen[]; st
         screens.push({ node: c, meta });
     }
     await healBadges(screens, collectBadges(parent.children));
-    return { screens, stale };
+    return { screens, stale, ...(pitchRepaired ? { pitchRepaired } : {}) };
 }
 
 /**
