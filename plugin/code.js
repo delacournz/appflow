@@ -3313,7 +3313,12 @@ ${logs.join(`
   }
 
   // plugin-src/prototype-lint.ts
-  function lintPrototype(screens, arrows, reactions) {
+  var TAB_BAR_NAME = /tab ?bar|bottom ?nav|navigation ?bar/i;
+  var TAB_ARROW_LABEL = /^tap (home|pay|activity|account)\b/i;
+  function lintPrototype(screens, arrows, rawReactions) {
+    const reactions = dedupeReactions(rawReactions);
+    const tabRoots = new Set(arrows.filter((a) => a.label !== undefined && TAB_ARROW_LABEL.test(a.label) || (a.triggerAncestorNames ?? []).some((n) => TAB_BAR_NAME.test(n))).map((a) => a.to));
+    let exemptCount = 0;
     const name = (id) => screens.find((s) => s.id === id)?.name ?? id;
     const isScreen = (id) => screens.some((s) => s.id === id);
     const out = [];
@@ -3331,6 +3336,7 @@ ${logs.join(`
           sourceName: name(a.from),
           targetName: name(a.to),
           reactionNodeId: a.trigger,
+          triggerName: a.triggerName ?? actual?.nodeName ?? null,
           destinationId: dest,
           message: dest ? `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, but its prototype goes to ${name(dest)} (${dest})` : `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, which has no navigate reaction`
         });
@@ -3345,6 +3351,7 @@ ${logs.join(`
           sourceName: name(a.from),
           targetName: name(a.to),
           reactionNodeId: a.from,
+          triggerName: null,
           destinationId: a.to,
           message: `Auto arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has no matching prototype: ${name(a.from)} has no AFTER_TIMEOUT and no reaction to ${name(a.to)}`
         });
@@ -3355,15 +3362,39 @@ ${logs.join(`
         continue;
       if (arrows.some((a) => a.from === r.screenId && a.to === r.destinationId))
         continue;
+      if ([r.nodeName ?? "", ...r.ancestorNames ?? []].some((n) => TAB_BAR_NAME.test(n)) || tabRoots.has(r.destinationId)) {
+        exemptCount++;
+        continue;
+      }
       out.push({
         kind: "prototype-without-arrow",
         severity: "warning",
         sourceName: name(r.screenId),
         targetName: name(r.destinationId),
         reactionNodeId: r.nodeId,
+        triggerName: r.nodeName ?? null,
         destinationId: r.destinationId,
         message: `${r.trigger} reaction on ${r.nodeId} in ${name(r.screenId)} navigates to ${name(r.destinationId)}, but no arrow connects them`
       });
+    }
+    return { issues: out, exemptCount };
+  }
+  function dedupeReactions(reactions) {
+    const outerOf = (id) => {
+      const m = /^I([^;]+);/.exec(id);
+      return m ? m[1] : null;
+    };
+    const seen = new Set;
+    const out = [];
+    for (const r of reactions) {
+      const key = `${r.nodeId}>${r.destinationId}`;
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      const outer = outerOf(r.nodeId);
+      if (outer && reactions.some((o) => o.nodeId === outer && o.destinationId === r.destinationId))
+        continue;
+      out.push(r);
     }
     return out;
   }
@@ -3555,6 +3586,15 @@ ${logs.join(`
     const shown = boardScreens(board);
     const screens = await Promise.all(shown.map(async (s) => ({ id: s.id, name: (await sceneById(s.id))?.name ?? s.id })));
     const reactions = [];
+    const ancestry = (n, stopId) => {
+      const names = [];
+      let p = n.parent;
+      while (p && p.id !== stopId && p.type !== "PAGE" && p.type !== "DOCUMENT") {
+        names.push(p.name);
+        p = p.parent;
+      }
+      return names;
+    };
     for (const s of shown) {
       const root = await sceneById(s.id);
       if (!root)
@@ -3564,19 +3604,33 @@ ${logs.join(`
         if (!("reactions" in n))
           continue;
         for (const r of n.reactions) {
-          for (const a of [...r.action ? [r.action] : [], ...r.actions ?? []]) {
+          const list = r.actions && r.actions.length ? r.actions : r.action ? [r.action] : [];
+          for (const a of list) {
             if (a.type === "NODE" && a.navigation === "NAVIGATE" && typeof a.destinationId === "string") {
-              reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? "NONE", destinationId: a.destinationId });
+              reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? "NONE", destinationId: a.destinationId, nodeName: n.name, ancestorNames: ancestry(n, s.id) });
             }
           }
         }
       }
     }
-    const arrows = listArrows(board).map((a) => ({ id: a.group.id, from: a.meta.from, to: a.meta.to, trigger: a.meta.trigger }));
-    const issues = lintPrototype(screens, arrows, reactions);
+    const arrows = [];
+    for (const a of listArrows(board)) {
+      const trig = a.meta.trigger ? await sceneById(a.meta.trigger) : null;
+      arrows.push({
+        id: a.group.id,
+        from: a.meta.from,
+        to: a.meta.to,
+        trigger: a.meta.trigger,
+        label: a.meta.label,
+        ...trig ? { triggerName: trig.name, triggerAncestorNames: [trig.name, ...ancestry(trig, a.meta.from)] } : {}
+      });
+    }
+    const { issues, exemptCount } = lintPrototype(screens, arrows, reactions);
     const counts = {};
     for (const i of issues)
       counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    if (exemptCount)
+      counts.exemptCount = exemptCount;
     return { issues, counts };
   }
   function orphanBadgeIssues(board) {
@@ -4301,7 +4355,7 @@ ${logs.join(`
       out.push(target.y + target.height + 24 + k * LANE_STEP);
     return out.filter((y) => y >= lo && y <= hi);
   };
-  function joinTargets(routes, items, screens, rowGap, titles, edges, builders, gutter) {
+  function joinPass(order, routes, items, screens, rowGap, titles, edges, builders, gutter) {
     const groups = new Map;
     items.forEach((it, i) => {
       const r = routes[i];
@@ -4319,7 +4373,9 @@ ${logs.join(`
     const joined = [...groups.values()].filter((g) => g.length >= 2);
     const pending = new Set(joined.flat());
     const lowerFirst = (g) => items[g[0]].ends.target.y;
-    for (const idx of [...joined].sort((p, q) => lowerFirst(q) - lowerFirst(p))) {
+    let grand = 0;
+    const done = [];
+    for (const idx of [...joined].sort((p, q) => order === "lower" ? lowerFirst(q) - lowerFirst(p) : lowerFirst(p) - lowerFirst(q))) {
       const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
       const members = new Set(idx);
       for (const i of idx)
@@ -4355,6 +4411,14 @@ ${logs.join(`
           const around = relation(source, target) !== "right";
           const plain = around ? routeViaGap(source, target, trigger, gutter, 0, { laneX: trunkX, shared: true, ...relation(source, target) === "left" ? { kind: "backwards", backwards: true } : {} }) : routeJoin(source, target, trigger, trunkX, null);
           let pick = { route: plain, c: cost(plain.points) };
+          if (pick.c >= 1 && around) {
+            for (let lane = 1;lane <= 4 && pick.c >= 1; lane++) {
+              const cand = routeViaGap(source, target, trigger, gutter, lane, { laneX: trunkX, shared: true, ...relation(source, target) === "left" ? { kind: "backwards", backwards: true } : {} });
+              const c = cost(cand.points);
+              if (c < pick.c)
+                pick = { route: cand, c };
+            }
+          }
           if (pick.c >= SCREEN_COST && !around) {
             for (let lane = 0;lane <= 4; lane++) {
               for (const y of bandsFor(target, rowGap)) {
@@ -4376,10 +4440,23 @@ ${logs.join(`
           break;
       }
       const chosen = best;
+      grand += chosen.total;
       ordered.forEach((i, n) => {
         routes[i] = chosen.chosen[n];
-        builders[i] = null;
+        done.push(i);
       });
+    }
+    return { total: grand, members: done };
+  }
+  function joinTargets(routes, items, screens, rowGap, titles, edges, builders, gutter) {
+    const lower = routes.slice();
+    const upper = routes.slice();
+    const a = joinPass("lower", lower, items, screens, rowGap, titles, edges, builders, gutter);
+    const b = joinPass("upper", upper, items, screens, rowGap, titles, edges, builders, gutter);
+    const best = b.total < a.total ? { routes: upper, ...b } : { routes: lower, ...a };
+    for (const i of best.members) {
+      routes[i] = best.routes[i];
+      builders[i] = null;
     }
   }
 
@@ -8058,7 +8135,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "1e102140", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "62594465", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8066,7 +8143,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"1e102140"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"62594465"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
