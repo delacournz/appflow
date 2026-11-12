@@ -3312,6 +3312,62 @@ ${logs.join(`
     return { issues, counts };
   }
 
+  // plugin-src/prototype-lint.ts
+  function lintPrototype(screens, arrows, reactions) {
+    const name = (id) => screens.find((s) => s.id === id)?.name ?? id;
+    const isScreen = (id) => screens.some((s) => s.id === id);
+    const out = [];
+    for (const a of arrows) {
+      if (a.trigger) {
+        const own = reactions.filter((r) => r.nodeId === a.trigger);
+        if (own.some((r) => r.destinationId === a.to))
+          continue;
+        const actual = own.find((r) => isScreen(r.destinationId)) ?? own[0];
+        const dest = actual?.destinationId ?? null;
+        out.push({
+          kind: "prototype-mismatch",
+          severity: "warning",
+          arrowId: a.id,
+          sourceName: name(a.from),
+          targetName: name(a.to),
+          reactionNodeId: a.trigger,
+          destinationId: dest,
+          message: dest ? `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, but its prototype goes to ${name(dest)} (${dest})` : `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, which has no navigate reaction`
+        });
+      } else {
+        const mine = reactions.filter((r) => r.screenId === a.from);
+        if (mine.some((r) => r.nodeId === a.from && r.trigger === "AFTER_TIMEOUT") || mine.some((r) => r.destinationId === a.to))
+          continue;
+        out.push({
+          kind: "auto-arrow-no-prototype",
+          severity: "info",
+          arrowId: a.id,
+          sourceName: name(a.from),
+          targetName: name(a.to),
+          reactionNodeId: a.from,
+          destinationId: a.to,
+          message: `Auto arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has no matching prototype: ${name(a.from)} has no AFTER_TIMEOUT and no reaction to ${name(a.to)}`
+        });
+      }
+    }
+    for (const r of reactions) {
+      if (!isScreen(r.destinationId) || r.destinationId === r.screenId)
+        continue;
+      if (arrows.some((a) => a.from === r.screenId && a.to === r.destinationId))
+        continue;
+      out.push({
+        kind: "prototype-without-arrow",
+        severity: "warning",
+        sourceName: name(r.screenId),
+        targetName: name(r.destinationId),
+        reactionNodeId: r.nodeId,
+        destinationId: r.destinationId,
+        message: `${r.trigger} reaction on ${r.nodeId} in ${name(r.screenId)} navigates to ${name(r.destinationId)}, but no arrow connects them`
+      });
+    }
+    return out;
+  }
+
   // plugin-src/route-avoid.ts
   var TITLE_CHAR_WIDTH = 0.6;
   var TITLE_FALLBACK_CHARS = 16;
@@ -3495,6 +3551,34 @@ ${logs.join(`
     }
     return lintArrows(arrows, titles, boardScreens(board));
   }
+  async function prototypeIssues(board) {
+    const shown = boardScreens(board);
+    const screens = await Promise.all(shown.map(async (s) => ({ id: s.id, name: (await sceneById(s.id))?.name ?? s.id })));
+    const reactions = [];
+    for (const s of shown) {
+      const root = await sceneById(s.id);
+      if (!root)
+        continue;
+      const nodes = "findAll" in root ? [root, ...root.findAll((n) => ("reactions" in n))] : [root];
+      for (const n of nodes) {
+        if (!("reactions" in n))
+          continue;
+        for (const r of n.reactions) {
+          for (const a of [...r.action ? [r.action] : [], ...r.actions ?? []]) {
+            if (a.type === "NODE" && a.navigation === "NAVIGATE" && typeof a.destinationId === "string") {
+              reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? "NONE", destinationId: a.destinationId });
+            }
+          }
+        }
+      }
+    }
+    const arrows = listArrows(board).map((a) => ({ id: a.group.id, from: a.meta.from, to: a.meta.to, trigger: a.meta.trigger }));
+    const issues = lintPrototype(screens, arrows, reactions);
+    const counts = {};
+    for (const i of issues)
+      counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    return { issues, counts };
+  }
   function orphanBadgeIssues(board) {
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
@@ -3523,6 +3607,10 @@ ${logs.join(`
         titles.push({ id: g.id, text });
     }
     const arrowPart = await arrowIssues(board, titles);
+    const proto = await prototypeIssues(board);
+    arrowPart.issues.push(...proto.issues);
+    for (const [k, v] of Object.entries(proto.counts))
+      arrowPart.counts[k] = (arrowPart.counts[k] ?? 0) + v;
     const orphans = orphanBadgeIssues(board);
     if (orphans.length) {
       arrowPart.issues.push(...orphans);
@@ -3643,11 +3731,11 @@ ${logs.join(`
     }
     return ok({
       checked,
-      passed: issues.length === 0 && layoutIssues.length === 0,
+      passed: issues.length === 0 && layoutIssues.every((i) => i.severity === "info"),
       issues,
       layoutIssues,
       counts,
-      fix: layoutIssues.length ? "Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines." : issues.length ? "Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up." : null
+      fix: layoutIssues.some((i) => i.severity !== "info") ? "Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines." : issues.length ? "Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up." : null
     });
   };
 
@@ -7970,7 +8058,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a27c606e", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "1e102140", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7978,7 +8066,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a27c606e"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"1e102140"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
