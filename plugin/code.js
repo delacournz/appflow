@@ -4056,6 +4056,8 @@ ${logs.join(`
 
   // plugin-src/route-plan.ts
   var TITLE_MARGIN = 8;
+  var NEAR_LANE = 100;
+  var NEAR_EDGE = 24;
   var MAX_NUDGE = 8;
   function planRoutes(cfg, items) {
     const { gutter, limits } = cfg;
@@ -4162,7 +4164,15 @@ ${logs.join(`
       const r = final[i];
       if (!r.ok || r.kind === "straight" || fans.has(it.id))
         return null;
-      return (lane) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+      const around = r.kind === "around" || r.kind === "backwards";
+      const { source, target, trigger } = it.ends;
+      return (lane) => {
+        if (lane < NEAR_LANE)
+          return routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+        if (!around)
+          return { ok: false, error: "no near-column lane" };
+        return routeViaGap(source, target, trigger, gutter, 0, { laneX: target.x - NEAR_EDGE - (lane - NEAR_LANE) * LANE_STEP, kind: r.kind, backwards: r.backwards });
+      };
     });
     joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
@@ -4241,7 +4251,7 @@ ${logs.join(`
         if (current < 1)
           return;
         let best = null;
-        for (let lane = 0;lane <= MAX_NUDGE; lane++) {
+        for (const lane of [...Array.from({ length: MAX_NUDGE + 1 }, (_, n) => n), ...Array.from({ length: 5 }, (_, n) => NEAR_LANE + n)]) {
           const cand = build(lane);
           if (!cand.ok)
             continue;
@@ -8142,7 +8152,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "deab00be", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "f7c3f3ee", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8150,7 +8160,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"deab00be"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"f7c3f3ee"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
