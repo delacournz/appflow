@@ -89,7 +89,7 @@ function specsOf(groups: readonly PlannedGroup[]): GroupSpec[] {
 async function adoptBoard(board: Board, dryRun: boolean, removeOld: boolean): Promise<JsonObject> {
     const { screens } = await loadScreens(board);
     const screenIds = new Set(screens.map((s) => s.node.id));
-    const skip = new Set<string>([board.node.id, board.meta.arrowsGroupId, ...(board.meta.headingId ? [board.meta.headingId] : []), ...screenIds]);
+    const skip = new Set<string>([board.node.id, board.meta.arrowsGroupId, ...(board.meta.labelsGroupId ? [board.meta.labelsGroupId] : []), ...(board.meta.headingId ? [board.meta.headingId] : []), ...screenIds]);
     const candidates = collect(skip, rectOf(board.node));
     const plan: AdoptPlan = planAdopt({
         candidates,

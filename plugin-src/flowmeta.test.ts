@@ -42,6 +42,12 @@ describe('meta parsing', () => {
         expect(parseArrowMeta(JSON.stringify(arrow))).toEqual(arrow);
     });
 
+    test('keeps an optional labelsGroupId and drops a malformed one', () => {
+        expect(parseBoardMeta(JSON.stringify({ ...board, labelsGroupId: '9:9' }))?.labelsGroupId).toBe('9:9');
+        expect(parseBoardMeta(JSON.stringify({ ...board, labelsGroupId: 5 }))?.labelsGroupId).toBeUndefined();
+        expect(parseBoardMeta(JSON.stringify(board))?.labelsGroupId).toBeUndefined();
+    });
+
     test('rejects empty, malformed, wrong-kind and wrong-version data', () => {
         expect(parseBoardMeta('')).toBeNull();
         expect(parseBoardMeta('{not json')).toBeNull();
