@@ -893,9 +893,10 @@ export async function joinAndRefit(boardId: string, screenId: string, groupId: s
 
 /** reroute_flow: refits every grouped board first, so a hand-moved screen pulls its box along. */
 /**
- * Converts a board from one shared grid to group-local grids without moving a screen (`migrateToGrouped`): each group's grid
+ * Converts a board from one shared grid to group-local grids (`migrateToGrouped`), snapping only members that sit off the pitch: each group's grid
  * starts at its members' top-left, every screen gets its local cell, and the shared extras, base pitch and bands go. A dry
- * run changes nothing and reports what would happen. Screens that do not sit on their grid's pitch are listed in `offGrid`.
+ * run changes nothing and reports the planned `moves`. Members that banded extras left off their grid's pitch are snapped once to the
+ * nearest free cell; the refit that follows pushes neighbouring groups if a box grew into them.
  */
 async function convertToGrouped(board: Board, screens: Screen[], groups: LoadedGroup[], dryRun: boolean): Promise<JsonObject> {
     const plan = migrateToGrouped(
@@ -911,7 +912,8 @@ async function convertToGrouped(board: Board, screens: Screen[], groups: LoadedG
         dryRun,
         from: spacingOf(board.meta),
         grids: plan.grids.map((g) => ({ id: g.id, ...(g.id === BOARD_GRID ? {} : { name: groups.find((x) => x.id === g.id)?.meta.name ?? g.id }), originX: g.originX, originY: g.originY })),
-        screensMoved: 0,
+        screensMoved: plan.moves.length,
+        moves: plan.moves.map((m) => ({ id: m.id, name: screens.find((s) => s.node.id === m.id)?.node.name ?? m.id, from: { ...m.from }, to: { ...m.to }, cell: { layoutId: m.layoutId, col: m.col, row: m.row } })),
         offGrid: plan.offGrid.map((id) => ({ id, name: screens.find((s) => s.node.id === id)?.node.name ?? id })),
     };
     if (dryRun) return report;
@@ -929,6 +931,11 @@ async function convertToGrouped(board: Board, screens: Screen[], groups: LoadedG
     for (const s of screens) {
         const cell = plan.cells.get(s.node.id);
         if (!cell) continue;
+        const move = plan.moves.find((m) => m.id === s.node.id);
+        if (move) {
+            const have = rectOf(s.node);
+            await shiftScreen(s, move.to.x - have.x, move.to.y - have.y);
+        }
         s.meta = { ...s.meta, ...cell };
         writeScreen(s.node, s.meta);
     }

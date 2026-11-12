@@ -48,16 +48,50 @@ export type MigrateScreen = { id: string; flowGroupId: string | null; x: number;
 export type Migration = {
     grids: LayoutGrid[];
     cells: Map<string, { layoutId: string; col: number; row: number }>;
-    /** Screens whose position is not on their grid's pitch: their cell is the nearest one, and moving to it would move them. */
+    /** Screens that were not on their grid's pitch and had to be snapped to a free cell of it: where each goes. Empty when nothing is off the pitch. */
+    moves: { id: string; layoutId: string; col: number; row: number; from: { x: number; y: number }; to: { x: number; y: number } }[];
+    /** Screens still not on their grid after snapping (none, unless the board grid could not place them). */
     offGrid: string[];
 };
+
+const SNAP_RADIUS = 8;
+
+const onPitch = (d: number, pitch: number): boolean => Math.abs(d - Math.round(d / pitch) * pitch) <= POS_TOLERANCE;
+
+/**
+ * The members that share one pitch with the group's top-left member (the first by y, then x): positions a whole number of
+ * pitches apart. That class defines the group's grid; the members outside it are snapped onto it.
+ */
+function mainClass(members: readonly MigrateScreen[], board: GridBoard): MigrateScreen[] {
+    const first = [...members].sort((a, b) => a.y - b.y || a.x - b.x)[0] as MigrateScreen;
+    return members.filter((m) => onPitch(m.x - first.x, board.colWidth) && onPitch(m.y - first.y, board.rowHeight));
+}
+
+/**
+ * The free cell of a grid nearest a frame's top-left corner (cells at or right/below the grid origin only). Distance is measured
+ * from the frame to the cell's rect; a tie goes right, then down. Never a cell in `taken`.
+ */
+export function nearestFreeCell(grid: LayoutGrid, at: { x: number; y: number }, taken: ReadonlySet<string>): { col: number; row: number } {
+    const near = { col: Math.round((at.x - grid.originX) / grid.colWidth), row: Math.round((at.y - grid.originY) / grid.rowHeight) };
+    let best: { col: number; row: number; d: number } | null = null;
+    for (let col = Math.max(0, near.col - SNAP_RADIUS); col <= near.col + SNAP_RADIUS; col++) {
+        for (let row = Math.max(0, near.row - SNAP_RADIUS); row <= near.row + SNAP_RADIUS; row++) {
+            if (taken.has(`${col},${row}`)) continue;
+            const d = Math.hypot(grid.originX + col * grid.colWidth - at.x, grid.originY + row * grid.rowHeight - at.y);
+            const better = !best || d < best.d - 1e-6 || (Math.abs(d - best.d) <= 1e-6 && (col > best.col || (col === best.col && row > best.row)));
+            if (better) best = { col, row, d };
+        }
+    }
+    return best ? { col: best.col, row: best.row } : { col: Math.max(0, near.col), row: Math.max(0, near.row) };
+}
 
 /**
  * Converts a board with one shared grid (uniform or banded) to group-local grids without moving anything. A group with
  * direct screens gets a grid whose origin is the top-left of its members' frames, so its local cells start at 0 and every
  * member's cell rect is where the frame is now. Screens in no group, or in a group that does not exist, go on the board
- * grid at the board origin, or at their own top-left when banded extras left them off that origin. Every grid uses the board pitch. Banded extras between groups simply disappear: each group's
- * screens already sit on a regular pitch inside it.
+ * grid at the board origin, or at their own top-left when banded extras left them off that origin. Every grid uses the board pitch.
+ * Banded extras between groups simply disappear. A member that banded extras left off its group's pitch is snapped once to the
+ * nearest free cell of the group's grid (`moves`); everything already on the pitch stays where it is.
  */
 export function migrateToGrouped(board: GridBoard, screens: readonly MigrateScreen[], groups: readonly { id: string; parentId?: string }[]): Migration {
     const known = new Set(groups.map((g) => g.id));
@@ -66,7 +100,8 @@ export function migrateToGrouped(board: GridBoard, screens: readonly MigrateScre
     for (const g of groups) {
         const members = screens.filter((s) => layoutOf(s) === g.id);
         if (!members.length) continue;
-        grids.push({ id: g.id, originX: Math.min(...members.map((m) => m.x)), originY: Math.min(...members.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
+        const main = mainClass(members, board);
+        grids.push({ id: g.id, originX: Math.min(...main.map((m) => m.x)), originY: Math.min(...main.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
     }
     const loose = screens.filter((s) => layoutOf(s) === BOARD_GRID);
     if (loose.length) {
@@ -75,12 +110,29 @@ export function migrateToGrouped(board: GridBoard, screens: readonly MigrateScre
         grids.push(fits ? atBoard : { ...atBoard, originX: Math.min(...loose.map((s) => s.x)), originY: Math.min(...loose.map((s) => s.y)) });
     }
     const cells = new Map<string, { layoutId: string; col: number; row: number }>();
-    const offGrid: string[] = [];
+    const moves: Migration['moves'] = [];
+    const taken = new Map<string, Set<string>>();
+    const off: MigrateScreen[] = [];
     for (const s of screens) {
         const layoutId = layoutOf(s);
         const grid = grids.find((g) => g.id === layoutId) as LayoutGrid;
-        cells.set(s.id, { layoutId, ...cellOfIn(grid, s) });
-        if (!onGrid(grid, s)) offGrid.push(s.id);
+        if (!onGrid(grid, s)) {
+            off.push(s);
+            continue;
+        }
+        const cell = cellOfIn(grid, s);
+        cells.set(s.id, { layoutId, ...cell });
+        taken.set(layoutId, (taken.get(layoutId) ?? new Set()).add(`${cell.col},${cell.row}`));
     }
-    return { grids, cells, offGrid };
+    for (const s of [...off].sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : 1))) {
+        const layoutId = layoutOf(s);
+        const grid = grids.find((g) => g.id === layoutId) as LayoutGrid;
+        const used = taken.get(layoutId) ?? new Set<string>();
+        const cell = nearestFreeCell(grid, s, used);
+        used.add(`${cell.col},${cell.row}`);
+        taken.set(layoutId, used);
+        cells.set(s.id, { layoutId, ...cell });
+        moves.push({ id: s.id, layoutId, ...cell, from: { x: s.x, y: s.y }, to: { x: grid.originX + cell.col * grid.colWidth, y: grid.originY + cell.row * grid.rowHeight } });
+    }
+    return { grids, cells, moves, offGrid: [] };
 }
