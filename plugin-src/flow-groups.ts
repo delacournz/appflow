@@ -1,5 +1,5 @@
 /**
- * Flow groups: labelled boxes (a stroked rectangle plus a title text) around sets of screens on a board.
+ * Flow groups: labelled boxes (a stroked rectangle plus a title bar frame holding the name) around sets of screens on a board.
  *
  * Membership lives in plugin data: a `group` meta on the rectangle (its node id is the group id) and `flowGroupId` on each
  * screen. Screens stay top-level frames, so prototype Play keeps working. The boxes sit in an unclipped `Flow groups · {board}`
@@ -10,18 +10,18 @@
  * `finish` or `rerouteBoards`, so hooks can call it freely; callers reroute afterwards when `extrasChanged`.
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, writeScreen, type Screen } from './board-ops';
+import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, snapBadges, writeScreen, type Screen } from './board-ops';
 import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, setGroupObstacleLoader, toLocal, type Board } from './flow';
 import {
-    CHILD_TITLE_SCALE,
-    GROUP_STROKE,
-    TITLE_GAP,
-    TITLE_SIZE,
+    TITLE_COLOR,
+    TITLE_FILL,
+    TITLE_PAD_X,
     fitBox,
     groupConflicts,
     memberContentRect,
-    titleHeightOf,
+    titleLineOf,
     validateNesting,
+    titleHeightOf,
     type ConflictContent,
     type ConflictGroup,
     type FittedBox,
@@ -46,6 +46,7 @@ import {
     type GroupRec,
 } from './flow-group-plan';
 import { FLOW_NAMESPACE, GROUP_KEY, GROUP_LAYER_KEY, SCREEN_KEY, parseGroupMeta, parseScreenMeta, type GroupMeta, type GroupStyle } from './flowmeta';
+import { defaultMetrics } from './flow-group';
 import type { Rect } from './rect';
 import { cleanExtras, type ExtrasInput } from './tracks';
 import { unionRect } from './rect';
@@ -55,11 +56,14 @@ const norm = (id: string) => id.replace('-', ':');
 const bandsJson = (extras: ExtrasInput | undefined): JsonObject[] => cleanExtras(extras).map((b) => ({ at: b.at, from: b.from, to: b.to, px: b.px }));
 const TITLE_FONT: FontName = { family: 'Inter', style: 'Bold' };
 
-export type LoadedGroup = { id: string; rect: RectangleNode; title: TextNode | null; meta: GroupMeta };
+/** `title` is the title bar frame; a legacy plain TEXT title is kept until the next paint replaces it with a bar. */
+export type LoadedGroup = { id: string; rect: RectangleNode; title: FrameNode | TextNode | null; meta: GroupMeta };
 
-const recOf = (g: LoadedGroup): GroupRec => ({ id: g.id, name: g.meta.name, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), screenIds: g.meta.screenIds });
+const recOf = (g: LoadedGroup): GroupRec => ({ id: g.id, name: g.meta.name, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), screenIds: g.meta.screenIds, style: g.meta.style });
 
-const defaultStyle = (nested: boolean): GroupStyle => ({ color: '#FFFFFF', strokeWeight: GROUP_STROKE, titleSize: nested ? Math.round(TITLE_SIZE * CHILD_TITLE_SCALE) : TITLE_SIZE });
+const metricsOf = (style: GroupStyle) => ({ padding: style.padding, strokeWeight: style.strokeWeight, titleSize: style.titleSize });
+
+const defaultStyle = (nested: boolean): GroupStyle => ({ color: '#FFFFFF', titleFill: TITLE_FILL, titleColor: TITLE_COLOR, ...defaultMetrics(nested) });
 
 const boardNameOf = (board: Board): string => board.node.name.replace(/^Board background\s*·\s*/, '');
 
@@ -104,7 +108,7 @@ export async function loadGroups(board: Board): Promise<LoadedGroup[]> {
         const meta = readMeta(c, GROUP_KEY, parseGroupMeta);
         if (!meta || meta.boardId !== board.node.id) continue;
         const t = await sceneById(meta.titleId);
-        out.push({ id: c.id, rect: c, title: t?.type === 'TEXT' ? t : null, meta: { ...meta, rectId: c.id } });
+        out.push({ id: c.id, rect: c, title: t?.type === 'FRAME' || t?.type === 'TEXT' ? t : null, meta: { ...meta, rectId: c.id } });
     }
     return out;
 }
@@ -113,7 +117,7 @@ setGroupObstacleLoader(async (board) =>
     (await loadGroups(board)).map((g) => {
         const box = rectOf(g.rect);
         const t = g.title ? rectOf(g.title) : null;
-        return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 } };
+        return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight };
     }),
 );
 
@@ -163,16 +167,6 @@ function place(holder: FrameNode, node: SceneNode & LayoutMixin, at: { x: number
     node.y = p.y;
 }
 
-async function loadTitleFont(title: TextNode | null): Promise<void> {
-    if (title && title.fontName !== figma.mixed) {
-        try {
-            await figma.loadFontAsync(title.fontName);
-        } catch {
-            return;
-        }
-    }
-}
-
 /** Draws one group's box and title at `fit`. Returns the title's real rect (its height is known only after rendering). */
 async function paintGroup(holder: FrameNode, g: LoadedGroup, fit: FittedBox): Promise<Rect> {
     const { style, name } = g.meta;
@@ -186,29 +180,54 @@ async function paintGroup(holder: FrameNode, g: LoadedGroup, fit: FittedBox): Pr
     rect.resize(fit.box.width, fit.box.height);
     place(holder, rect, fit.box);
 
-    let title = g.title;
-    if (!title) {
-        title = figma.createText();
-        holder.appendChild(title);
-        g.title = title;
-        g.meta = { ...g.meta, titleId: title.id };
-        writeGroup(g);
-    }
-    await loadTitleFont(title);
+    const height = titleHeightOf(style.titleSize);
+    const bar = await titleBarFor(holder, g);
+    bar.visible = true;
+    bar.name = titleName(name);
+    bar.fills = [{ type: 'SOLID', color: hexToRgb(style.titleFill) }];
+    bar.layoutMode = 'HORIZONTAL';
+    bar.primaryAxisSizingMode = 'FIXED';
+    bar.counterAxisSizingMode = 'FIXED';
+    bar.primaryAxisAlignItems = 'MIN';
+    bar.counterAxisAlignItems = 'CENTER';
+    bar.paddingLeft = TITLE_PAD_X;
+    bar.paddingRight = TITLE_PAD_X;
+    bar.paddingTop = Math.round((height - titleLineOf(style.titleSize)) / 2);
+    bar.paddingBottom = bar.paddingTop;
+    bar.clipsContent = true;
+    bar.resize(fit.box.width, height);
+    const text = bar.children.find((c): c is TextNode => c.type === 'TEXT') ?? figma.createText();
+    if (text.parent !== bar) bar.appendChild(text);
     await figma.loadFontAsync(TITLE_FONT);
-    title.visible = true;
-    title.fontName = TITLE_FONT;
-    title.fontSize = style.titleSize;
-    title.fills = [{ type: 'SOLID', color: hexToRgb(style.color) }];
-    title.textAlignHorizontal = 'CENTER';
-    title.textAutoResize = 'HEIGHT';
-    if (title.characters !== name) title.characters = name;
-    title.name = titleName(name);
-    title.resize(fit.box.width, Math.max(1, title.height));
-    const height = title.height || fit.title.height;
-    const at = { x: fit.box.x, y: fit.box.y - TITLE_GAP - height };
-    place(holder, title, at);
+    text.fontName = TITLE_FONT;
+    text.fontSize = style.titleSize;
+    text.lineHeight = { unit: 'PIXELS', value: titleLineOf(style.titleSize) };
+    text.fills = [{ type: 'SOLID', color: hexToRgb(style.titleColor) }];
+    text.textAlignHorizontal = 'LEFT';
+    text.textAutoResize = 'HEIGHT';
+    text.textTruncation = 'ENDING';
+    text.maxLines = 1;
+    text.layoutGrow = 1;
+    if (text.characters !== name) text.characters = name;
+    text.name = name;
+    const at = { x: fit.box.x, y: fit.box.y - height };
+    place(holder, bar, at);
     return { x: at.x, y: at.y, width: fit.box.width, height };
+}
+
+/**
+ * The group's title bar frame. A group drawn with a plain TEXT title (or whose title is gone) gets a new bar and its
+ * `titleId` is updated, so old boards migrate on the next refit.
+ */
+async function titleBarFor(holder: FrameNode, g: LoadedGroup): Promise<FrameNode> {
+    if (g.title && g.title.type === 'FRAME') return g.title;
+    if (g.title) g.title.remove();
+    const bar = figma.createFrame();
+    holder.appendChild(bar);
+    g.title = bar;
+    g.meta = { ...g.meta, titleId: bar.id };
+    writeGroup(g);
+    return bar;
 }
 
 export type RefitResult = {
@@ -222,7 +241,7 @@ export type RefitResult = {
     issues: GroupIssue[];
     nesting: NestingIssue[];
     emptyGroups: string[];
-    boxes: { id: string; name: string; parentId?: string; box: Rect; title: Rect }[];
+    boxes: { id: string; name: string; parentId?: string; box: Rect; title: Rect; strokeWeight: number }[];
     summary: JsonObject;
 };
 
@@ -260,6 +279,7 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     }
 
     const layer = ensureHolder(board);
+    await snapBadges(screens);
     const prints = new Map<string, Footprint>();
     for (const s of screens) prints.set(s.node.id, await footprintOf(s));
     const membersOf = (g: LoadedGroup): Rect[] => g.meta.screenIds.flatMap((id) => {
@@ -272,12 +292,12 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     const tops = groups.filter((g) => !g.meta.parentId);
     for (const g of children) {
         const m = membersOf(g);
-        if (m.length) fitted.set(g.id, fitBox(m, [], titleHeightOf(g.meta.style.titleSize)));
+        if (m.length) fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
     }
     for (const g of tops) {
         const m = membersOf(g);
         const kids = children.flatMap((k) => (k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id) as FittedBox] : []));
-        if (m.length || kids.length) fitted.set(g.id, fitBox(m, kids, titleHeightOf(g.meta.style.titleSize)));
+        if (m.length || kids.length) fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
     }
 
     const emptyGroups: string[] = [];
@@ -291,7 +311,7 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
             continue;
         }
         const title = await paintGroup(layer, g, fit);
-        boxes.push({ id: g.id, name: g.meta.name, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), box: fit.box, title });
+        boxes.push({ id: g.id, name: g.meta.name, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), box: fit.box, title, strokeWeight: g.meta.style.strokeWeight });
         layer.appendChild(g.rect);
         if (g.title) layer.appendChild(g.title);
     }
@@ -307,7 +327,7 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
         const label = await sceneById(a.meta.labelId);
         if (label) contents.push({ kind: 'label', id: a.meta.labelId, rect: rectOf(label) });
     }
-    const conflictGroups: ConflictGroup[] = boxes.map((b) => ({ id: b.id, ...(b.parentId ? { parentId: b.parentId } : {}), box: b.box, title: b.title }));
+    const conflictGroups: ConflictGroup[] = boxes.map((b) => ({ id: b.id, ...(b.parentId ? { parentId: b.parentId } : {}), box: b.box, title: b.title, strokeWeight: b.strokeWeight }));
     const issues = groupConflicts(conflictGroups, contents);
     const nesting = validateNesting(conflictGroups);
     const extent = unionRect(boxes.flatMap((b) => [b.box, b.title]));
@@ -414,7 +434,7 @@ export const createFlowGroup: Handler = async (args) => {
     if (dryRun) {
         const next: GroupRec[] = [
             ...groups.map(recOf).map((g) => (g.id === plan.parentId ? { ...g, screenIds: g.screenIds.filter((id) => !plan.takeFromParent.includes(id)) } : g)),
-            { id: 'new', name: plan.name, ...(plan.parentId ? { parentId: plan.parentId } : {}), screenIds: plan.screenIds },
+            { id: 'new', name: plan.name, ...(plan.parentId ? { parentId: plan.parentId } : {}), screenIds: plan.screenIds, style: styled.style },
         ];
         const extras = groupBoundaryExtras(next, cellsOf(screens), board.meta);
         return ok({
@@ -432,7 +452,7 @@ export const createFlowGroup: Handler = async (args) => {
     const layer = ensureHolder(board);
     const rect = figma.createRectangle();
     layer.appendChild(rect);
-    const title = figma.createText();
+    const title = figma.createFrame();
     layer.appendChild(title);
     const meta: GroupMeta = { boardId: board.node.id, name: plan.name, screenIds: plan.screenIds, rectId: rect.id, titleId: title.id, ...(plan.parentId ? { parentId: plan.parentId } : {}), style: styled.style };
     const created: LoadedGroup = { id: rect.id, rect, title, meta };
@@ -670,7 +690,7 @@ export async function createGroupsBatch(board: Board, screens: Screen[], specs: 
         const layer = ensureHolder(board);
         const rect = figma.createRectangle();
         layer.appendChild(rect);
-        const title = figma.createText();
+        const title = figma.createFrame();
         layer.appendChild(title);
         const meta: GroupMeta = { boardId: board.node.id, name: plan.name, screenIds: plan.screenIds, rectId: rect.id, titleId: title.id, ...(plan.parentId ? { parentId: plan.parentId } : {}), style: defaultStyle(!!plan.parentId) };
         const made: LoadedGroup = { id: rect.id, rect, title, meta };

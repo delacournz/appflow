@@ -417,7 +417,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'adopt_board',
-        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and records each screen frame. Screens stay top-level frames (never grouped) so prototype Play and flow starting points work; Figma\'s own frame title is the screen name, so there is no label text. A "Route · {name}" text above the frame and a "Badge · {name}" pill are loose siblings. Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
+        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and records each screen frame. Screens stay top-level frames (never grouped) so prototype Play and flow starting points work; Figma\'s own frame title is the screen name, so there is no label text. A "Route · {name}" text above the frame and a "Badge · {name}" pill are loose siblings. Also links each "Badge · {name}" pill to its screen (exact name, else the pill in the screen\'s own slot) and re-links arrow groups whose stored ids are stale (a copied board): ends are resolved from where the arrow is now, with the group name "Flow · A → B · label" as a tiebreak, tolerating screens shifted by up to ~650px since the arrow was drawn; run reroute_flow afterwards to redraw them. Ends that cannot be told apart are reported (unmatched, with candidates) instead of guessed. Safe to re-run: existing board data, screen status, flow group membership and extras are kept and only missing links are added. Use dryRun to preview without writing.',
         obj({
             boardNodeId: str('The board background rectangle or section.'),
             colWidth: num('Override the inferred column spacing.').optional(),
@@ -465,7 +465,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'create_flow_group',
-        'Draw a labelled box around a set of screens on an adopted board: a white 4 px no-fill rectangle with a bold centred title above it ("Group · {name}" and "Group title · {name}" layers, in a "Flow groups · {board}" frame just above the board background and below the screens, so screens stay top-level and prototype Play works). The box and title are fitted automatically: the board\'s column and row gaps are widened where a box edge meets another group or ungrouped screen (screens after that boundary shift), and the box refits whenever screens are added, moved, duplicated or removed. Rules the layout keeps: arrow lines may cross a box stroke; a box, its stroke and its title never cross a screen, route text, badge, arrow label, or another group\'s box or title (anything that cannot be avoided is listed in issues; fix by moving screens or arrows). Never draw boxes by hand. Members: screenIds, else cells, else the selected screens. A screen is in at most one group, so a screen already in another group is refused (use update_flow_group remove first). Nesting is one level: with parentId the new group is a child inside that group; its screens may be taken from the parent (they move into the child) and the parent\'s box wraps the child\'s box and title. A group nested deeper is refused. Use dryRun to preview members and the extra spacing. Returns { groupId, name, screens, box, title, extras, screensShifted, board, issues, nesting, reroute } (dryRun: { dryRun, screens, extras, screensShifted }).',
+        'Draw a labelled box around a set of screens on an adopted board: a white 12 px no-fill rectangle with 160 px padding and a dark title bar (an auto-layout frame, full box width, flush on the box top, bold white left-aligned name) above it ("Group · {name}" and "Group title · {name}" layers, in a "Flow groups · {board}" frame just above the board background and below the screens, so screens stay top-level and prototype Play works). The box and title are fitted automatically: the board\'s column and row gaps are widened where a box edge meets another group or ungrouped screen (screens after that boundary shift), and the box refits whenever screens are added, moved, duplicated or removed. Rules the layout keeps: arrow lines may cross a box stroke; a box, its stroke and its title never cross a screen, route text, badge, arrow label, or another group\'s box or title (anything that cannot be avoided is listed in issues; fix by moving screens or arrows). Never draw boxes by hand. Members: screenIds, else cells, else the selected screens. A screen is in at most one group, so a screen already in another group is refused (use update_flow_group remove first). Nesting is one level: with parentId the new group is a child inside that group; its screens may be taken from the parent (they move into the child) and the parent\'s box wraps the child\'s box and title. A group nested deeper is refused. Use dryRun to preview members and the extra spacing. Returns { groupId, name, screens, box, title, extras, screensShifted, board, issues, nesting, reroute } (dryRun: { dryRun, screens, extras, screensShifted }).',
         obj({
             name: str('Group title, such as "Passkeys".'),
             boardId: str('Board node ID. Default: the board of the given or selected screens, else the only board on the page.').optional(),
@@ -473,9 +473,12 @@ const RAW_TOOLS: ToolDef[] = [
             cells: z.array(obj({ col: z.int(), row: z.int() })).describe('Grid cells whose screens go in the group. Used when screenIds is omitted.').optional(),
             parentId: str('Nest the new group inside this flow group (one level only).').optional(),
             style: obj({
-                color: str('#RRGGBB for the stroke and title. Default #FFFFFF.').optional(),
-                strokeWeight: num('Stroke width in px. Default 4.').optional(),
+                color: str('#RRGGBB for the box line. Default #FFFFFF.').optional(),
+                strokeWeight: num('Box line width in px. Default 12.').optional(),
+                padding: num('Gap from screens and route text to the box line, px (min 48). Default 160.').optional(),
                 titleSize: num('Title font size. Default 96 (63 for a nested group).').optional(),
+                titleFill: str('#RRGGBB title bar fill. Default #2C2C2C.').optional(),
+                titleColor: str('#RRGGBB title text. Default #FFFFFF.').optional(),
             })
                 .describe('Box and title style.')
                 .optional(),
@@ -495,7 +498,10 @@ const RAW_TOOLS: ToolDef[] = [
             style: obj({
                 color: str('#RRGGBB.').optional(),
                 strokeWeight: num().optional(),
+                padding: num().optional(),
                 titleSize: num().optional(),
+                titleFill: str().optional(),
+                titleColor: str().optional(),
             })
                 .describe('Fields to change.')
                 .optional(),

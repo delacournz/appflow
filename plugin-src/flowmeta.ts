@@ -50,8 +50,16 @@ export type ScreenMeta = {
     flowGroupId?: string | null;
 };
 
-/** How a flow group's box and title are drawn. `color` is `#RRGGBB`. */
-export type GroupStyle = { color: string; strokeWeight: number; titleSize: number };
+/**
+ * How a flow group's box and title bar are drawn. Colours are `#RRGGBB`. `color` is the box line, `titleFill` the title bar
+ * fill, `titleColor` the title text. `padding` is the gap from member content to the line's inner edge.
+ */
+export type GroupStyle = { color: string; strokeWeight: number; titleSize: number; padding: number; titleFill: string; titleColor: string };
+
+/** Defaults for style fields; mirrors the constants in flow-group.ts (kept here so this module stays dependency-free). */
+export const STYLE_DEFAULTS = { strokeWeight: 12, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' } as const;
+/** Stroke weight old groups (drawn before padding existed) were created with; they migrate to the new default. */
+const LEGACY_STROKE = 4;
 
 /** Stored on a flow group's rectangle node. The group's id is that node's id (`rectId`). */
 export type GroupMeta = {
@@ -167,6 +175,12 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
     const s = o.style;
     if (!isObj(s) || !isStr(s.color) || !/^#[0-9a-fA-F]{6}$/.test(s.color) || !isNum(s.strokeWeight) || !isNum(s.titleSize)) return null;
     if (s.strokeWeight <= 0 || s.titleSize <= 0) return null;
+    const hex = (v: unknown, d: string): string | null => (v === undefined ? d : isStr(v) && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
+    const titleFill = hex(s.titleFill, STYLE_DEFAULTS.titleFill);
+    const titleColor = hex(s.titleColor, STYLE_DEFAULTS.titleColor);
+    if (!titleFill || !titleColor) return null;
+    if (s.padding !== undefined && (!isNum(s.padding) || s.padding <= 0)) return null;
+    const legacy = s.padding === undefined;
     return {
         boardId: o.boardId,
         name: o.name,
@@ -174,7 +188,14 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
         rectId: o.rectId,
         titleId: o.titleId,
         ...(o.parentId ? { parentId: o.parentId } : {}),
-        style: { color: s.color, strokeWeight: s.strokeWeight, titleSize: s.titleSize },
+        style: {
+            color: s.color,
+            strokeWeight: legacy && s.strokeWeight === LEGACY_STROKE ? STYLE_DEFAULTS.strokeWeight : s.strokeWeight,
+            titleSize: s.titleSize,
+            padding: isNum(s.padding) ? s.padding : STYLE_DEFAULTS.padding,
+            titleFill,
+            titleColor,
+        },
     };
 }
 

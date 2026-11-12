@@ -8,7 +8,11 @@ import { GROUP_CLEAR, GROUP_STROKE, strokeBands } from './flow-group';
 import type { Pt, Rect, Route } from './route';
 
 /** What a group box leaves behind on the board: the box rect and its title's planning rect. */
-export type GroupObstacle = { box: Rect; title: Rect };
+/** `strokeWeight` is the box's own stroke; absent = `GROUP_STROKE`. */
+export type GroupObstacle = { box: Rect; title: Rect; strokeWeight?: number };
+
+/** A box rect that carries its own stroke weight. */
+export type StrokedBox = Rect & { strokeWeight?: number };
 
 /** A stroke line: vertical (`axis: 'v'`, fixed x) or horizontal (`axis: 'h'`, fixed y), spanning `from`..`to` on the other axis. */
 export type Edge = { axis: 'v' | 'h'; at: number; from: number; to: number };
@@ -17,8 +21,8 @@ export type LabelSize = { width: number; height: number };
 export type ClearLabel = { ok: true; anchor: Pt; moved: boolean } | { ok: false; blocked: string };
 
 /** The four stroke centre lines of a box. */
-export function boxEdges(box: Rect): Edge[] {
-    const half = GROUP_STROKE / 2;
+export function boxEdges(box: StrokedBox): Edge[] {
+    const half = (box.strokeWeight ?? GROUP_STROKE) / 2;
     return [
         { axis: 'h', at: box.y + half, from: box.x, to: box.x + box.width },
         { axis: 'h', at: box.y + box.height - half, from: box.x, to: box.x + box.width },
@@ -30,7 +34,7 @@ export function boxEdges(box: Rect): Edge[] {
 /** Rects a label must not overlap: each box's stroke bands (stroke plus `GROUP_CLEAR` each side) and each title inflated by `GROUP_CLEAR`. */
 export function labelObstacles(groups: readonly GroupObstacle[]): Rect[] {
     return groups.flatMap((g) => [
-        ...strokeBands(g.box),
+        ...strokeBands(g.box, g.strokeWeight),
         { x: g.title.x - GROUP_CLEAR, y: g.title.y - GROUP_CLEAR, width: g.title.width + 2 * GROUP_CLEAR, height: g.title.height + 2 * GROUP_CLEAR },
     ]);
 }

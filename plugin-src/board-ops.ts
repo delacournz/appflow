@@ -1,11 +1,12 @@
 import { assignScreenTexts } from './adopt';
+import { badgeSnap, linkBadges } from './badge-link';
 import { growBounds } from './duplicate-plan';
-import { collectScreens, collectTexts, groupIdOf, readMeta, rectOf, sceneById, type Board } from './flow';
+import { collectBadges, collectScreens, collectTexts, groupIdOf, readMeta, rectOf, sceneById, type Board } from './flow';
 import { BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { JsonObject } from '../shared/protocol';
 import { boardBounds, cellOf, cellRect, staleReason, type ExtrasPair, type Move } from './grid';
 import type { Rect } from './rect';
-import { badgeBelongsTo, shiftTargets } from './screen-group';
+import { badgeBelongsTo, badgeFallbackOffset, shiftTargets } from './screen-group';
 
 /** Board plumbing shared by the grid tools and the flow group refit. Kept apart from both so neither imports the other. */
 
@@ -50,7 +51,55 @@ export async function loadScreens(board: Board): Promise<{ screens: Screen[]; st
         stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
         screens.push({ node: c, meta });
     }
+    await healBadges(screens, collectBadges(parent.children));
     return { screens, stale };
+}
+
+/**
+ * Links screens that lost their badge id (adopt never stored it, or a copy dropped it) to the `Badge · {name}` pill with
+ * the screen's exact name, falling back to a pill sitting in the screen's own slot. Writes the repaired meta back.
+ */
+async function healBadges(screens: Screen[], badgeNodes: readonly GroupNode[]): Promise<void> {
+    if (!badgeNodes.length) return;
+    const missing: Screen[] = [];
+    const claimed = new Set<string>();
+    for (const s of screens) {
+        const live = s.meta.badgeId ? await sceneById(s.meta.badgeId) : null;
+        if (live) claimed.add(live.id);
+        else missing.push(s);
+    }
+    if (!missing.length) return;
+    const links = linkBadges(
+        missing.map((s) => ({ id: s.node.id, name: s.node.name, rect: rectOf(s.node) })),
+        badgeNodes.map((n) => ({ id: n.id, name: n.name, rect: rectOf(n) })),
+        claimed,
+    );
+    for (const s of missing) {
+        const badgeId = links.get(s.node.id);
+        if (!badgeId) continue;
+        s.meta = { ...s.meta, badgeId };
+        writeScreen(s.node, s.meta);
+    }
+}
+
+/**
+ * Puts every screen's badge back in its slot: right edge flush with the frame, centred on the text line above it. Badges that
+ * were left behind when a screen shifted snap back. Only moves badges more than half a pixel out. Returns how many moved.
+ */
+export async function snapBadges(screens: readonly Screen[]): Promise<number> {
+    let moved = 0;
+    for (const s of screens) {
+        const badge = s.meta.badgeId ? await sceneById(s.meta.badgeId) : null;
+        if (!badge || !('width' in badge)) continue;
+        const frame = rectOf(s.node);
+        const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
+        const lines = [label, route].flatMap((n) => (n ? [rectOf(n)] : []));
+        const delta = badgeSnap(frame, lines, rectOf(badge), badgeFallbackOffset(badge.height));
+        if (!delta) continue;
+        shiftNode(badge, delta.dx, delta.dy);
+        moved++;
+    }
+    return moved;
 }
 
 /**
@@ -100,6 +149,7 @@ export async function applyMoves(board: Board, screens: Screen[], moves: Move[])
         });
         for (const id of targets) shiftNode(await sceneById(id), dx, dy);
         s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
+        await snapBadges([s]);
         writeScreen(s.node, s.meta);
         out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
     }

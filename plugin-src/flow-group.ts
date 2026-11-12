@@ -8,20 +8,30 @@ import { cleanExtras, type Band } from './tracks';
  * Pure geometry for flow groups: labelled boxes around sets of screens on a flow board.
  * No `figma` global. Storage and rendering live elsewhere (GRP-3).
  *
- * A box is a rect with a 4px INSIDE stroke, so the rect bounds are the visual bounds.
- * The title is a text node centred above the box; its planning rect spans the box width.
+ * A box is a rect with an INSIDE stroke (default 12px), so the rect bounds are the visual bounds.
+ * The title is a filled bar (auto-layout frame) sitting flush on the box's top edge, the same width and x as the box;
+ * its planning rect is the bar. Flush (not floating above) so the bar and box read as one labelled panel, and the bar
+ * needs no gap constant to keep consistent.
+ * Padding, stroke weight and title size are per-group (`GroupStyle`); the constants below are only defaults.
  * Arrow lines may cross a stroke. Strokes and titles must never touch screens, route text, badges,
  * arrow labels, other boxes or other titles.
  */
 
-/** Member content to the inner stroke edge. */
-export const GROUP_PAD = 64;
-export const GROUP_STROKE = 4;
+/**
+ * Member content to the inner stroke edge. 160 = 20 x the 8px grid: it clears the 12px stroke and the 48px `GROUP_CLEAR`
+ * with ~100px of breathing room, and is ~40% of a 393px screen, so route text and badges no longer crowd the line.
+ */
+export const GROUP_PAD = 160;
+export const GROUP_STROKE = 12;
 /** Minimum distance from a stroke to any non-member content or arrow label. */
 export const GROUP_CLEAR = 48;
 export const TITLE_SIZE = 96;
-/** Space between the title's bottom and the box's top edge. */
-export const TITLE_GAP = 32;
+/** Title bar padding around the text (vertical, horizontal). */
+export const TITLE_PAD_Y = 48;
+export const TITLE_PAD_X = 64;
+/** Default title bar fill and title text colour. */
+export const TITLE_FILL = '#2C2C2C';
+export const TITLE_COLOR = '#FFFFFF';
 /** A nested child's title is this fraction of `TITLE_SIZE`. */
 export const CHILD_TITLE_SCALE = 0.66;
 /** Estimated line height multiplier used for planning before the text is rendered. */
@@ -36,10 +46,24 @@ export type { GroupMeta, GroupStyle };
 export type Cell = { col: number; row: number };
 export type FittedBox = { box: Rect; title: Rect };
 
-/** Estimated rendered height of a title at `size`. */
-export const titleHeightOf = (size: number): number => Math.ceil(size * TITLE_LINE_HEIGHT);
+/** Per-group spacing options (a subset of `GroupStyle`). */
+export type BoxMetrics = { padding: number; strokeWeight: number; titleSize: number };
 
-const EDGE = GROUP_PAD + GROUP_STROKE;
+/** The metrics a group gets when its style says nothing; a nested child's title is smaller. */
+export const defaultMetrics = (nested = false): BoxMetrics => ({
+    padding: GROUP_PAD,
+    strokeWeight: GROUP_STROKE,
+    titleSize: nested ? Math.round(TITLE_SIZE * CHILD_TITLE_SCALE) : TITLE_SIZE,
+});
+
+/** Line height of the title text in px: set explicitly on the node so planning and rendering agree. */
+export const titleLineOf = (size: number): number => Math.ceil(size * TITLE_LINE_HEIGHT);
+
+/** Height of a title bar at `size`: one line of text plus vertical padding. Exact, since the line height is pinned. */
+export const titleHeightOf = (size: number): number => titleLineOf(size) + 2 * TITLE_PAD_Y;
+
+/** Distance from member content to a box's outer edge. */
+export const edgeOf = (m: BoxMetrics): number => m.padding + m.strokeWeight;
 
 const inflate = (r: Rect, by: number): Rect => ({ x: r.x - by, y: r.y - by, width: r.width + 2 * by, height: r.height + 2 * by });
 const overlaps = (a: Rect, b: Rect): boolean => overlapsAny(a, [b]) === 0;
@@ -54,27 +78,28 @@ export function memberContentRect(frame: Rect, route?: Rect, badge?: Rect): Rect
 }
 
 /**
- * The box around `members` (and any nested `children`: their boxes and titles), padded by PAD+STROKE,
- * and the title rect centred above it. `titleHeight` is the title's own height (child titles are smaller).
+ * The box around `members` (and any nested `children`: their boxes and title bars), padded by padding+stroke,
+ * and the title bar rect flush on top of it, the box's width.
  */
-export function fitBox(members: readonly Rect[], children: readonly FittedBox[] = [], titleHeight: number = titleHeightOf(TITLE_SIZE)): FittedBox {
+export function fitBox(members: readonly Rect[], children: readonly FittedBox[] = [], metrics: BoxMetrics = defaultMetrics()): FittedBox {
     const content = unionRect([...members, ...children.flatMap((c) => [c.box, c.title])]);
     if (!content) throw new Error('fitBox needs at least one member or child');
-    const box = inflate(content, EDGE);
-    const title: Rect = { x: box.x, y: box.y - TITLE_GAP - titleHeight, width: box.width, height: titleHeight };
+    const box = inflate(content, edgeOf(metrics));
+    const height = titleHeightOf(metrics.titleSize);
+    const title: Rect = { x: box.x, y: box.y - height, width: box.width, height };
     return { box, title };
 }
 
 /** Four thin rects (top, bottom, left, right) covering the stroke, each inflated by `GROUP_CLEAR`. Content must stay out of these. */
-export function strokeBands(box: Rect): [Rect, Rect, Rect, Rect] {
-    const t = GROUP_STROKE + 2 * GROUP_CLEAR;
+export function strokeBands(box: Rect, stroke: number = GROUP_STROKE): [Rect, Rect, Rect, Rect] {
+    const t = stroke + 2 * GROUP_CLEAR;
     const w = box.width + 2 * GROUP_CLEAR;
     const h = box.height + 2 * GROUP_CLEAR;
     return [
         { x: box.x - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: w, height: t },
-        { x: box.x - GROUP_CLEAR, y: box.y + box.height - GROUP_STROKE - GROUP_CLEAR, width: w, height: t },
+        { x: box.x - GROUP_CLEAR, y: box.y + box.height - stroke - GROUP_CLEAR, width: w, height: t },
         { x: box.x - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h },
-        { x: box.x + box.width - GROUP_STROKE - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h },
+        { x: box.x + box.width - stroke - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h },
     ];
 }
 
@@ -83,6 +108,8 @@ export type BoundaryGroup = {
     parentId?: string;
     /** Grid cells of the group's own screens. A parent's range also covers its children. */
     cells: readonly Cell[];
+    /** This group's own spacing; absent = defaults (smaller title when nested). */
+    metrics?: BoxMetrics;
 };
 
 export type BoundaryInput = {
@@ -111,7 +138,7 @@ const inRange = (r: Range, col: number, row: number): boolean => col >= r.c0 && 
 
 /**
  * Extra px needed BEFORE each column/row track so that, wherever one group's edge meets another group
- * or ungrouped content, padding + stroke + clear (+ title on rows, + nested bands) fit next to the lane band.
+ * or ungrouped content, padding + stroke + clear (+ title bar on rows, + nested bands) fit next to the lane band.
  * Each group uses its bounding cell range, so L-shapes and sparse groups are covered. Row tracks need title
  * height and `ROUTE_TOP`; column tracks do not. Bands use the index of the track after the boundary as `at`.
  *
@@ -149,7 +176,8 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
     if (!cols.length) return { colExtra: [], rowExtra: [] };
     const [minC, maxC, minR, maxR] = [Math.min(...cols), Math.max(...cols), Math.min(...rows), Math.max(...rows)];
 
-    const titleOf = (g: BoundaryGroup): number => titleHeightOf(g.parentId ? TITLE_SIZE * CHILD_TITLE_SCALE : TITLE_SIZE) + TITLE_GAP;
+    const metricsOf = (g: BoundaryGroup): BoxMetrics => g.metrics ?? defaultMetrics(!!g.parentId);
+    const titleOf = (g: BoundaryGroup): number => titleHeightOf(metricsOf(g).titleSize);
 
     /** Distance needed between the content on either side of a boundary, before the lane band is added. */
     const needed = (a: BoundaryGroup[], b: BoundaryGroup[], vertical: boolean): number | null => {
@@ -158,7 +186,7 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
         const exits = a.filter((g) => !idsB.has(g.id));
         const entries = b.filter((g) => !idsA.has(g.id));
         if (!exits.length && !entries.length) return null;
-        const edges = (exits.length + entries.length) * EDGE;
+        const edges = [...exits, ...entries].reduce((sum, g) => sum + edgeOf(metricsOf(g)), 0);
         const clears = ((exits.length ? 1 : 0) + (entries.length ? 1 : 0)) * GROUP_CLEAR;
         const titles = vertical ? entries.reduce((s, g) => s + titleOf(g), 0) + ROUTE_TOP : 0;
         return edges + clears + titles;
@@ -271,7 +299,7 @@ export function boundaryExtras(input: BoundaryInput): BoundaryExtras {
     return { colExtra: untear(colAxis, bandsOf(colAxis)), rowExtra: untear(rowAxis, bandsOf(rowAxis)) };
 }
 
-export type ConflictGroup = { id: string; parentId?: string; box: Rect; title: Rect };
+export type ConflictGroup = { id: string; parentId?: string; box: Rect; title: Rect; strokeWeight?: number };
 export type ConflictContentKind = 'screen' | 'route' | 'badge' | 'label';
 export type ConflictContent = { kind: ConflictContentKind; id: string; rect: Rect; ownerGroupId?: string };
 
@@ -292,7 +320,8 @@ export function groupConflicts(groups: readonly ConflictGroup[], contents: reado
     const descendants = (id: string): Set<string> => new Set([id, ...groups.filter((g) => g.parentId === id).map((g) => g.id)]);
 
     for (const g of groups) {
-        const bands = strokeBands(g.box);
+        const bands = strokeBands(g.box, g.strokeWeight);
+        const titleZone = inflate(g.title, GROUP_CLEAR);
         const family = descendants(g.id);
         for (const c of contents) {
             if (overlapsAny(c.rect, bands) >= 0) {
@@ -305,11 +334,11 @@ export function groupConflicts(groups: readonly ConflictGroup[], contents: reado
             if (c.kind === 'screen' && overlaps(c.rect, g.box) && !(c.ownerGroupId && family.has(c.ownerGroupId))) {
                 issues.push({ kind: 'group-encloses-foreign', groupId: g.id, screenId: c.id });
             }
-            if (overlaps(g.title, c.rect)) issues.push({ kind: 'title-overlaps', groupId: g.id, withKind: c.kind, withId: c.id });
+            if (overlaps(titleZone, c.rect)) issues.push({ kind: 'title-overlaps', groupId: g.id, withKind: c.kind, withId: c.id });
         }
         for (const o of groups) {
             if (o.id === g.id) continue;
-            if (overlapsAny(g.title, strokeBands(o.box)) >= 0) issues.push({ kind: 'title-overlaps', groupId: g.id, withKind: 'box', withId: o.id });
+            if (overlapsAny(g.title, strokeBands(o.box, o.strokeWeight)) >= 0) issues.push({ kind: 'title-overlaps', groupId: g.id, withKind: 'box', withId: o.id });
             if (g.id < o.id && overlaps(g.title, o.title)) issues.push({ kind: 'title-overlaps', groupId: g.id, withKind: 'title', withId: o.id });
         }
     }

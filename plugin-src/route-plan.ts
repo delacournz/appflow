@@ -1,5 +1,5 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
-import { boxEdges, laneConflicts, type Edge } from './route-avoid';
+import { boxEdges, laneConflicts, type Edge, type StrokedBox } from './route-avoid';
 import { LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
@@ -9,7 +9,7 @@ export type PlanConfig = {
     /** Per item (same order as `items`): the absolute x past which its label must not sit; see `RouteInput.labelLimitX`. */
     limits: readonly (number | undefined)[];
     /** Group boxes on the board. Lanes running alongside a stroke step to the next lane. Empty or absent leaves the plan unchanged. */
-    boxes?: readonly Rect[];
+    boxes?: readonly StrokedBox[];
 };
 
 /** How many lane steps a conflicting lane may move before the original is kept. */
