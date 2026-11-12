@@ -37,7 +37,7 @@ describe('routeArrow', () => {
         expect(r.backwards).toBe(false);
     });
 
-    test('2: with a trigger, starts 10px right of it, jogs in the middle of the gutter, enters the left edge', () => {
+    test('2: with a wide trigger, the dot sits 12px inside its right edge, jogs in the middle of the gutter, enters the left edge', () => {
         const s = screen(0, 0);
         const t = screen(1, 0);
         const trigger: Rect = { x: s.x + 20, y: s.y + 700, width: 353, height: 56 };
@@ -47,7 +47,7 @@ describe('routeArrow', () => {
         const ty = t.y + H / 2;
         expect(r.kind).toBe('trigger');
         expect(r.points).toEqual([
-            { x: trigger.x + trigger.width + 10, y: sy },
+            { x: trigger.x + trigger.width - 12, y: sy },
             { x: midX, y: sy },
             { x: midX, y: ty },
             { x: t.x, y: ty },
@@ -301,15 +301,15 @@ describe('fan-out from one source', () => {
     const route = (t: Rect, index: number, count: number) =>
         must(routeArrow({ source: s, target: t, trigger: banner, gutter: GUTTER, lane: 0, fan: { index, count } }));
 
-    test('the arrow to the highest target starts on top and takes the rightmost lane', () => {
+    test('fanned arrows from one trigger all start at its centre (never shifted) and the highest target takes the rightmost lane', () => {
         const a = route(screen(1, 0), 0, 3);
         const b = route(screen(1, 1), 1, 3);
         const c = route(screen(1, 2), 2, 3);
         const startY = (r: Route) => (r.points[0] as Pt).y;
         const laneX = (r: Route) => (r.points[1] as Pt).x;
         expect(startY(a)).toBe(banner.y + banner.height / 2);
-        expect(startY(b) - startY(a)).toBe(16);
-        expect(startY(c) - startY(b)).toBe(16);
+        expect(startY(b)).toBe(startY(a));
+        expect(startY(c)).toBe(startY(a));
         expect(laneX(a) - laneX(b)).toBe(24);
         expect(laneX(b) - laneX(c)).toBe(24);
         expect(laneX(c)).toBe(s.x + W + 24);
@@ -406,5 +406,33 @@ describe('labelLimitX (widened column boundary)', () => {
         const r = must(routeArrow({ source: s0, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
         const moved = clearOfLanes(r, [s0.x + W + 40], limit);
         expect(moved.labelAnchor.x).toBe((s0.x + W + 40 + limit) / 2);
+    });
+});
+
+describe('start dot on a trigger', () => {
+    const s = screen(0, 0);
+    const t = screen(1, 0);
+    const dotOf = (trigger: Rect, fan?: { index: number; count: number }, target: Rect = t) =>
+        must(routeArrow({ source: s, target, trigger, gutter: GUTTER, lane: 0, ...(fan ? { fan } : {}) })).dot;
+
+    test('a narrow tab hotspot puts the dot at its horizontal centre, on its vertical centre', () => {
+        const tab: Rect = { x: s.x + 100, y: s.y + 780, width: 98, height: 60 };
+        expect(dotOf(tab)).toEqual({ x: tab.x + 49, y: tab.y + 30 });
+    });
+
+    test('a wide row or button puts the dot 12px inside its right edge', () => {
+        const row: Rect = { x: s.x + 36, y: s.y + 300, width: 321, height: 64 };
+        expect(dotOf(row)).toEqual({ x: row.x + row.width - 12, y: row.y + 32 });
+        const button: Rect = { x: s.x + 20, y: s.y + 700, width: 353, height: 56 };
+        expect(dotOf(button)).toEqual({ x: button.x + 353 - 12, y: button.y + 28 });
+    });
+
+    test('fan index never shifts a dot off its trigger centre', () => {
+        const rows = [0, 1, 2].map((i): Rect => ({ x: s.x + 36, y: s.y + 300 + i * 70, width: 321, height: 64 }));
+        rows.forEach((row, i) => {
+            const d = dotOf(row, { index: i, count: 3 }, screen(1, i));
+            expect(d.y).toBe(row.y + 32);
+            expect(d.x).toBe(row.x + row.width - 12);
+        });
     });
 });
