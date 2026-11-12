@@ -204,3 +204,23 @@ describe('flow group meta', () => {
         expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: 5 }))).toBeNull();
     });
 });
+
+describe('layout grid meta', () => {
+    test('spacing grouped is a valid board mode; unknown modes are dropped', () => {
+        expect(parseBoardMeta(JSON.stringify({ ...board, spacing: 'grouped' }))?.spacing).toBe('grouped');
+        expect(parseBoardMeta(JSON.stringify({ ...board, spacing: 'wobbly' }))?.spacing).toBeUndefined();
+    });
+
+    test('a screen keeps its layoutId; a non-string one is refused; old screens without it still parse', () => {
+        expect(parseScreenMeta(JSON.stringify({ ...screenMeta, layoutId: 'g1' }))?.layoutId).toBe('g1');
+        expect(parseScreenMeta(JSON.stringify({ ...screenMeta, layoutId: 4 }))).toBeNull();
+        expect(parseScreenMeta(JSON.stringify(screenMeta))?.layoutId).toBeUndefined();
+    });
+
+    test('a group keeps its layout origin; a malformed one is dropped, not fatal', () => {
+        const ok = { boardId: 'b', name: 'Passkeys', screenIds: ['1:1'], rectId: 'r', titleId: 't', style: { color: '#FFFFFF', strokeWeight: 12, titleSize: 96 } };
+        expect(parseGroupMeta(JSON.stringify({ ...ok, layout: { originX: 900, originY: 40 } }))?.layout).toEqual({ originX: 900, originY: 40 });
+        expect(parseGroupMeta(JSON.stringify({ ...ok, layout: { originX: 'a', originY: 40 } }))?.layout).toBeUndefined();
+        expect(parseGroupMeta(JSON.stringify(ok))?.layout).toBeUndefined();
+    });
+});

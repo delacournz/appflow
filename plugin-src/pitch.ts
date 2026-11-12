@@ -2,7 +2,7 @@
 
 import { cellRect, type GridMeta } from './grid';
 
-export type Spacing = 'uniform' | 'banded';
+export type Spacing = 'uniform' | 'banded' | 'grouped';
 export type Pitch = { colWidth: number; rowHeight: number };
 
 export type PitchMeta = { colWidth: number; rowHeight: number; baseColWidth?: number; baseRowHeight?: number; spacing?: Spacing };
