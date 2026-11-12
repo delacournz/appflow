@@ -160,3 +160,40 @@ export function separateLabels(items: readonly LabelItem[], obstacles: readonly 
     }
     return { anchors, blocked };
 }
+
+type Run = { axis: 'v' | 'h'; at: number; lo: number; hi: number };
+
+function runsOf(points: readonly Pt[]): Run[] {
+    const out: Run[] = [];
+    for (let i = 1; i < points.length; i++) {
+        const a = points[i - 1] as Pt;
+        const b = points[i] as Pt;
+        if (a.x === b.x && a.y !== b.y) out.push({ axis: 'v', at: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) });
+        else if (a.y === b.y && a.x !== b.x) out.push({ axis: 'h', at: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) });
+    }
+    return out;
+}
+
+/** Total length two routes share on one line (same axis, same coordinate), the quantity `lines-overlap` measures. */
+export function sharedRunLength(a: readonly Pt[], b: readonly Pt[]): number {
+    const rb = runsOf(b);
+    let total = 0;
+    for (const s of runsOf(a)) for (const t of rb) if (s.axis === t.axis && s.at === t.at) total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    return total;
+}
+
+/** Length two routes run side by side (same axis) closer than `gap` apart but not on the same line. */
+export function crowdedRunLength(a: readonly Pt[], b: readonly Pt[], gap: number): number {
+    const rb = runsOf(b);
+    let total = 0;
+    for (const s of runsOf(a)) for (const t of rb) if (s.axis === t.axis && s.at !== t.at && Math.abs(s.at - t.at) < gap) total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    return total;
+}
+
+/** How many of `titles` have a segment of `points` strictly through them (the `line-crosses-title` test). */
+export function titleHitCount(points: readonly Pt[], titles: readonly Rect[]): number {
+    const runs = runsOf(points);
+    return titles.filter((r) =>
+        runs.some((s) => (s.axis === 'v' ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width)),
+    ).length;
+}
