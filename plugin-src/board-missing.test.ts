@@ -8,7 +8,7 @@ describe('board missing', () => {
         expect(m).toContain('Board background 2024:2387 is missing');
         expect(m).toContain('Cmd+Z');
         expect(m).toContain('Show version history');
-        expect(m).toContain('loses the stored grid and gap data');
+        expect(m).toContain('repair_board');
     });
 
     test('orphans are counted per missing board, screens and groups', () => {

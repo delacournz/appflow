@@ -84,6 +84,7 @@ Wrap related screens (a feature, a sub-flow such as "Passkeys" or "Device signin
 - Never draw boxes by hand and never use `group_screens` for this (it breaks prototype Play). Screens stay top-level frames.
 - Arrow lines may cross a box stroke. A box and its title never cross screens, route text, badges, arrow labels or other boxes.
 - One level of nesting: a child group sits fully inside a parent (`parentId`). A child of a child is rejected.
+- A tool says the board background is missing (someone deleted it): run `repair_board` (dry run first). Never redraw the background by hand.
 - Old hand-drawn boxes and Section Heading instances: run `adopt_flow_groups` (dry run first) to turn them into real groups.
 - Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds, label-overlaps-label, lines-overlap, line-crosses-title). `describe_board` shows the group tree and flags empty or stale groups.
 
