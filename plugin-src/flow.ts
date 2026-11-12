@@ -1,6 +1,6 @@
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigger, modeOf, type TriggerCandidate } from './adopt';
-import { MAX_OFFSET, pairLooseParts, resolveArrowEnds, type ScreenRef } from './arrow-adopt';
+import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
 import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
 import {
@@ -423,6 +423,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
     const deleted: JsonObject[] = [];
     const errors: JsonObject[] = [];
     const warnings: JsonObject[] = [];
+    let obstacleCount = 0;
     for (const board of boards) {
         const ordered = await orderedEntries(listArrows(board));
         for (const o of ordered) {
@@ -430,6 +431,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
         }
         const live = ordered.flatMap((o) => (o.ends ? [{ entry: o.entry, ends: o.ends }] : []));
         const groups = await obstaclesOf(board);
+        obstacleCount += groups.length;
         const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
         for (const [i, l] of live.entries()) {
             const plan = plans[i] as Plan;
@@ -451,7 +453,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
         }
         raiseArrows(board);
     }
-    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings };
+    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, groupObstacles: obstacleCount, reroutedIds: rerouted, backwards, deleted, errors, warnings };
 }
 
 export const rerouteFlow: Handler = async (args) => {
@@ -756,6 +758,29 @@ export const adoptBoard: Handler = async (args) => {
         }
     }
 
+    const consolidation = planConsolidation(groups.map((g) => ({ id: g.id, childIds: g.children.map((c) => c.id) })));
+    let arrowsConsolidated = 0;
+    if (!dryRun && consolidation) {
+        for (const m of consolidation.moves) {
+            const node = await sceneById(m.nodeId);
+            if (!node || !('x' in node)) continue;
+            const before = rectOf(node);
+            arrowsGroup.appendChild(node);
+            const d = restoreDelta(before, rectOf(node));
+            if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+                node.x += d.x;
+                node.y += d.y;
+            }
+            arrowsConsolidated++;
+        }
+        for (const id of consolidation.emptied) {
+            const extra = await sceneById(id);
+            if (extra && 'children' in extra && !extra.children.length) extra.remove();
+        }
+    } else if (consolidation) {
+        arrowsConsolidated = consolidation.moves.length;
+    }
+
     const preview: JsonObject[] = planned.map((p) => ({
         vector: p.vector.id,
         label: p.labelText,
@@ -772,6 +797,7 @@ export const adoptBoard: Handler = async (args) => {
         arrowStyle: style as unknown as JsonObject,
         screens: screenRects.length,
         arrowsAdopted: planned.length,
+        arrowsConsolidated,
         arrowsRelinked: planned.filter((p) => p.holder).length,
         arrowsStale: planned.filter((p) => p.stale).length,
         arrowsAlreadyAdopted: arrowsKept,
