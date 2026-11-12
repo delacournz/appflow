@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
-import { boxEdges, crowdedRunLength, laneConflicts, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, routeViaLeftGutter, type Exit, type Pt, type Rect, type Route } from './route';
+import { boxEdges, crowdedRunLength, laneConflicts, screensCrossed, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
+import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, routeViaBand, routeViaLeftGutter, spreadEntries, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -13,6 +13,10 @@ export type PlanConfig = {
     boxes?: readonly StrokedBox[];
     /** Text rects of the group titles (`titleTextRect`). Straight vertical arrows shift sideways off them when they can. */
     titles?: readonly Rect[];
+    /** Every screen on the board. A line that would pass through a screen other than its own ends detours through a row gap. */
+    screens?: readonly Rect[];
+    /** Space between a row's bottom and the next row's top (rowHeight - screenH); default 260. */
+    rowGap?: number;
 };
 
 /** Clear space kept between a vertical line and the end of a title's text. */
@@ -27,9 +31,11 @@ type Routed = ReturnType<typeof routeArrow>;
 export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints }[]): Plan[] {
     const { gutter, limits } = cfg;
     const edges: Edge[] = (cfg.boxes ?? []).flatMap(boxEdges);
-    const withLimit = <T extends object>(i: number, input: T): T & { labelLimitX?: number } => {
+    const entries = spreadEntries(items.map((it) => ({ id: it.id, source: it.ends.source, target: it.ends.target, trigger: it.ends.trigger })));
+    const withLimit = <T extends object>(i: number, input: T): T & { labelLimitX?: number; entryY?: number } => {
         const labelLimitX = limits[i];
-        return labelLimitX === undefined ? input : { ...input, labelLimitX };
+        const entryY = entries.get((items[i] as (typeof items)[number]).id);
+        return { ...input, ...(labelLimitX === undefined ? {} : { labelLimitX }), ...(entryY === undefined ? {} : { entryY }) };
     };
     const first = items.map((it, i) => routeArrow(withLimit(i, { ...it.ends, gutter, lane: 0 })));
     const fanGroupOf = new Map<string, string>();
@@ -124,6 +130,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         if (!r.ok || r.kind === 'straight' || fans.has(it.id)) return null;
         return (lane: number) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
     });
+    detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, entries);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
     separateLines(final, builders, titles, edges);
     return items.map((it, i) => {
@@ -280,4 +287,59 @@ function separateFans(
         }
         if (best) idx.forEach((i, n) => (routes[i] = (best as { rs: Routed[] }).rs[n] as Routed));
     }
+}
+
+const SCREEN_COST = 10_000;
+
+/**
+ * A line that passes through a screen other than its source and target (a straight run across occupied cells, or a long
+ * final leg along a row) is redrawn through a row gap: out of the source's right edge, into a band above or below the
+ * target's row that no screen occupies, along it, and into the target's left edge. The band is the nearest height
+ * that keeps clear of screens, other lines, titles and strokes. Replaces the route and its lane builder; mutates `routes`.
+ */
+function detourAroundScreens(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    screens: readonly Rect[],
+    rowGap: number,
+    titles: readonly Rect[],
+    edges: readonly Edge[],
+    builders: (((lane: number) => Routed) | null)[],
+    entries: ReadonlyMap<string, number>,
+): void {
+    if (!screens.length) return;
+    routes.forEach((r, i) => {
+        if (!r.ok) return;
+        const { source, target, trigger } = (items[i] as (typeof items)[number]).ends;
+        if (target.x < source.x + source.width) return;
+        if (screensCrossed(r.points, screens, [source, target]) === 0) return;
+        const entryY = entries.get((items[i] as (typeof items)[number]).id);
+        const cost = (pts: readonly Pt[]): number => {
+            let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+            routes.forEach((o, j) => {
+                if (j === i || !o.ok) return;
+                if (sharedRunLength(pts, o.points) > 1) c += 1000;
+                else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0) c += 0.5;
+            });
+            return c;
+        };
+        const bands: number[] = [];
+        for (let k = 0; k <= 8; k++) bands.push(target.y - 72 - 32 - k * LANE_STEP);
+        for (let k = 0; k <= 8; k++) bands.push(target.y + target.height + 24 + k * LANE_STEP);
+        const lo = target.y - rowGap + 8;
+        const hi = target.y + target.height + rowGap - 8;
+        let best: { route: Routed; c: number; y: number; lane: number } | null = null;
+        for (let lane = 0; lane <= 4 && (!best || best.c >= 1); lane++) {
+            for (const y of bands) {
+                if (y < lo || y > hi) continue;
+                const cand = routeViaBand(source, target, trigger, y, lane, entryY);
+                const c = cost(cand.points);
+                if (!best || c < best.c) best = { route: cand, c, y, lane };
+            }
+        }
+        const chosen = best as { route: Routed; c: number; y: number; lane: number } | null;
+        if (!chosen || chosen.c >= SCREEN_COST) return;
+        routes[i] = chosen.route;
+        builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane, entryY);
+    });
 }

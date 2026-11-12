@@ -88,10 +88,14 @@ export async function loadBoard(boardId: string): Promise<Board> {
  * created directly above the arrows container. Records its id on the board data, so every later run reuses it.
  */
 export async function ensureLabels(board: Board): Promise<SceneNode & ChildrenMixin> {
-    if (board.labels && !board.labels.removed) return board.labels;
+    if (board.labels && !board.labels.removed) {
+        const wanted = labelsContainerName(board.node.name, board.arrows.name);
+        if (board.labels.name !== wanted && isLabelsContainerName(board.labels.name)) board.labels.name = wanted;
+        return board.labels;
+    }
     const parent = board.arrows.parent;
     if (!parent || !('children' in parent)) throw new Error(`The arrows group of board ${board.node.id} has no parent for a labels container.`);
-    const name = labelsContainerName(board.arrows.name);
+    const name = labelsContainerName(board.node.name, board.arrows.name);
     let found = parent.children.find((c): c is FrameNode => c.type === 'FRAME' && isLabelsContainerName(c.name) && c.name === name) ?? null;
     if (!found) {
         found = figma.createFrame();
@@ -145,6 +149,18 @@ export function listArrows(board: Board): ArrowEntry[] {
     return out;
 }
 
+/** Every screen frame that belongs to the board, with its rect. */
+export function boardScreens(board: Board): { id: string; rect: Rect }[] {
+    const parent = board.node.parent;
+    if (!parent || !('children' in parent)) return [];
+    return collectScreens(parent.children)
+        .filter((s) => readMeta(s.frame, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id)
+        .map((s) => ({ id: s.frame.id, rect: rectOf(s.frame) }));
+}
+
+/** Rects only, for keeping lines out of screens that are not their ends. */
+export const boardScreenRects = (board: Board): Rect[] => boardScreens(board).map((s) => s.rect);
+
 /** The base gap between screen columns. Widened boundaries (extras) do not change it: lanes stay in the base gap. */
 const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
 
@@ -166,8 +182,8 @@ async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
 }
 
 /** Plans the board's arrows. `groups` are the board's group boxes and titles; without them the plan is the plain one. */
-function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = []): Plan[] {
-    return planRoutesPure({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...(g.strokeWeight ? { strokeWeight: g.strokeWeight } : {}) })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
+function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = [], screens: readonly Rect[] = []): Plan[] {
+    return planRoutesPure({ gutter: gutterOf(meta), screens, rowGap: meta.rowHeight - meta.screenH, limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...(g.strokeWeight ? { strokeWeight: g.strokeWeight } : {}) })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
 }
 
 type GroupObstacleLoader = (board: Board) => Promise<GroupObstacle[]>;
@@ -432,7 +448,7 @@ export const connect: Handler = async (args) => {
 
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => (o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []));
     const groups = await obstaclesOf(board);
-    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }], groups);
+    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }], groups, boardScreenRects(board));
     const mine = plans[plans.length - 1] as Plan;
     if (!mine.route) return fail(mine.error ?? 'Could not route the arrow.');
     const route = mine.route;
@@ -532,7 +548,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
         const live = ordered.flatMap((o) => (o.ends ? [{ entry: o.entry, ends: o.ends }] : []));
         const groups = await obstaclesOf(board);
         obstacleCount += groups.length;
-        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
+        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups, boardScreenRects(board));
         const drawn: { id: string; route: Route; label: FrameNode }[] = [];
         const kept: FrameNode[] = [];
         for (const [i, l] of live.entries()) {
@@ -627,7 +643,7 @@ export const adoptBoard: Handler = async (args) => {
     const prevBoardMeta = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
     const labelsHolder =
         (prevBoardMeta?.labelsGroupId ? parent.children.find((c) => c.id === prevBoardMeta.labelsGroupId) : null) ??
-        parent.children.find((c) => 'children' in c && isLabelsContainerName(c.name) && c.name === labelsContainerName(arrowsGroup.name)) ??
+        parent.children.find((c) => 'children' in c && isLabelsContainerName(c.name) && c.name === labelsContainerName(boardNode.name, arrowsGroup.name)) ??
         null;
     const labelsKids = labelsHolder && 'children' in labelsHolder ? [...labelsHolder.children] : [];
     const siblings = parent.children.filter((c) => c.id !== boardNode.id && c.id !== labelsHolder?.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));

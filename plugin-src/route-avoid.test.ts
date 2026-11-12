@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { GROUP_CLEAR, GROUP_PAD, GROUP_STROKE, fitBox } from './flow-group';
 import { routeArrow, type Pt, type Rect, type Route } from './route';
 import { lintArrows } from './group-lint';
-import { boxEdges, clearLabel, labelObstacles, laneConflicts, separateLabels, titleHitCount, titleTextRect, type GroupObstacle } from './route-avoid';
+import { boxEdges, clearLabel, labelObstacles, laneConflicts, screensCrossed, separateLabels, titleHitCount, titleTextRect, type GroupObstacle } from './route-avoid';
 import { planRoutes, type Endpoints } from './route-plan';
 
 const EDGE = GROUP_PAD + GROUP_STROKE;
@@ -372,5 +372,60 @@ describe('arrow lanes on a uniform board', () => {
         expect(cross).toEqual([]);
         const first = planRoutes({ gutter: PITCH_X - W, limits: [undefined, undefined] }, [mk('A', a, cellAt(2, 4)), mk('B', b, cellAt(2, 3))]);
         expect(lint(first).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+    });
+});
+
+describe('same-row arrows across occupied cells and fan-in', () => {
+    const cellAt = (col: number, row: number): Rect => ({ x: 164 + col * PITCH_X, y: 2174 + row * PITCH_Y, width: W, height: H });
+    const PITCH_X = 1140;
+    const board: Rect[] = [];
+    for (let c = 0; c <= 11; c++) board.push(cellAt(c, 0));
+    for (let c = 0; c <= 11; c++) board.push(cellAt(c, 1));
+    const plan = (pairs: [string, Rect, Rect][]) =>
+        planRoutes({ gutter: PITCH_X - W, limits: pairs.map(() => undefined), screens: board, rowGap: PITCH_Y - H }, pairs.map(([id, s, t]) => ({ id, ends: ends(s, t) })));
+    const routeOf = (plans: ReturnType<typeof plan>, id: string) => ((plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route).points;
+    const noScreenHits = (plans: ReturnType<typeof plan>, pairs: [string, Rect, Rect][]) =>
+        pairs.every(([id, s, t]) => screensCrossed(routeOf(plans, id), board, [s, t]) === 0);
+
+    test('a straight run across occupied cells detours through a row gap and enters the target left edge', () => {
+        const home = cellAt(11, 0);
+        const pairs: [string, Rect, Rect][] = [['email', cellAt(4, 0), home]];
+        const plans = plan(pairs);
+        const pts = routeOf(plans, 'email');
+        expect(noScreenHits(plans, pairs)).toBe(true);
+        const last = pts[pts.length - 1] as Pt;
+        const before = pts[pts.length - 2] as Pt;
+        expect(last.x).toBe(home.x);
+        expect(before.y).toBe(last.y);
+        expect(before.x).toBeLessThan(last.x);
+        const rises = pts.some((p) => p.y < home.y || p.y > home.y + H);
+        expect(rises).toBe(true);
+        expect(Math.min(...pts.map((p) => p.x))).toBeGreaterThanOrEqual(cellAt(4, 0).x + W);
+    });
+
+    test('with no screen in between the straight line is kept', () => {
+        const pairs: [string, Rect, Rect][] = [['next', cellAt(4, 0), cellAt(5, 0)]];
+        const plans = plan(pairs);
+        expect(routeOf(plans, 'next')).toHaveLength(2);
+    });
+
+    test('four arrows into Home enter at distinct heights, share no line and cross no screen', () => {
+        const home = cellAt(11, 0);
+        const pairs: [string, Rect, Rect][] = [
+            ['a', cellAt(4, 0), home],
+            ['b', cellAt(9, 0), home],
+            ['c', cellAt(10, 0), home],
+            ['d', cellAt(8, 1), home],
+        ];
+        const plans = plan(pairs);
+        expect(noScreenHits(plans, pairs)).toBe(true);
+        const ys = pairs.map(([id]) => (routeOf(plans, id).at(-1) as Pt).y).sort((p, q) => p - q);
+        for (let i = 1; i < ys.length; i++) expect((ys[i] as number) - (ys[i - 1] as number)).toBeGreaterThanOrEqual(24);
+        const issues = lintArrows(
+            pairs.map(([id, s, t]) => ({ id, points: routeOf(plans, id), label: null, from: `${s.x}:${s.y}`, to: `${t.x}:${t.y}` })),
+            [],
+            board.map((r) => ({ id: `${r.x}:${r.y}`, rect: r })),
+        ).issues;
+        expect(issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen')).toEqual([]);
     });
 });

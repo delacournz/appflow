@@ -71,3 +71,18 @@ describe('lintArrows', () => {
         expect(r.counts['line-crosses-title']).toBe(2);
     });
 });
+
+describe('lintArrows line-crosses-screen', () => {
+    const screens = [
+        { id: 's1', rect: { x: 0, y: 0, width: 393, height: 852 } },
+        { id: 's2', rect: { x: 1140, y: 0, width: 393, height: 852 } },
+        { id: 's3', rect: { x: 2280, y: 0, width: 393, height: 852 } },
+    ];
+    test('a line through a screen that is neither end is reported; one that only touches its ends is not', () => {
+        const through = { id: 'a', from: 's1', to: 's3', label: null, points: [{ x: 393, y: 426 }, { x: 2280, y: 426 }] };
+        const around = { id: 'b', from: 's1', to: 's3', label: null, points: [{ x: 393, y: 426 }, { x: 417, y: 426 }, { x: 417, y: 1000 }, { x: 2256, y: 1000 }, { x: 2256, y: 426 }, { x: 2280, y: 426 }] };
+        const r = lintArrows([through, around], [], screens);
+        expect(r.issues.filter((i) => i.kind === 'line-crosses-screen').map((i) => [i.kind, 'arrowId' in i ? i.arrowId : ''])).toEqual([['line-crosses-screen', 'a']]);
+        expect(lintArrows([through], [], []).issues).toEqual([]);
+    });
+});

@@ -3,8 +3,11 @@ import { describe, expect, test } from 'bun:test';
 import { isLabelsContainerName, labelsContainerName, labelsToMigrate, stackingNeeds } from './arrow-labels';
 
 describe('labelsContainerName', () => {
-    test('mirrors the arrows container name', () => {
-        expect(labelsContainerName('Flow arrows · Main flow')).toBe('Flow arrow labels · Main flow');
+    test('takes the board part from the board name, else the arrows container name', () => {
+        expect(labelsContainerName('Board background · Main flow', 'Flow arrows')).toBe('Flow arrow labels · Main flow');
+        expect(labelsContainerName('Board · Main flow')).toBe('Flow arrow labels · Main flow');
+        expect(labelsContainerName('Background', 'Flow arrows · Main flow')).toBe('Flow arrow labels · Main flow');
+        expect(labelsContainerName('', 'Flow arrows')).toBe('Flow arrow labels');
         expect(isLabelsContainerName('Flow arrow labels · Main flow')).toBe(true);
         expect(isLabelsContainerName('Flow arrows · Main flow')).toBe(false);
     });

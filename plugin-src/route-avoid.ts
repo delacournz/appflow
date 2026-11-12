@@ -197,3 +197,14 @@ export function titleHitCount(points: readonly Pt[], titles: readonly Rect[]): n
         runs.some((s) => (s.axis === 'v' ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width)),
     ).length;
 }
+
+/** How many of `screens` a segment of `points` passes through (strictly inside, more than 1px), ignoring screens equal to `except`. */
+export function screensCrossed(points: readonly Pt[], screens: readonly Rect[], except: readonly Rect[] = []): number {
+    const runs = runsOf(points);
+    const same = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    return screens.filter(
+        (r) =>
+            !except.some((e) => same(e, r)) &&
+            runs.some((s) => (s.axis === 'v' ? s.at > r.x + 1 && s.at < r.x + r.width - 1 && s.hi > r.y + 1 && s.lo < r.y + r.height - 1 : s.at > r.y + 1 && s.at < r.y + r.height - 1 && s.hi > r.x + 1 && s.lo < r.x + r.width - 1)),
+    ).length;
+}
