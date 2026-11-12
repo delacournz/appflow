@@ -184,9 +184,9 @@ describe('planAssign', () => {
 });
 
 describe('mergeStyle', () => {
-    const base = { color: '#FFFFFF', strokeWeight: 4, titleSize: 96 };
+    const base = { color: '#FFFFFF', strokeWeight: 12, titleSize: 96, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' };
     test('overlays fields', () => {
-        expect(mergeStyle(base, { color: '#FF0000', titleSize: 64 })).toEqual({ ok: true, style: { color: '#FF0000', strokeWeight: 4, titleSize: 64 } });
+        expect(mergeStyle(base, { color: '#FF0000', titleSize: 64 })).toEqual({ ok: true, style: { ...base, color: '#FF0000', titleSize: 64 } });
         expect(mergeStyle(base, undefined)).toEqual({ ok: true, style: base });
     });
     test('rejects junk', () => {
@@ -194,5 +194,10 @@ describe('mergeStyle', () => {
         expect(mergeStyle(base, { strokeWeight: 0 }).ok).toBe(false);
         expect(mergeStyle(base, { size: 3 }).ok).toBe(false);
         expect(mergeStyle(base, 'x').ok).toBe(false);
+        expect(mergeStyle(base, { titleFill: 'dark' }).ok).toBe(false);
+    });
+    test('sets padding, title fill and colour; padding may not drop below the clearance', () => {
+        expect(mergeStyle(base, { padding: 200, titleFill: '#101010', titleColor: '#EEEEEE' })).toEqual({ ok: true, style: { ...base, padding: 200, titleFill: '#101010', titleColor: '#EEEEEE' } });
+        expect(mergeStyle(base, { padding: 10 }).ok).toBe(false);
     });
 });

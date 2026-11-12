@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import { GROUP_CLEAR, fitBox } from './flow-group';
+import { GROUP_CLEAR, GROUP_PAD, GROUP_STROKE, fitBox } from './flow-group';
 import { routeArrow, type Pt, type Rect, type Route } from './route';
 import { boxEdges, clearLabel, labelObstacles, laneConflicts, type GroupObstacle } from './route-avoid';
 import { planRoutes, type Endpoints } from './route-plan';
 
+const EDGE = GROUP_PAD + GROUP_STROKE;
 const W = 393;
 const H = 852;
 const GUTTER = 307;
@@ -35,18 +36,18 @@ describe('clearLabel', () => {
 
     test('side by side groups: a label on a stroke slides into the gap between both boxes', () => {
         const s = screen(0, 0);
-        const t = { ...s, x: s.x + 500 + W };
+        const t = { ...s, x: s.x + 800 + W };
         const gs = [group(s), group(t)];
-        const plain = must(routeArrow({ source: s, target: t, trigger: null, gutter: 500, lane: 0 }));
-        const r: Route = { ...plain, labelAnchor: { x: s.x + W + 68, y: plain.labelAnchor.y } };
+        const plain = must(routeArrow({ source: s, target: t, trigger: null, gutter: 800, lane: 0 }));
+        const r: Route = { ...plain, labelAnchor: { x: s.x + W + EDGE, y: plain.labelAnchor.y } };
         const obs = labelObstacles(gs);
         expect(clearOfAll(r.labelAnchor, obs)).toBe(false);
         const res = clearLabel(r, LABEL, obs);
         expect(res.ok && res.moved).toBe(true);
         const at = anchorOf(res);
         expect(at.y).toBe(r.labelAnchor.y);
-        expect(at.x).toBeGreaterThan(s.x + W + 68 + GROUP_CLEAR);
-        expect(at.x).toBeLessThan(t.x - 68 - GROUP_CLEAR);
+        expect(at.x).toBeGreaterThan(s.x + W + EDGE + GROUP_CLEAR);
+        expect(at.x).toBeLessThan(t.x - EDGE - GROUP_CLEAR);
         expect(clearOfAll(at, obs)).toBe(true);
     });
 
@@ -111,7 +112,8 @@ describe('planRoutes with groups', () => {
     test('a backwards lane that runs along a bottom stroke steps to a clear lane', () => {
         const s = screen(1, 0);
         const t = screen(0, 1);
-        const boxes = [group(s).box, group(t).box];
+        const tight = { padding: 64, strokeWeight: 4, titleSize: 96 };
+        const boxes = [s, t].map((m) => ({ ...fitBox([m], [], tight).box, strokeWeight: 4 }));
         const items = [{ id: 'back', ends: ends(s, t) }];
         const cfg = { gutter: GUTTER, limits: [undefined] };
         const plain = planRoutes(cfg, items)[0]?.route as Route;

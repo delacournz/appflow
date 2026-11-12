@@ -163,6 +163,20 @@ describe('flow group meta', () => {
         expect(m?.parentId).toBe('p');
         expect(parseGroupMeta(JSON.stringify(ok))?.parentId).toBeUndefined();
     });
+    test('a legacy style (no padding) migrates: 4px stroke becomes 12, padding and title bar defaults fill in', () => {
+        const m = parseGroupMeta(JSON.stringify(ok));
+        expect(m?.style).toEqual({ color: '#FFFFFF', strokeWeight: 12, titleSize: 96, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' });
+        const custom = parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, strokeWeight: 6 } }));
+        expect(custom?.style.strokeWeight).toBe(6);
+    });
+    test('a full style keeps its values, even a 4px stroke', () => {
+        const style = { color: '#FF0000', strokeWeight: 4, titleSize: 50, padding: 90, titleFill: '#111111', titleColor: '#EEEEEE' };
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style }))?.style).toEqual(style);
+    });
+    test('rejects a bad title fill or padding', () => {
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, titleFill: 'dark' } }))).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, padding: 0 } }))).toBeNull();
+    });
     test('rejects malformed data', () => {
         expect(parseGroupMeta('')).toBeNull();
         expect(parseGroupMeta('nope')).toBeNull();

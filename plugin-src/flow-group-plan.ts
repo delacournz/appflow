@@ -1,12 +1,12 @@
 /** Pure planning for flow group tools: membership and nesting rules, extras moves, z-order. No `figma` global. */
 import { boundaryExtras, type BoundaryExtras } from './flow-group';
-import { ROUTE_TOP } from './flow-group';
+import { GROUP_CLEAR, ROUTE_TOP } from './flow-group';
 import type { Move } from './grid';
 import type { GroupStyle } from './flowmeta';
 import { cleanExtras, trackStart, type Extras, type ExtrasInput } from './tracks';
 
 /** The group fields the rules need. A group's `screenIds` are its own screens only; a child's screens are not repeated on its parent. */
-export type GroupRec = { id: string; name: string; parentId?: string; screenIds: string[] };
+export type GroupRec = { id: string; name: string; parentId?: string; screenIds: string[]; style?: GroupStyle };
 
 type Fail = { ok: false; error: string };
 
@@ -114,6 +114,8 @@ export function planAssign(existing: readonly GroupRec[], screenId: string, targ
     return { ok: true, changes };
 }
 
+const STYLE_KEYS: readonly string[] = ['color', 'strokeWeight', 'titleSize', 'padding', 'titleFill', 'titleColor'];
+
 export type StyleResult = { ok: true; style: GroupStyle } | Fail;
 
 /** `base` with the fields of a user-supplied style object laid over it. Unknown or ill-typed fields are errors. */
@@ -121,19 +123,22 @@ export function mergeStyle(base: GroupStyle, raw: unknown): StyleResult {
     if (raw === undefined) return { ok: true, style: base };
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ok: false, error: 'style must be an object.' };
     const o = raw as Record<string, unknown>;
-    const unknown = Object.keys(o).filter((k) => k !== 'color' && k !== 'strokeWeight' && k !== 'titleSize');
+    const unknown = Object.keys(o).filter((k) => !STYLE_KEYS.includes(k));
     if (unknown.length) return { ok: false, error: `Unknown style fields: ${unknown.join(', ')}.` };
     const style = { ...base };
-    if (o.color !== undefined) {
-        if (typeof o.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(o.color)) return { ok: false, error: 'style.color must be #RRGGBB.' };
-        style.color = o.color;
+    for (const k of ['color', 'titleFill', 'titleColor'] as const) {
+        const v = o[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(v)) return { ok: false, error: `style.${k} must be #RRGGBB.` };
+        style[k] = v;
     }
-    for (const k of ['strokeWeight', 'titleSize'] as const) {
+    for (const k of ['strokeWeight', 'titleSize', 'padding'] as const) {
         const v = o[k];
         if (v === undefined) continue;
         if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return { ok: false, error: `style.${k} must be a positive number.` };
         style[k] = v;
     }
+    if (style.padding < GROUP_CLEAR) return { ok: false, error: `style.padding must be at least ${GROUP_CLEAR} (the clearance kept between a box line and content).` };
     return { ok: true, style };
 }
 
@@ -161,7 +166,7 @@ export function reconcileMembership(groups: readonly GroupRec[], screens: readon
         const parent = g.parentId ? byId.get(g.parentId) : undefined;
         const parentId = parent && !parent.parentId && parent.id !== g.id ? g.parentId : undefined;
         if (screenIds.length !== g.screenIds.length || parentId !== g.parentId) changed.add(g.id);
-        return { id: g.id, name: g.name, screenIds, ...(parentId ? { parentId } : {}) };
+        return { id: g.id, name: g.name, screenIds, ...(parentId ? { parentId } : {}), ...(g.style ? { style: g.style } : {}) };
     });
     const screenFixes = screens.flatMap((s) => {
         const want = owner.get(s.id) ?? null;
@@ -183,7 +188,12 @@ export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readon
     for (const g of groups) for (const id of g.screenIds) if (!owner.has(id)) owner.set(id, g.id);
     const cellOf = new Map(screens.map((s) => [s.id, { col: s.col, row: s.row }]));
     const cellsOf = (id: string) => screens.filter((s) => owner.get(s.id) === id).map((s) => ({ col: s.col, row: s.row }));
-    const boundary = groups.map((g) => ({ id: g.id, ...(g.parentId ? { parentId: g.parentId } : {}), cells: cellsOf(g.id) }));
+    const boundary = groups.map((g) => ({
+        id: g.id,
+        ...(g.parentId ? { parentId: g.parentId } : {}),
+        cells: cellsOf(g.id),
+        ...(g.style ? { metrics: { padding: g.style.padding, strokeWeight: g.style.strokeWeight, titleSize: g.style.titleSize } } : {}),
+    }));
     const ungrouped = screens.filter((s) => !owner.has(s.id)).map((s) => cellOf.get(s.id) as { col: number; row: number });
     if (!boundary.some((b) => b.cells.length)) return { colExtra: [], rowExtra: [] };
     const colGap = base.colWidth - base.screenW;
