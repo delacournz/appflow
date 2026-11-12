@@ -1,6 +1,6 @@
 /** Shared plugin data model for flow boards, plus pure helpers. No `figma` global. */
 
-import { cleanExtras, trackOf, type Extras } from './tracks';
+import { cellOfPoint, cleanExtras, type Extras, type ExtrasInput } from './tracks';
 
 export const FLOW_NAMESPACE = 'flowbridge';
 export const BOARD_KEY = 'board';
@@ -19,9 +19,9 @@ export type BoardMeta = {
     originY: number;
     colWidth: number;
     rowHeight: number;
-    /** Extra px added before column i (cumulative). Absent = uniform columns. */
+    /** Extra px added before column `at`, for the rows `from`..`to` only (cumulative). Absent = uniform columns. */
     colExtra?: Extras;
-    /** Extra px added before row i (cumulative). Absent = uniform rows. */
+    /** Extra px added before row `at`, for the columns `from`..`to` only (cumulative). Absent = uniform rows. */
     rowExtra?: Extras;
     screenW: number;
     screenH: number;
@@ -131,8 +131,8 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
     for (const k of ['colExtra', 'rowExtra'] as const) {
         const raw = o[k];
         if (raw === undefined) continue;
-        const clean = isObj(raw) ? cleanExtras(raw as Extras) : {};
-        if (Object.keys(clean).length) meta[k] = clean;
+        const clean = isObj(raw) || Array.isArray(raw) ? cleanExtras(raw as ExtrasInput) : [];
+        if (clean.length) meta[k] = clean;
         else delete meta[k];
     }
     return meta;
@@ -184,7 +184,7 @@ export function cellOfRect(
     rect: { x: number; y: number },
     board: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra'>,
 ): { col: number; row: number } {
-    return { col: trackOf(rect.x - board.originX, board.colWidth, board.colExtra), row: trackOf(rect.y - board.originY, board.rowHeight, board.rowExtra) };
+    return cellOfPoint(rect.x - board.originX, rect.y - board.originY, board.colWidth, board.rowHeight, board.colExtra, board.rowExtra);
 }
 
 /** Stable order for lane assignment: source column, then target row, then id. */

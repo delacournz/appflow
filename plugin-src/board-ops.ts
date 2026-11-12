@@ -138,7 +138,7 @@ export async function resizeBoard(board: Board, screens: Screen[], shrink: boole
 /** Stores new column/row extras on the board (empty maps are dropped) so moves and bounds use them. */
 export function applyExtras(board: Board, extras: ExtrasPair): void {
     const { colExtra: _c, rowExtra: _r, ...rest } = board.meta;
-    board.meta = { ...rest, ...(Object.keys(extras.colExtra).length ? { colExtra: extras.colExtra } : {}), ...(Object.keys(extras.rowExtra).length ? { rowExtra: extras.rowExtra } : {}) };
+    board.meta = { ...rest, ...(extras.colExtra.length ? { colExtra: extras.colExtra } : {}), ...(extras.rowExtra.length ? { rowExtra: extras.rowExtra } : {}) };
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
 }
 

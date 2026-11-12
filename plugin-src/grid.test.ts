@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { FULL_SPAN } from './tracks';
 import { boardBounds, cellOf, cellRect, compactedExtras, compactPlan, occupancy, planMove, shiftedExtras, shiftPlan, staleReason, type GridMeta } from './grid';
 
 const meta: GridMeta = { originX: 100, originY: 200, colWidth: 700, rowHeight: 1112, screenW: 393, screenH: 852, labelOffset: 72, margin: 80 };
@@ -126,6 +127,8 @@ describe('staleReason', () => {
     });
 });
 
+const full = (r: Record<number, number>) => Object.entries(r).map(([k, v]) => ({ at: Number(k), from: 0, to: FULL_SPAN, px: v }));
+
 describe('variable gaps (extras)', () => {
     const wide: GridMeta = { ...meta, colExtra: { 2: 200 }, rowExtra: { 1: 300 } };
     test('cellRect adds extras before the track and carries them forward', () => {
@@ -148,13 +151,13 @@ describe('variable gaps (extras)', () => {
         expect(boardBounds(e, [s('a', 4, 4)])).toEqual(boardBounds(meta, [s('a', 4, 4)]));
     });
     test('shiftedExtras moves the boundaries after an insert on that axis only', () => {
-        expect(shiftedExtras(wide, 'col', 0, 2)).toEqual({ colExtra: { 4: 200 }, rowExtra: { 1: 300 } });
-        expect(shiftedExtras(wide, 'row', 0, 1)).toEqual({ colExtra: { 2: 200 }, rowExtra: { 2: 300 } });
-        expect(shiftedExtras(meta, 'col', 0, 1)).toEqual({ colExtra: {}, rowExtra: {} });
+        expect(shiftedExtras(wide, 'col', 0, 2)).toEqual({ colExtra: full({ 4: 200 }), rowExtra: full({ 1: 300 }) });
+        expect(shiftedExtras(wide, 'row', 0, 1)).toEqual({ colExtra: full({ 2: 200 }), rowExtra: full({ 2: 300 }) });
+        expect(shiftedExtras(meta, 'col', 0, 1)).toEqual({ colExtra: [], rowExtra: [] });
     });
     test('compactedExtras follows the tracks screens use', () => {
         const e: GridMeta = { ...meta, colExtra: { 3: 200 }, rowExtra: { 2: 300 } };
-        expect(compactedExtras(e, [s('a', 0, 0), s('b', 1, 0), s('c', 3, 2)])).toEqual({ colExtra: { 2: 200 }, rowExtra: { 1: 300 } });
+        expect(compactedExtras(e, [s('a', 0, 0), s('b', 1, 0), s('c', 3, 2)])).toEqual({ colExtra: full({ 2: 200 }), rowExtra: full({ 1: 300 }) });
     });
     test('planMove and shiftPlan stay in cell space', () => {
         expect(shiftPlan([s('a', 0, 0), s('b', 2, 0)], 'col', 0, 1).map((m) => m.to)).toEqual([{ col: 3, row: 0 }]);

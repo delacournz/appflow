@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { FULL_SPAN } from './tracks';
 
 import {
     arrowGroupName,
@@ -145,7 +146,7 @@ describe('board extras', () => {
     });
     test('extras round-trip and junk is dropped', () => {
         const m = parseBoardMeta(JSON.stringify({ ...base, colExtra: { 2: 100, 3: -1 }, rowExtra: 'x' }));
-        expect(m?.colExtra).toEqual({ 2: 100 });
+        expect(m?.colExtra).toEqual([{ at: 2, from: 0, to: FULL_SPAN, px: 100 }]);
         expect(m?.rowExtra).toBeUndefined();
     });
     test('cellOfRect reads widened boundaries', () => {
