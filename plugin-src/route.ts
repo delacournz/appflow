@@ -238,19 +238,19 @@ export function routeArrow(input: RouteInput): Route | RouteError {
     }
 }
 
-export type GapOptions = { kind?: RouteKind; backwards?: boolean; laneX?: number; dx?: number; shared?: boolean };
+export type GapOptions = { kind?: RouteKind; backwards?: boolean; laneX?: number; dx?: number; shared?: boolean; gapY?: number };
 
 /**
  * Route for a target that is above, beside-left or far below in the same column, so a straight line would start on the
  * source's top or end on the target's bottom. Leaves the source's BOTTOM edge (at the trigger's x, else the centre),
  * drops into the row gap below the source, runs left along the gap into the gutter lane left of the target, runs up or
  * down it to the target's entry height and enters the target's LEFT edge heading right. The run left stays inside the
- * gap. `lane` moves the gap run down and the lane left one step each; `laneX` fixes the lane (a shared trunk, with
+ * gap. `gapY` fixes the height of the run (default: just below the source), for boards whose rows are not shared. `lane` moves the gap run down and the lane left one step each; `laneX` fixes the lane (a shared trunk, with
  * `shared` marking where it begins); `dx` shifts it sideways.
  */
 export function routeViaGap(source: Rect, target: Rect, trigger: Rect | null, gutter: number, lane: number, opts: GapOptions = {}): Route {
     const start: Pt = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom(source) };
-    const gapY = bottom(source) + BACKWARDS_DROP + lane * LANE_STEP;
+    const gapY = (opts.gapY ?? bottom(source) + BACKWARDS_DROP) + lane * LANE_STEP;
     const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
     const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
     const r = done(opts.kind ?? 'around', [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);

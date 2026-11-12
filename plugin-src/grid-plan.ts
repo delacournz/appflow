@@ -154,3 +154,18 @@ export function planRegrid(board: GridBoard, screens: readonly RegridScreen[], g
     }
     return { layouts, cells, snapped };
 }
+
+const GAP_TOLERANCE = 2;
+
+/**
+ * Per-arrow label limit on a grouped board, read from the real source and target rects instead of a shared grid. The base
+ * gutter is the board pitch minus the screen width. When the horizontal distance from source to target is not a whole number
+ * of pitches, the two sit in different grids with a group gap between them: labels stop at the end of the base gutter beside
+ * the source (lanes and labels never run in the gap's extra width). Aligned or backwards arrows have no limit.
+ */
+export function labelLimitBetween(meta: { colWidth: number; screenW: number }, source: { x: number; width: number }, target: { x: number }): number | undefined {
+    const dx = target.x - source.x;
+    if (target.x < source.x + source.width) return undefined;
+    const off = Math.abs(dx - Math.round(dx / meta.colWidth) * meta.colWidth);
+    return off > GAP_TOLERANCE ? source.x + source.width + (meta.colWidth - meta.screenW) : undefined;
+}
