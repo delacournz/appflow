@@ -39,6 +39,8 @@ export type BoardMeta = {
     margin: number;
     headingId: string | null;
     arrowsGroupId: string;
+    /** The `Flow arrow labels · {board}` container holding every arrow label above all arrow lines; absent on boards not yet migrated. */
+    labelsGroupId?: string;
     arrowStyle: { strokeVariableId: string | null; color: Rgb; weight: number; cornerRadius: number };
 };
 
@@ -153,6 +155,7 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
         if (clean.length) meta[k] = clean;
         else delete meta[k];
     }
+    if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId)) delete meta.labelsGroupId;
     if (o.spacing !== undefined && o.spacing !== 'uniform' && o.spacing !== 'banded') delete meta.spacing;
     for (const k of ['baseColWidth', 'baseRowHeight'] as const) if (o[k] !== undefined && !(isNum(o[k]) && (o[k] as number) > 0)) delete meta[k];
     const gap = o.gapExtra;

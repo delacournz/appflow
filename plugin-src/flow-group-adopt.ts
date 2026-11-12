@@ -30,7 +30,7 @@ const TOL = 1;
 const MAX_FILL = 0.3;
 const ABOVE_GAP = 400;
 const TOP_BAND = 0.25;
-const EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Arrows)/;
+const EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Flow arrow labels|Arrows)/;
 const HEADING_NAME = /^Section Heading/;
 
 const area = (r: Rect): number => r.width * r.height;

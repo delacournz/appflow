@@ -2,6 +2,7 @@ import type { JsonObject, JsonValue } from '../shared/protocol';
 import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigger, modeOf, type TriggerCandidate } from './adopt';
 import { boardMissingMessage } from './board-missing';
 import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
+import { isLabelsContainerName, labelsContainerName, labelsToMigrate, stackingNeeds } from './arrow-labels';
 import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
 import {
@@ -36,7 +37,8 @@ const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
 
 type Style = BoardMeta['arrowStyle'];
-export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin };
+/** `labels` is the container holding every arrow label above all arrow lines; absent until `ensureLabels` runs on a board. */
+export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin; labels?: (SceneNode & ChildrenMixin) | null };
 type ArrowEntry = { group: GroupNode; meta: ArrowMeta };
 
 export async function sceneById(id: string): Promise<SceneNode | null> {
@@ -76,7 +78,61 @@ export async function loadBoard(boardId: string): Promise<Board> {
     if (!meta) throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
     const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
     if (!arrows || !('children' in arrows)) throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone.`);
-    return { node, meta, arrows: arrows as SceneNode & ChildrenMixin };
+    const labelsNode = meta.labelsGroupId ? await figma.getNodeByIdAsync(meta.labelsGroupId) : null;
+    const labels = labelsNode && 'children' in labelsNode && !labelsNode.removed ? (labelsNode as SceneNode & ChildrenMixin) : null;
+    return { node, meta, arrows: arrows as SceneNode & ChildrenMixin, labels };
+}
+
+/**
+ * The board's `Flow arrow labels · {board}` container, found by id, then by name beside the arrows container, else
+ * created directly above the arrows container. Records its id on the board data, so every later run reuses it.
+ */
+export async function ensureLabels(board: Board): Promise<SceneNode & ChildrenMixin> {
+    if (board.labels && !board.labels.removed) return board.labels;
+    const parent = board.arrows.parent;
+    if (!parent || !('children' in parent)) throw new Error(`The arrows group of board ${board.node.id} has no parent for a labels container.`);
+    const name = labelsContainerName(board.arrows.name);
+    let found = parent.children.find((c): c is FrameNode => c.type === 'FRAME' && isLabelsContainerName(c.name) && c.name === name) ?? null;
+    if (!found) {
+        found = figma.createFrame();
+        found.name = name;
+        found.fills = [];
+        found.clipsContent = false;
+        found.resize(1, 1);
+        parent.insertChild(parent.children.indexOf(board.arrows as SceneNode) + 1, found);
+        const at = toLocal(parent, rectOf(board.arrows));
+        found.x = at.x;
+        found.y = at.y;
+    }
+    board.labels = found;
+    board.meta = { ...board.meta, labelsGroupId: found.id };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return found;
+}
+
+/** Moves `node` into `container` keeping its absolute position, whatever either container's own offset. */
+export function moveInto(node: SceneNode, container: SceneNode & ChildrenMixin): void {
+    const before = rectOf(node);
+    container.appendChild(node);
+    const d = restoreDelta(before, rectOf(node));
+    if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+        node.x += d.x;
+        node.y += d.y;
+    }
+}
+
+/** Moves the labels of these arrows out of their arrow groups into the labels container. Idempotent; returns how many moved. */
+export async function migrateLabels(board: Board, metas: readonly ArrowMeta[]): Promise<number> {
+    const labels = await ensureLabels(board);
+    const nodes = (await Promise.all(metas.map((m) => sceneById(m.labelId)))).flatMap((n) => (n ? [n] : []));
+    const ids = new Set(labelsToMigrate(nodes.map((n) => ({ labelId: n.id, labelParentId: n.parent?.id ?? null })), labels.id));
+    let moved = 0;
+    for (const n of nodes) {
+        if (!ids.has(n.id)) continue;
+        moveInto(n, labels);
+        moved++;
+    }
+    return moved;
 }
 
 export function listArrows(board: Board): ArrowEntry[] {
@@ -194,8 +250,9 @@ async function newDot(parent: SceneNode & ChildrenMixin, style: Style): Promise<
     return dot;
 }
 
-async function newLabel(parent: SceneNode & ChildrenMixin, style: Style, label: string): Promise<FrameNode> {
-    const template = firstOf(parent, (n): n is FrameNode => n.type === 'FRAME' && n.name.startsWith('Label ·'));
+async function newLabel(parent: SceneNode & ChildrenMixin, style: Style, label: string, alsoFrom: (SceneNode & ChildrenMixin) | null = null): Promise<FrameNode> {
+    const isLabel = (n: SceneNode): n is FrameNode => n.type === 'FRAME' && n.name.startsWith('Label ·');
+    const template = firstOf(parent, isLabel) ?? (alsoFrom ? firstOf(alsoFrom, isLabel) : null);
     let frame: FrameNode;
     if (template) {
         frame = template.clone();
@@ -317,14 +374,24 @@ function holdsScreen(node: SceneNode, boardId: string, depth = 0): boolean {
     return false;
 }
 
-/** Keeps the arrows group above every screen of the board (frames and `Screen · …` groups), so start dots stay visible. */
+/**
+ * Keeps the arrows container above every screen of the board (frames and `Screen · …` groups), so start dots stay
+ * visible, and the labels container directly above it, so every label paints over every line.
+ */
 export function raiseArrows(board: Board): void {
     const parent = board.arrows.parent;
     if (!parent || !('children' in parent)) return;
-    const kids = parent.children;
-    const at = kids.indexOf(board.arrows as SceneNode);
-    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
-    if (screenAbove) parent.insertChild(kids.length - 1, board.arrows as SceneNode);
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    const need = stackingNeeds(parent.children.map((k) => k.id), (id) => {
+        const k = parent.children.find((c) => c.id === id);
+        return !!k && k.id !== labels?.id && holdsScreen(k, board.node.id);
+    }, board.arrows.id, labels?.id ?? null);
+    if (need.raiseArrows) parent.insertChild(parent.children.length - 1, board.arrows as SceneNode);
+    if (need.placeLabels && labels) {
+        const a = parent.children.indexOf(board.arrows as SceneNode);
+        const l = parent.children.indexOf(labels as SceneNode);
+        parent.insertChild(l > a ? a + 1 : a, labels as SceneNode);
+    }
 }
 
 function writeArrowMeta(group: GroupNode, meta: ArrowMeta): void {
@@ -357,6 +424,7 @@ export const connect: Handler = async (args) => {
     const boardId = str(args, 'boardId') ?? readMeta(from, SCREEN_KEY, parseScreenMeta)?.boardId;
     if (!boardId) return fail(`${from.name} (${from.id}) is not on an adopted board. Run adopt_board, or pass boardId.`);
     const board = await loadBoard(boardId);
+    const labelsBox = await ensureLabels(board);
 
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
@@ -370,14 +438,19 @@ export const connect: Handler = async (args) => {
     const route = mine.route;
 
     let parts = match ? await partsOf(match.meta) : null;
-    if (match && !parts) match.group.remove();
+    if (match && !parts) {
+        const staleLabel = await sceneById(match.meta.labelId);
+        if (staleLabel && staleLabel.parent !== match.group) staleLabel.remove();
+        match.group.remove();
+    }
     const style = board.meta.arrowStyle;
     if (!parts) {
         const vector = await newVector(board.arrows, style, `Arrow · ${label}`);
         const dot = await newDot(board.arrows, style);
-        const lab = await newLabel(board.arrows, style, label);
+        const lab = await newLabel(labelsBox, style, label, board.arrows);
         parts = { vector, dot, label: lab };
     } else {
+        if (parts.label.parent !== labelsBox) moveInto(parts.label, labelsBox);
         await setLabelText(parts.label, label);
         parts.vector.name = `Arrow · ${label}`;
     }
@@ -403,7 +476,7 @@ export const connect: Handler = async (args) => {
     if (match && parts.vector.parent === match.group) {
         group = match.group;
     } else {
-        group = figma.group([parts.vector, parts.dot, parts.label], board.arrows);
+        group = figma.group([parts.vector, parts.dot], board.arrows);
     }
     group.name = arrowGroupName(from.name, to.name, label);
     writeArrowMeta(group, meta);
@@ -450,7 +523,9 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
     let obstacleCount = 0;
     for (const board of boards) {
         board.node.locked = true;
-        const ordered = await orderedEntries(listArrows(board));
+        const entries = listArrows(board);
+        await migrateLabels(board, entries.map((e) => e.meta));
+        const ordered = await orderedEntries(entries);
         for (const o of ordered) {
             if (!o.ends) deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
         }
@@ -549,7 +624,13 @@ export const adoptBoard: Handler = async (args) => {
     }
     const arrowsGroup = groups[0] as SceneNode & ChildrenMixin;
 
-    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
+    const prevBoardMeta = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const labelsHolder =
+        (prevBoardMeta?.labelsGroupId ? parent.children.find((c) => c.id === prevBoardMeta.labelsGroupId) : null) ??
+        parent.children.find((c) => 'children' in c && isLabelsContainerName(c.name) && c.name === labelsContainerName(arrowsGroup.name)) ??
+        null;
+    const labelsKids = labelsHolder && 'children' in labelsHolder ? [...labelsHolder.children] : [];
+    const siblings = parent.children.filter((c) => c.id !== boardNode.id && c.id !== labelsHolder?.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
     const found = collectScreens(siblings).filter((c) => {
         const r = rectOf(c.frame);
         return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
@@ -639,7 +720,11 @@ export const adoptBoard: Handler = async (args) => {
     for (const h of holders) {
         const v = h.children.find((x): x is VectorNode => x.type === 'VECTOR');
         const dot = h.children.find((x): x is EllipseNode => x.type === 'ELLIPSE');
-        const lab = h.children.find((x): x is FrameNode => x.type === 'FRAME' && x.name.startsWith('Label ·')) ?? h.children.find((x): x is FrameNode => x.type === 'FRAME');
+        const priorMeta = readMeta(h, ARROW_KEY, parseArrowMeta);
+        const lab =
+            h.children.find((x): x is FrameNode => x.type === 'FRAME' && x.name.startsWith('Label ·')) ??
+            h.children.find((x): x is FrameNode => x.type === 'FRAME') ??
+            labelsKids.find((x): x is FrameNode => x.type === 'FRAME' && x.id === priorMeta?.labelId);
         if (!v || !dot || !lab) {
             unmatched.push({ id: h.id, name: h.name, reason: 'incomplete-group' });
             continue;
@@ -772,9 +857,17 @@ export const adoptBoard: Handler = async (args) => {
             const routeNode = meta.routeId ? await sceneById(meta.routeId) : null;
             if (routeNode?.type === 'TEXT') await fitRoute(routeNode, s.node.width, null);
         }
+        const adopted: Board = { node: boardNode, meta: boardMeta, arrows: arrowsGroup, labels: labelsHolder && 'children' in labelsHolder ? (labelsHolder as SceneNode & ChildrenMixin) : null };
+        if (planned.length || arrowsKept || labelsHolder) await ensureLabels(adopted);
+        const labelsBox = adopted.labels ?? null;
+        if (labelsBox) {
+            boardMeta.labelsGroupId = labelsBox.id;
+            boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+        }
         for (const p of planned) {
             const container = p.vector.parent && 'children' in p.vector.parent ? p.vector.parent : arrowsGroup;
-            const group = p.holder ?? figma.group([p.vector, p.dot, p.label], container as BaseNode & ChildrenMixin);
+            const group = p.holder ?? figma.group([p.vector, p.dot], container as BaseNode & ChildrenMixin);
+            if (labelsBox && p.label.parent !== labelsBox) moveInto(p.label, labelsBox);
             const fromName = screenRects.find((s) => s.id === p.from)?.node.name ?? p.from;
             const toName = screenRects.find((s) => s.id === p.to)?.node.name ?? p.to;
             group.name = arrowGroupName(fromName, toName, p.labelText);
@@ -793,6 +886,12 @@ export const adoptBoard: Handler = async (args) => {
                 dotId: p.dot.id,
                 labelId: p.label.id,
             });
+        }
+        if (labelsBox) {
+            for (const h of holders) {
+                const inside = h.removed ? undefined : h.children.find((x): x is FrameNode => x.type === 'FRAME' && x.name.startsWith('Label ·'));
+                if (inside && h.children.some((x) => x.type === 'VECTOR')) moveInto(inside, labelsBox);
+            }
         }
     }
 
