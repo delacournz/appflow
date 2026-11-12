@@ -21,6 +21,11 @@ describe('inferRepairGrid', () => {
         expect(g).toMatchObject({ colWidth: 700, rowHeight: 1112, originX: 1000, originY: 2000 });
     });
 
+    test('banded offsets on other rows do not shrink the pitch', () => {
+        const g = inferRepairGrid([s(11, 0, 7585, 0), s(12, 0, 8285, 0), s(11, 1, 7864, 1112), s(12, 1, 8564, 1112), s(13, 1, 9264, 1112)]);
+        expect(g.colWidth).toBe(700);
+    });
+
     test('pitch never drops below the screen size', () => {
         const g = inferRepairGrid([s(0, 0, 0, 0), s(1, 0, 200, 0)]);
         expect(g.colWidth).toBe(393);

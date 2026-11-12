@@ -4994,24 +4994,19 @@ ${logs.join(`
       counts.set(Math.round(x), (counts.get(Math.round(x)) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
   };
-  var stepOf = (screens, track, pos) => {
-    let best = null;
+  var stepOf = (screens, track, cross, pos) => {
+    const steps = [];
     for (const a of screens)
-      for (const b of screens) {
-        const dt = track(b) - track(a);
-        if (dt <= 0)
-          continue;
-        const step = (pos(b) - pos(a)) / dt;
-        if (step > 0 && (best === null || step < best))
-          best = step;
-      }
-    return best === null ? null : Math.round(best);
+      for (const b of screens)
+        if (cross(a) === cross(b) && track(b) - track(a) === 1 && pos(b) > pos(a))
+          steps.push(pos(b) - pos(a));
+    return steps.length ? modeOf2(steps) : null;
   };
   function inferRepairGrid(screens) {
     const screenW = modeOf2(screens.map((s) => s.width));
     const screenH = modeOf2(screens.map((s) => s.height));
-    const colWidth = Math.max(screenW, stepOf(screens, (s) => s.col, (s) => s.x) ?? DEFAULT_COL);
-    const rowHeight = Math.max(screenH, stepOf(screens, (s) => s.row, (s) => s.y) ?? DEFAULT_ROW);
+    const colWidth = Math.max(screenW, stepOf(screens, (s) => s.col, (s) => s.row, (s) => s.x) ?? DEFAULT_COL);
+    const rowHeight = Math.max(screenH, stepOf(screens, (s) => s.row, (s) => s.col, (s) => s.y) ?? DEFAULT_ROW);
     const first = (track) => [...screens].sort((a, b) => track(a) - track(b))[0];
     const left = first((s) => s.col);
     const top = first((s) => s.row);
@@ -7320,7 +7315,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9b660006", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "9c2e40a1", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7328,7 +7323,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9b660006"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"9c2e40a1"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
