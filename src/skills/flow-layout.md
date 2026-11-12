@@ -78,6 +78,7 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 - Start the main path in the top-left cell. Put entry points (where the user arrives from) in the first column.
 - When a branch needs room, push the later columns right. Grow the board to fit. Don't squeeze a screen into a gap on the left.
 - After moving screens, close up any empty rows and columns the move leaves behind.
+- On a grouped board (`reroute_flow { spacing: "grouped" }`) there is no single grid: each group, nested ones included, has its own grid (same pitch, own origin), and ungrouped screens share the board grid. `col` and `row` are local to a screen's grid, so screens in different groups need not share rows or columns. `move_screen` moves within the grid (with `group` it moves into that group's grid), `insert_rows`/`insert_columns` take `groupId` and shift only that grid, `compact_board` compacts each grid. A screen off its grid's pitch is an `off-grid` lint error: fix with `move_screen`. `describe_board` shows one table per grid with its origin.
 
 ## Groups
 
@@ -85,12 +86,13 @@ Wrap related screens (a feature, a sub-flow such as "Passkeys" or "Device signin
 
 - `create_flow_group { name, screenIds | cells }` (defaults to the selection), `update_flow_group { groupId, name?, add?, remove?, parentId?, style? }`, `delete_flow_group { groupId }` (screens stay). `move_screen` and `duplicate_screen` take `group` to join or leave one; a duplicate joins its source's group.
 - Spacing and refit are automatic. By default spacing is uniform: one column pitch and one row pitch for the whole board, grown to fit the widest group boundary (title bar, 12 px line, 160 px padding), so every column shares one x and every row one y and all gaps are equal. `reroute_flow { spacing: "banded" }` switches to per-region extras instead (`"uniform"` switches back and clears them). Screens shift to make room, and every box refits when screens are added, moved or removed, then arrows reroute. Never hand-size or hand-move a box, never edit the gaps yourself.
+- Grouped spacing: groups stay where they are. A box that grows pushes neighbouring groups right or down (never up or left); a nested group moves with its parent. Convert with `reroute_flow { spacing: "grouped", dryRun: true }` first: it reports the grids and moves no screen. Adding a screen to a group keeps it in place (cell taken from its position); one that is off the pitch snaps and is reported in `snapped`. Grouped boards cannot go back to uniform or banded.
 - Never draw boxes by hand and never use `group_screens` for this (it breaks prototype Play). Screens stay top-level frames.
 - Arrow lines may cross a box stroke. A box and its title never cross screens, route text, badges, arrow labels or other boxes.
 - One level of nesting: a child group sits fully inside a parent (`parentId`). A child of a child is rejected.
 - A tool says the board background is missing (someone deleted it): run `repair_board` (dry run first). Never redraw the background by hand.
 - Old hand-drawn boxes and Section Heading instances: run `adopt_flow_groups` (dry run first) to turn them into real groups.
-- Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds, label-overlaps-label, lines-overlap, line-crosses-title). `describe_board` shows the group tree and flags empty or stale groups.
+- Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds, label-overlaps-label, lines-overlap, line-crosses-title, off-grid on grouped boards). `describe_board` shows the group tree and flags empty or stale groups.
 
 ## Back navigation, loops and states
 
