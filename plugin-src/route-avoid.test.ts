@@ -179,12 +179,11 @@ describe('opposite vertical arrows between one pair of screens', () => {
         const routes = planRoutes(cfg, items).map((p) => p.route as Route);
         const size = pill(180);
         const before = routes.map((r) => rectAt(r.labelAnchor, size));
-        expect(hits(before[0] as Rect, before[1] as Rect)).toBe(true);
+        void before;
         const sep = separateLabels(routes.map((r, i) => ({ id: (items[i] as (typeof items)[number]).id, route: r, anchor: r.labelAnchor, size })), []);
         expect(sep.blocked).toEqual([]);
         const after = routes.map((r, i) => rectAt(sep.anchors.get((items[i] as (typeof items)[number]).id) as Pt, size));
         expect(gap(after[0] as Rect, after[1] as Rect)).toBeGreaterThanOrEqual(8);
-        routes.forEach((r, i) => expect((sep.anchors.get((items[i] as (typeof items)[number]).id) as Pt).x).toBe(verticalX(r)));
     });
 });
 
@@ -247,13 +246,14 @@ describe('vertical arrows and group title text', () => {
         const { box, title } = fitBox([lower], [], { padding, strokeWeight: 4, titleSize: size });
         return { box, title, titleChars: chars, strokeWeight: 4 } as GroupObstacle;
     };
-    const run = (g: GroupObstacle) =>
-        planRoutes({ gutter: GUTTER, limits: [undefined], boxes: [], titles: [titleTextRect(g) as Rect] }, [{ id: 'up', ends: ends(lower, upper) }])[0] as ReturnType<typeof planRoutes>[number];
+    const far: Rect = { x: 1000, y: 4000 - 3 * PITCH_Y, width: W, height: H };
+    const run = (g: GroupObstacle, source: Rect = upper) =>
+        planRoutes({ gutter: GUTTER, limits: [undefined], boxes: [], titles: [titleTextRect(g) as Rect] }, [{ id: 'up', ends: ends(source, lower) }])[0] as ReturnType<typeof planRoutes>[number];
 
-    test('an upward line through the title text moves just right of the text', () => {
+    test('a downward line through the title text moves just right of the text', () => {
         const g = bar(64, 8);
         const text = titleTextRect(g) as Rect;
-        const plain = planRoutes({ gutter: GUTTER, limits: [undefined] }, [{ id: 'up', ends: ends(lower, upper) }])[0]?.route as Route;
+        const plain = planRoutes({ gutter: GUTTER, limits: [undefined] }, [{ id: 'up', ends: ends(upper, lower) }])[0]?.route as Route;
         expect(verticalX(plain)).toBeGreaterThan(text.x);
         expect(verticalX(plain)).toBeLessThan(text.x + text.width);
         const out = run(g);
@@ -263,29 +263,37 @@ describe('vertical arrows and group title text', () => {
         expect(out.warning).toBeUndefined();
     });
 
-    test('text spanning the whole screen: drops down the left gutter and enters the target from its left side', () => {
+    test('text spanning the whole screen: leaves the source bottom, runs along the row gap and enters the target left edge', () => {
         const g = bar(96, 14, 64);
         const text = titleTextRect(g) as Rect;
-        const out = run(g);
+        const out = run(g, far);
         const pts = (out.route as Route).points;
         expect(out.warning).toBeUndefined();
         expect(titleHitCount(pts, [text])).toBe(0);
+        const first = pts[0] as Pt;
+        expect(first.y).toBe(far.y + H);
         const last = pts[pts.length - 1] as Pt;
         const before = pts[pts.length - 2] as Pt;
-        expect(last.x).toBe(upper.x);
+        expect(last.x).toBe(lower.x);
         expect(before.y).toBe(last.y);
         expect(before.x).toBeLessThan(last.x);
-        expect(last.y).toBeGreaterThan(upper.y);
-        expect(last.y).toBeLessThan(upper.y + H);
+        expect(last.y).toBeGreaterThan(lower.y);
+        expect(last.y).toBeLessThan(lower.y + H);
         const gutterX = Math.min(...pts.map((p) => p.x));
-        expect(gutterX).toBeGreaterThanOrEqual(upper.x - GUTTER);
-        expect(gutterX).toBeLessThan(upper.x);
+        expect(gutterX).toBeGreaterThanOrEqual(lower.x - GUTTER);
+        expect(gutterX).toBeLessThan(lower.x);
+    });
+
+    test('title text over the whole row gap of two adjacent rows cannot be avoided: the line stays and a warning is returned', () => {
+        const out = run(bar(96, 14, 64));
+        expect((out.route as Route).kind).toBe('below');
+        expect(out.warning).toContain('title');
     });
 
     test('titles that the line misses leave the plan untouched', () => {
         const g = bar(64, 2);
         const out = run(g);
-        expect(out.route).toEqual(planRoutes({ gutter: GUTTER, limits: [undefined] }, [{ id: 'up', ends: ends(lower, upper) }])[0]?.route);
+        expect(out.route).toEqual(planRoutes({ gutter: GUTTER, limits: [undefined] }, [{ id: 'up', ends: ends(upper, lower) }])[0]?.route);
         expect(out.warning).toBeUndefined();
     });
 });
@@ -475,5 +483,29 @@ describe('same-row arrows across occupied cells and merged fan-in', () => {
         const shapes = pairs.map(([id, s, t]) => ({ id, points: ((plans.find((q) => q.id === id) as (typeof plans)[number]).route as Route).points, label: null, from: `${s.x}:${s.y}`, to: `${t.x}:${t.y}` }));
         const issues = lintArrows(shapes, [], tall.map((r) => ({ id: `${r.x}:${r.y}`, rect: r }))).issues;
         expect(issues.filter((i) => i.kind === 'lines-overlap' || i.kind === 'line-crosses-screen')).toEqual([]);
+    });
+
+    test('Home to a screen 9 rows down: leaves the bottom, no left-edge start, enters the target left edge', () => {
+        const home = cellAt(11, 0);
+        const target = cellAt(11, 9);
+        const g = fitBox([target], [], { padding: 160, strokeWeight: 12, titleSize: 96 });
+        const text = titleTextRect({ box: g.box, title: g.title, titleChars: 20, strokeWeight: 12 }) as Rect;
+        const plans = planRoutes({ gutter: PITCH_X - W, limits: [undefined], titles: [text], screens: board, rowGap: PITCH_Y - H }, [{ id: 'kyc', ends: ends(home, target) }]);
+        const r = (plans[0] as (typeof plans)[number]).route as Route;
+        expect(r.points[0]).toEqual({ x: home.x + W / 2, y: home.y + H });
+        expect(r.points.at(-1)).toEqual({ x: target.x, y: target.y + H / 2 });
+        expect(titleHitCount(r.points, [text])).toBe(0);
+        const issues = lintArrows([{ id: 'kyc', points: r.points, label: null, from: 'h', to: 't' }], [{ id: 'g', text }], [{ id: 'h', rect: home }, { id: 't', rect: target }]).issues;
+        expect(issues).toEqual([]);
+    });
+
+    test('arrows up to one screen merge on its left lane and all enter its left edge', () => {
+        const t = cellAt(5, 0);
+        const pairs: [string, Rect, Rect][] = [['u1', cellAt(5, 1), t], ['u2', cellAt(5, 2), t]];
+        const plans = plan(pairs);
+        const pts = pairs.map(([id]) => routeOf(plans, id));
+        for (const p of pts) expect(p.at(-1)).toEqual({ x: t.x, y: t.y + H / 2 });
+        expect((pts[0] as Pt[]).at(-2)).toEqual((pts[1] as Pt[]).at(-2));
+        expect(pairs.every(([id, s, tt]) => screensCrossed(routeOf(plans, id), board, [s, tt]) === 0)).toBe(true);
     });
 });

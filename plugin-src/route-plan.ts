@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
 import { boxEdges, crowdedRunLength, laneConflicts, screensCrossed, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaLeftGutter, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
+import { EDGE_MARGIN, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaGap, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -128,7 +128,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         if (!r.ok || r.kind === 'straight' || fans.has(it.id)) return null;
         return (lane: number) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
     });
-    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
     separateLines(final, builders, titles, edges);
@@ -136,7 +136,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
         const r = final[i] as Routed;
         if (!r.ok) return { id: it.id, route: null, error: r.error };
         const warning = warnings.get(i);
-        return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width }, error: null, ...(warning ? { warning } : {}) };
+        return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width, bottomEdge: it.ends.source.y + it.ends.source.height }, error: null, ...(warning ? { warning } : {}) };
     });
 }
 
@@ -168,7 +168,7 @@ function shiftOffTitles(
         const leg = verticalLeg(r);
         if (!leg || !r.ok) return;
         if (!titles.some((t) => crosses(leg.x, leg.y0, leg.y1, t))) return;
-        const { source, target } = (items[i] as (typeof items)[number]).ends;
+        const { source, target, trigger } = (items[i] as (typeof items)[number]).ends;
         const lo = Math.max(source.x, target.x) + EDGE_MARGIN;
         const hi = Math.min(source.x + source.width, target.x + target.width) - EDGE_MARGIN;
         const free = (x: number) =>
@@ -178,13 +178,13 @@ function shiftOffTitles(
             });
         const cands = titles.flatMap((t) => [t.x - TITLE_MARGIN, t.x + t.width + TITLE_MARGIN]).filter(free);
         if (!cands.length) {
-            // No x inside both screens works: drop down the gutter left of the columns and enter the target from its side.
+            // No x inside both screens works: leave the source's bottom, run along the row gap into the left gutter and enter the target's left edge.
             for (let k = 0; k <= MAX_NUDGE; k++) {
                 const dx = k === 0 ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
-                const side = routeViaLeftGutter(source, target, gutter, 0, dx);
+                const side = routeViaGap(source, target, trigger, gutter, 0, { dx });
                 if (side.ok && titleHitCount(side.points, titles) === 0 && !laneConflicts(side.points, edges)) {
                     routes[i] = side;
-                    builders[i] = (lane) => routeViaLeftGutter(source, target, gutter, lane, dx);
+                    builders[i] = (lane) => routeViaGap(source, target, trigger, gutter, lane, { dx });
                     return;
                 }
             }
@@ -367,12 +367,14 @@ function joinTargets(
     titles: readonly Rect[],
     edges: readonly Edge[],
     builders: (((lane: number) => Routed) | null)[],
+    gutter: number,
 ): void {
     const groups = new Map<string, number[]>();
     items.forEach((it, i) => {
         const r = routes[i] as Routed;
         const { source, target, exit } = it.ends;
-        if (!r.ok || exit === 'bottom' || relation(source, target) !== 'right') return;
+        const rel = relation(source, target);
+        if (!r.ok || exit === 'bottom' || (rel !== 'right' && rel !== 'above' && rel !== 'left')) return;
         const key = `${target.x}:${target.y}`;
         groups.set(key, [...(groups.get(key) ?? []), i]);
     });
@@ -409,9 +411,10 @@ function joinTargets(
                     for (const [j, o] of trial) if (j !== i) against(o, { v: trunkX, h: ey });
                     return c;
                 };
-                const plain = routeJoin(source, target, trigger, trunkX, null);
+                const around = relation(source, target) !== 'right';
+                const plain = around ? routeViaGap(source, target, trigger, gutter, 0, { laneX: trunkX, shared: true, ...(relation(source, target) === 'left' ? { kind: 'backwards' as const, backwards: true } : {}) }) : routeJoin(source, target, trigger, trunkX, null);
                 let pick: { route: Routed; c: number } = { route: plain, c: cost(plain.points) };
-                if (pick.c >= SCREEN_COST) {
+                if (pick.c >= SCREEN_COST && !around) {
                     for (let lane = 0; lane <= 4; lane++) {
                         for (const y of bandsFor(target, rowGap)) {
                             const cand = routeJoin(source, target, trigger, trunkX, y, lane);

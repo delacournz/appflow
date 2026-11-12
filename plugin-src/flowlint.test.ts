@@ -63,10 +63,9 @@ describe('classifyArrow', () => {
         expect(classifyArrow([{ x: 300, y: 0 }, { x: 0, y: 0 }])).toEqual({ heading: 'left', issues: ['points-left'] });
     });
 
-    test('a path that runs left before turning is flagged even when the head points down', () => {
+    test('a path that runs left out of the source side before turning is flagged even when the head points down', () => {
         expect(
             classifyArrow([
-                { x: 1000, y: 0 },
                 { x: 1000, y: 100 },
                 { x: 0, y: 100 },
                 { x: 0, y: 300 },
@@ -79,20 +78,25 @@ describe('classifyArrow', () => {
     });
 });
 
-describe('classifyArrow side-entry hop', () => {
-    const side = [{ x: 1000, y: 3000 }, { x: 800, y: 3000 }, { x: 800, y: 9000 }, { x: 1000, y: 9400 - 400 }];
-    const ok = [{ x: 1000, y: 3000 }, { x: 870, y: 3000 }, { x: 870, y: 9000 }, { x: 1000, y: 9000 }];
+describe('classifyArrow bottom-exit detour', () => {
+    const detour = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }];
 
-    test('a short first hop out of the source then a right-heading entry is accepted', () => {
-        expect(classifyArrow(ok, 1, 187)).toEqual({ heading: 'right', issues: [] });
-        expect(classifyArrow(ok, 1, 0).issues).toEqual(['runs-left']);
+    test('drop, one run left inside the gap, vertical, head right: accepted', () => {
+        expect(classifyArrow(detour)).toEqual({ heading: 'right', issues: [] });
     });
 
-    test('a hop longer than allowed, a later left run, or a non-right head still fails', () => {
-        expect(classifyArrow(side, 1, 187).issues).toEqual(['runs-left']);
-        const late = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: -60, y: 100 }, { x: -60, y: 500 }, { x: 40, y: 500 }];
-        expect(classifyArrow(late, 1, 187).issues).toEqual(['runs-left']);
-        const down = [{ x: 100, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 300 }];
-        expect(classifyArrow(down, 1, 187).issues).toEqual(['runs-left']);
+    test('a head down onto a top edge is accepted too', () => {
+        const top = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }, { x: 1000, y: 9200 }];
+        expect(classifyArrow(top)).toEqual({ heading: 'down', issues: [] });
+        const clean = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }];
+        expect(classifyArrow(clean)).toEqual({ heading: 'down', issues: [] });
+    });
+
+    test('a leftward run that does not follow a drop, a second one, or a head pointing left still fails', () => {
+        const late = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 200 }, { x: 40, y: 200 }, { x: 40, y: 500 }];
+        expect(classifyArrow(late).issues).toEqual(['runs-left']);
+        const fromSide = [{ x: 1000, y: 3000 }, { x: 800, y: 3000 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }];
+        expect(classifyArrow(fromSide).issues).toEqual(['runs-left']);
+        expect(classifyArrow([{ x: 300, y: 0 }, { x: 0, y: 0 }]).issues).toEqual(['points-left']);
     });
 });

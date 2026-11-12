@@ -3187,6 +3187,10 @@ ${logs.join(`
         return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
       case "line-crosses-title":
         return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
+      case "starts-wrong-side":
+        return `Arrow ${i.arrowId} starts on the ${i.side} edge of screen ${i.screenId}; arrows start on a screen's bottom or right edge`;
+      case "ends-wrong-side":
+        return `Arrow ${i.arrowId} ends on the ${i.side} edge of screen ${i.screenId}; arrows end on a screen's left or top edge`;
       case "line-crosses-screen":
         return `Arrow ${i.arrowId} runs through screen ${i.screenId}, which is neither its source nor its target`;
     }
@@ -3214,6 +3218,22 @@ ${logs.join(`
     return out;
   }
   var segHitsRect = (s, r) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
+  var SIDE_TOLERANCE = 2;
+  function edgeSide(p, r, sides) {
+    const inX = p.x >= r.x - SIDE_TOLERANCE && p.x <= r.x + r.width + SIDE_TOLERANCE;
+    const inY = p.y >= r.y - SIDE_TOLERANCE && p.y <= r.y + r.height + SIDE_TOLERANCE;
+    for (const side of sides) {
+      if (side === "left" && inY && Math.abs(p.x - r.x) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "right" && inY && Math.abs(p.x - (r.x + r.width)) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "top" && inX && Math.abs(p.y - r.y) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "bottom" && inX && Math.abs(p.y - (r.y + r.height)) <= SIDE_TOLERANCE)
+        return side;
+    }
+    return null;
+  }
   function mergedLines(a, b) {
     const out = [];
     const pa = a.points;
@@ -3262,6 +3282,20 @@ ${logs.join(`
       for (const t of titles) {
         if (segs[i].some((s) => segHitsRect(s, t.text)))
           raw.push({ kind: "line-crosses-title", arrowId: a.id, groupId: t.id });
+      }
+      const first = a.points[0];
+      const last = a.points[a.points.length - 1];
+      const from = screens.find((sc) => sc.id === a.from);
+      const to = screens.find((sc) => sc.id === a.to);
+      if (first && from) {
+        const side = edgeSide(first, from.rect, ["left", "top"]);
+        if (side === "left" || side === "top")
+          raw.push({ kind: "starts-wrong-side", arrowId: a.id, screenId: from.id, side });
+      }
+      if (last && to) {
+        const side = edgeSide(last, to.rect, ["right", "bottom"]);
+        if (side === "right" || side === "bottom")
+          raw.push({ kind: "ends-wrong-side", arrowId: a.id, screenId: to.id, side });
       }
       for (const sc of screens) {
         if (sc.id === a.from || sc.id === a.to)
@@ -3556,7 +3590,7 @@ ${logs.join(`
       return { x: v.x, y: v.y };
     });
   }
-  function classifyArrow(points, tolerance = 1, maxLeftHop = 0) {
+  function classifyArrow(points, tolerance = 1) {
     const a = points[points.length - 2];
     const b = points[points.length - 1];
     const dx = b.x - a.x;
@@ -3564,10 +3598,12 @@ ${logs.join(`
     const heading = Math.abs(dx) > Math.abs(dy) ? dx > 0 ? "right" : "left" : dy > 0 ? "down" : "up";
     const issues = [];
     const leftward = points.slice(1).flatMap((p, i) => p.x - points[i].x < -tolerance ? [i] : []);
-    const firstHopOnly = heading === "right" && leftward.length === 1 && leftward[0] === 0 && points[0].x - points[1].x <= maxLeftHop + tolerance;
+    const p0 = points[0];
+    const p1 = points[1];
+    const gapRun = leftward.length === 1 && leftward[0] === 1 && Math.abs(p1.x - p0.x) <= tolerance && p1.y - p0.y > tolerance && (heading === "right" || heading === "down");
     if (heading === "left" && dx < -tolerance)
       issues.push("points-left");
-    else if (leftward.length && !firstHopOnly)
+    else if (leftward.length && !gapRun)
       issues.push("runs-left");
     return { heading, issues };
   }
@@ -3589,7 +3625,7 @@ ${logs.join(`
       checked++;
       const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
       const abs = local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
-      const result = classifyArrow(abs, tolerance, maxLeftHop);
+      const result = classifyArrow(abs, tolerance);
       if (result.issues.length) {
         issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0], to: abs[abs.length - 1] });
       }
@@ -3816,26 +3852,22 @@ ${logs.join(`
         const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right2(source), right2(target)) - EDGE_MARGIN);
         return done("below", [{ x, y: bottom2(source) }, { x, y: target.y }]);
       }
-      case "above": {
-        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right2(source), right2(target)) - EDGE_MARGIN);
-        return done("above", [{ x, y: source.y }, { x, y: bottom2(target) }]);
-      }
-      case "left": {
-        const sx = source.x + ENTRY_OFFSET;
-        const tx = Math.max(target.x + EDGE_MARGIN, target.x + ENTRY_OFFSET - Math.max(0, lane) * LANE_STEP * 2);
-        const dropY = Math.max(bottom2(source), bottom2(target)) + BACKWARDS_DROP + lane * LANE_STEP;
-        return done("backwards", [{ x: sx, y: bottom2(source) }, { x: sx, y: dropY }, { x: tx, y: dropY }, { x: tx, y: bottom2(target) }], true);
-      }
+      case "above":
+        return routeViaGap(source, target, trigger, gutter, lane, { kind: "around" });
+      case "left":
+        return routeViaGap(source, target, trigger, gutter, lane, { kind: "backwards", backwards: true });
     }
   }
-  function routeViaLeftGutter(source, target, gutter, lane, dx = 0) {
-    const left = Math.min(source.x, target.x);
-    const off = laneOffset(lane);
-    const x = left - gutter / 2 - lane * LANE_STEP + dx;
-    const sy = clamp(midY(source) + off, source.y + EDGE_MARGIN, bottom2(source) - EDGE_MARGIN);
-    const ey = clamp(midY(target) + off, target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
-    const r = done("gutter", [{ x: source.x, y: sy }, { x, y: sy }, { x, y: ey }, { x: target.x, y: ey }]);
-    return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
+  function routeViaGap(source, target, trigger, gutter, lane, opts = {}) {
+    const start = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom2(source) };
+    const gapY = bottom2(source) + BACKWARDS_DROP + lane * LANE_STEP;
+    const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom2(target) - EDGE_MARGIN);
+    const r = done(opts.kind ?? "around", [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);
+    const at = opts.shared ? r.points.findIndex((p) => p.x === x && p.y === gapY) : -1;
+    const first = r.points[0];
+    const second = r.points[1];
+    return { ...r, ...at >= 0 ? { trunkFrom: at } : {}, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
   }
   function routeViaBand(source, target, trigger, bandY, lane) {
     const start = trigger ? triggerDot(trigger, source) : { x: right2(source), y: midY(source) };
@@ -3864,7 +3896,9 @@ ${logs.join(`
     const b = route.points[1];
     if (a.y === b.y)
       return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
-    return { x: a.x, y: a.y + (b.y >= a.y ? 1 : -1) * (LABEL_GAP + size.height / 2) };
+    if (b.y >= a.y)
+      return { x: a.x, y: Math.max(a.y, route.bottomEdge ?? a.y) + LABEL_GAP + size.height / 2 };
+    return { x: a.x, y: a.y - LABEL_GAP - size.height / 2 };
   }
   function leadRoute(route, anchor) {
     const end = Math.max(1, route.trunkFrom ?? route.points.length - 1);
@@ -3981,7 +4015,7 @@ ${logs.join(`
         return null;
       return (lane) => routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
     });
-    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
     separateLines(final, builders, titles, edges);
@@ -3990,7 +4024,7 @@ ${logs.join(`
       if (!r.ok)
         return { id: it.id, route: null, error: r.error };
       const warning = warnings.get(i);
-      return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width }, error: null, ...warning ? { warning } : {} };
+      return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width, bottomEdge: it.ends.source.y + it.ends.source.height }, error: null, ...warning ? { warning } : {} };
     });
   }
   var overlap1d = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
@@ -4009,7 +4043,7 @@ ${logs.join(`
         return;
       if (!titles.some((t) => crosses(leg.x, leg.y0, leg.y1, t)))
         return;
-      const { source, target } = items[i].ends;
+      const { source, target, trigger } = items[i].ends;
       const lo = Math.max(source.x, target.x) + EDGE_MARGIN;
       const hi = Math.min(source.x + source.width, target.x + target.width) - EDGE_MARGIN;
       const free = (x) => x >= lo && x <= hi && !titles.some((t) => crosses(x, leg.y0, leg.y1, t)) && !routes.some((o, j) => {
@@ -4020,10 +4054,10 @@ ${logs.join(`
       if (!cands.length) {
         for (let k = 0;k <= MAX_NUDGE; k++) {
           const dx = k === 0 ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
-          const side = routeViaLeftGutter(source, target, gutter, 0, dx);
+          const side = routeViaGap(source, target, trigger, gutter, 0, { dx });
           if (side.ok && titleHitCount(side.points, titles) === 0 && !laneConflicts(side.points, edges)) {
             routes[i] = side;
-            builders[i] = (lane) => routeViaLeftGutter(source, target, gutter, lane, dx);
+            builders[i] = (lane) => routeViaGap(source, target, trigger, gutter, lane, { dx });
             return;
           }
         }
@@ -4179,12 +4213,13 @@ ${logs.join(`
       out.push(target.y + target.height + 24 + k * LANE_STEP);
     return out.filter((y) => y >= lo && y <= hi);
   };
-  function joinTargets(routes, items, screens, rowGap, titles, edges, builders) {
+  function joinTargets(routes, items, screens, rowGap, titles, edges, builders, gutter) {
     const groups = new Map;
     items.forEach((it, i) => {
       const r = routes[i];
       const { source, target, exit } = it.ends;
-      if (!r.ok || exit === "bottom" || relation(source, target) !== "right")
+      const rel = relation(source, target);
+      if (!r.ok || exit === "bottom" || rel !== "right" && rel !== "above" && rel !== "left")
         return;
       const key = `${target.x}:${target.y}`;
       groups.set(key, [...groups.get(key) ?? [], i]);
@@ -4229,9 +4264,10 @@ ${logs.join(`
                 against(o, { v: trunkX, h: ey });
             return c;
           };
-          const plain = routeJoin(source, target, trigger, trunkX, null);
+          const around = relation(source, target) !== "right";
+          const plain = around ? routeViaGap(source, target, trigger, gutter, 0, { laneX: trunkX, shared: true, ...relation(source, target) === "left" ? { kind: "backwards", backwards: true } : {} }) : routeJoin(source, target, trigger, trunkX, null);
           let pick = { route: plain, c: cost(plain.points) };
-          if (pick.c >= SCREEN_COST) {
+          if (pick.c >= SCREEN_COST && !around) {
             for (let lane = 0;lane <= 4; lane++) {
               for (const y of bandsFor(target, rowGap)) {
                 const cand = routeJoin(source, target, trigger, trunkX, y, lane);
@@ -7934,7 +7970,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "c1a9fb90", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "a27c606e", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -7942,7 +7978,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"c1a9fb90"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"a27c606e"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

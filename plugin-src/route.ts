@@ -3,7 +3,7 @@
 export type Pt = { x: number; y: number };
 export type Rect = { x: number; y: number; width: number; height: number };
 
-export type RouteKind = 'straight' | 'trigger' | 'gutter' | 'below' | 'above' | 'backwards' | 'elbow';
+export type RouteKind = 'straight' | 'trigger' | 'gutter' | 'below' | 'above' | 'backwards' | 'elbow' | 'around';
 
 /** Where an arrow leaves a source whose target is right of it: the side (through the gutter) or the bottom edge. */
 export type Exit = 'side' | 'bottom';
@@ -31,11 +31,12 @@ export type RouteInput = {
 };
 
 /**
- * `edge` is the x of the source screen's right edge (set by the planner), where the first segment leaves the screen.
+ * `edge` and `bottomEdge` are the source screen's right edge x and bottom edge y (set by the planner), where the first
+ * segment leaves the screen.
  * `trunkFrom` is the index of the first point of the part shared with other arrows into the same target (`routeJoin`);
  * labels never sit past it. Absent = nothing is shared.
  */
-export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean; edge?: number; trunkFrom?: number };
+export type Route = { ok: true; kind: RouteKind; points: Pt[]; labelAnchor: Pt; dot: Pt; backwards: boolean; edge?: number; bottomEdge?: number; trunkFrom?: number };
 export type RouteError = { ok: false; error: string };
 
 export const ENTRY_OFFSET = 340;
@@ -223,33 +224,33 @@ export function routeArrow(input: RouteInput): Route | RouteError {
             const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right(source), right(target)) - EDGE_MARGIN);
             return done('below', [{ x, y: bottom(source) }, { x, y: target.y }]);
         }
-        case 'above': {
-            const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right(source), right(target)) - EDGE_MARGIN);
-            return done('above', [{ x, y: source.y }, { x, y: bottom(target) }]);
-        }
-        case 'left': {
-            const sx = source.x + ENTRY_OFFSET;
-            const tx = Math.max(target.x + EDGE_MARGIN, target.x + ENTRY_OFFSET - Math.max(0, lane) * LANE_STEP * 2);
-            const dropY = Math.max(bottom(source), bottom(target)) + BACKWARDS_DROP + lane * LANE_STEP;
-            return done('backwards', [{ x: sx, y: bottom(source) }, { x: sx, y: dropY }, { x: tx, y: dropY }, { x: tx, y: bottom(target) }], true);
-        }
+        case 'above':
+            return routeViaGap(source, target, trigger, gutter, lane, { kind: 'around' });
+        case 'left':
+            return routeViaGap(source, target, trigger, gutter, lane, { kind: 'backwards', backwards: true });
     }
 }
 
+export type GapOptions = { kind?: RouteKind; backwards?: boolean; laneX?: number; dx?: number; shared?: boolean };
+
 /**
- * Fallback for a vertical arrow whose straight line would run through a group title's text: leaves the source's left
- * edge, drops down the gutter left of both columns (lane `lane` steps further left of its centre) and enters the target
- * from its left side, heading right. The only leftward stretch is the short hop from the source edge into the gutter.
- * `dx` shifts the drop sideways, `lane` also staggers the exit and entry heights so parallel fallbacks never share a line.
+ * Route for a target that is above, beside-left or far below in the same column, so a straight line would start on the
+ * source's top or end on the target's bottom. Leaves the source's BOTTOM edge (at the trigger's x, else the centre),
+ * drops into the row gap below the source, runs left along the gap into the gutter lane left of the target, runs up or
+ * down it to the target's entry height and enters the target's LEFT edge heading right. The run left stays inside the
+ * gap. `lane` moves the gap run down and the lane left one step each; `laneX` fixes the lane (a shared trunk, with
+ * `shared` marking where it begins); `dx` shifts it sideways.
  */
-export function routeViaLeftGutter(source: Rect, target: Rect, gutter: number, lane: number, dx = 0): Route {
-    const left = Math.min(source.x, target.x);
-    const off = laneOffset(lane);
-    const x = left - gutter / 2 - lane * LANE_STEP + dx;
-    const sy = clamp(midY(source) + off, source.y + EDGE_MARGIN, bottom(source) - EDGE_MARGIN);
-    const ey = clamp(midY(target) + off, target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
-    const r = done('gutter', [{ x: source.x, y: sy }, { x, y: sy }, { x, y: ey }, { x: target.x, y: ey }]);
-    return { ...r, labelAnchor: { x: (x + target.x) / 2, y: ey } };
+export function routeViaGap(source: Rect, target: Rect, trigger: Rect | null, gutter: number, lane: number, opts: GapOptions = {}): Route {
+    const start: Pt = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom(source) };
+    const gapY = bottom(source) + BACKWARDS_DROP + lane * LANE_STEP;
+    const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+    const r = done(opts.kind ?? 'around', [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);
+    const at = opts.shared ? r.points.findIndex((p) => p.x === x && p.y === gapY) : -1;
+    const first = r.points[0] as Pt;
+    const second = r.points[1] as Pt;
+    return { ...r, ...(at >= 0 ? { trunkFrom: at } : {}), labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
 }
 
 /**
@@ -301,7 +302,8 @@ export function startLabelAnchor(route: Route, size: { width: number; height: nu
     const a = route.points[0] as Pt;
     const b = route.points[1] as Pt;
     if (a.y === b.y) return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
-    return { x: a.x, y: a.y + (b.y >= a.y ? 1 : -1) * (LABEL_GAP + size.height / 2) };
+    if (b.y >= a.y) return { x: a.x, y: Math.max(a.y, route.bottomEdge ?? a.y) + LABEL_GAP + size.height / 2 };
+    return { x: a.x, y: a.y - LABEL_GAP - size.height / 2 };
 }
 
 /** The part of a route a label may sit on: everything before the shared trunk (`trunkFrom`), anchored at `anchor`. */

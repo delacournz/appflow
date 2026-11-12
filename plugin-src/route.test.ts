@@ -107,40 +107,75 @@ describe('routeArrow', () => {
         expect(b.points).toEqual(a.points);
     });
 
-    test('5: directly above goes from the top edge at x+340 up to the bottom edge', () => {
+    test('5: directly above leaves the source bottom, runs left along the row gap, up the left gutter, and enters the target left edge', () => {
         const s = screen(0, 1);
         const t = screen(0, 0);
         const r = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
-        expect(r.kind).toBe('above');
+        const gapY = s.y + H + 60;
+        const laneX = s.x - GUTTER / 2;
+        expect(r.kind).toBe('around');
         expect(r.points).toEqual([
-            { x: s.x + 340, y: s.y },
-            { x: s.x + 340, y: t.y + H },
+            { x: s.x + W / 2, y: s.y + H },
+            { x: s.x + W / 2, y: gapY },
+            { x: laneX, y: gapY },
+            { x: laneX, y: t.y + H / 2 },
+            { x: t.x, y: t.y + H / 2 },
         ]);
         expect(r.backwards).toBe(false);
     });
 
-    test('6: a target to the left routes below the lowest row, flags backwards, and enters the bottom edge', () => {
+    test('a trigger starts the drop at its dot, below the source bottom', () => {
+        const s = screen(0, 1);
+        const t = screen(0, 0);
+        const trigger: Rect = { x: s.x + 20, y: s.y + 700, width: 98, height: 40 };
+        const r = must(routeArrow({ source: s, target: t, trigger, gutter: GUTTER, lane: 0 }));
+        expect(r.points[0]).toEqual({ x: trigger.x + 49, y: trigger.y + 20 });
+        expect((r.points[1] as Pt).x).toBe(trigger.x + 49);
+        expect((r.points[1] as Pt).y).toBe(s.y + H + 60);
+    });
+
+    test('6: a target to the left leaves the bottom, runs left in the row gap, and enters the target left edge', () => {
         const s = screen(2, 0);
         const t = screen(0, 0);
         const r = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
-        const dropY = s.y + H + 60;
+        const gapY = s.y + H + 60;
+        const laneX = t.x - GUTTER / 2;
         expect(r.kind).toBe('backwards');
         expect(r.backwards).toBe(true);
         expect(r.points).toEqual([
-            { x: s.x + 340, y: s.y + H },
-            { x: s.x + 340, y: dropY },
-            { x: t.x + 340, y: dropY },
-            { x: t.x + 340, y: t.y + H },
+            { x: s.x + W / 2, y: s.y + H },
+            { x: s.x + W / 2, y: gapY },
+            { x: laneX, y: gapY },
+            { x: laneX, y: t.y + H / 2 },
+            { x: t.x, y: t.y + H / 2 },
         ]);
         expect(orthogonal(r.points)).toBe(true);
-        expect(r.labelAnchor).toEqual({ x: (s.x + t.x) / 2 + 340, y: dropY });
     });
 
-    test('6: the drop clears the lower of the two screens', () => {
+    test('lanes push the gap run further below and the gutter lane further left', () => {
         const s = screen(2, 0);
-        const t = screen(0, 1);
-        const r = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
-        expect((r.points[1] as Pt).y).toBe(t.y + H + 60);
+        const t = screen(0, 0);
+        const at = (lane: number) => must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane })).points;
+        expect((at(1)[1] as Pt).y - (at(0)[1] as Pt).y).toBe(24);
+        expect((at(0)[2] as Pt).x - (at(1)[2] as Pt).x).toBe(24);
+        expect(at(2).at(-1)).toEqual(at(0).at(-1));
+    });
+
+    test('every route starts on a bottom or right edge and ends on a left or top edge', () => {
+        const cases: [Rect, Rect][] = [
+            [screen(0, 0), screen(1, 0)],
+            [screen(0, 0), screen(0, 1)],
+            [screen(0, 1), screen(0, 0)],
+            [screen(2, 0), screen(0, 0)],
+            [screen(0, 0), screen(3, 2)],
+        ];
+        for (const [s, t] of cases) {
+            const r = must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane: 0 }));
+            const a = r.points[0] as Pt;
+            const b = r.points.at(-1) as Pt;
+            expect(a.y === s.y + H || a.x === s.x + W).toBe(true);
+            expect(b.x === t.x || b.y === t.y).toBe(true);
+        }
     });
 
     test('forward routes never move left and are orthogonal', () => {
@@ -150,7 +185,6 @@ describe('routeArrow', () => {
             [screen(0, 0), screen(1, 1), { x: screen(0, 0).x + 10, y: screen(0, 0).y + 600, width: 200, height: 50 }],
             [screen(1, 1), screen(2, 0), { x: screen(1, 1).x + 10, y: screen(1, 1).y + 600, width: 200, height: 50 }],
             [screen(0, 0), screen(0, 2), null],
-            [screen(0, 2), screen(0, 0), null],
         ];
         for (const [source, target, trigger] of cases) {
             for (const lane of [0, 1, 2]) {
@@ -253,15 +287,6 @@ describe('routeArrow', () => {
         const t = screen(0, 0);
         const y = (lane: number) => (must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane })).points[1] as Pt).y;
         expect(y(1) - y(0)).toBe(24);
-    });
-
-    test('lanes give each backwards arrow its own arrowhead on the target', () => {
-        const s = screen(2, 0);
-        const t = screen(0, 0);
-        const head = (lane: number) => must(routeArrow({ source: s, target: t, trigger: null, gutter: GUTTER, lane })).points.at(-1) as Pt;
-        expect(head(0)).toEqual({ x: t.x + 340, y: t.y + H });
-        expect(head(1)).toEqual({ x: t.x + 340 - 48, y: t.y + H });
-        expect(head(2)).toEqual({ x: t.x + 340 - 96, y: t.y + H });
     });
 
     test('overlapping screens are an error', () => {

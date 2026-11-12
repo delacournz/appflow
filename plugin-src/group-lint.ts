@@ -8,7 +8,9 @@ export type ArrowLayoutIssue =
     | { kind: 'label-overlaps-label'; arrowId: string; otherId: string }
     | { kind: 'lines-overlap'; arrowId: string; otherId: string; length: number }
     | { kind: 'line-crosses-title'; arrowId: string; groupId: string }
-    | { kind: 'line-crosses-screen'; arrowId: string; screenId: string };
+    | { kind: 'line-crosses-screen'; arrowId: string; screenId: string }
+    | { kind: 'starts-wrong-side'; arrowId: string; screenId: string; side: 'left' | 'top' }
+    | { kind: 'ends-wrong-side'; arrowId: string; screenId: string; side: 'right' | 'bottom' };
 
 /** A build badge on the board that no screen points at. */
 export type OrphanBadgeIssue = { kind: 'orphan-badge'; badgeId: string };
@@ -41,6 +43,10 @@ function describe(i: GroupIssue | NestingIssue | ArrowLayoutIssue): string {
             return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
         case 'line-crosses-title':
             return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
+        case 'starts-wrong-side':
+            return `Arrow ${i.arrowId} starts on the ${i.side} edge of screen ${i.screenId}; arrows start on a screen's bottom or right edge`;
+        case 'ends-wrong-side':
+            return `Arrow ${i.arrowId} ends on the ${i.side} edge of screen ${i.screenId}; arrows end on a screen's left or top edge`;
         case 'line-crosses-screen':
             return `Arrow ${i.arrowId} runs through screen ${i.screenId}, which is neither its source nor its target`;
     }
@@ -81,6 +87,21 @@ function segmentsOf(points: readonly Pt[]): Seg[] {
 
 const segHitsRect = (s: Seg, r: Rect): boolean =>
     s.axis === 'v' ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
+
+const SIDE_TOLERANCE = 2;
+
+/** Which of `sides` of `r` the point lies on (within `SIDE_TOLERANCE`, inside the edge's span), or null. */
+function edgeSide(p: Pt, r: Rect, sides: readonly ('left' | 'top' | 'right' | 'bottom')[]): 'left' | 'top' | 'right' | 'bottom' | null {
+    const inX = p.x >= r.x - SIDE_TOLERANCE && p.x <= r.x + r.width + SIDE_TOLERANCE;
+    const inY = p.y >= r.y - SIDE_TOLERANCE && p.y <= r.y + r.height + SIDE_TOLERANCE;
+    for (const side of sides) {
+        if (side === 'left' && inY && Math.abs(p.x - r.x) <= SIDE_TOLERANCE) return side;
+        if (side === 'right' && inY && Math.abs(p.x - (r.x + r.width)) <= SIDE_TOLERANCE) return side;
+        if (side === 'top' && inX && Math.abs(p.y - r.y) <= SIDE_TOLERANCE) return side;
+        if (side === 'bottom' && inX && Math.abs(p.y - (r.y + r.height)) <= SIDE_TOLERANCE) return side;
+    }
+    return null;
+}
 
 /**
  * Lines two arrows deliberately share, which `lines-overlap` must not flag: for arrows into the same target, the merged
@@ -135,6 +156,18 @@ export function lintArrows(arrows: readonly ArrowShape[], titles: readonly Title
         }
         for (const t of titles) {
             if ((segs[i] as Seg[]).some((s) => segHitsRect(s, t.text))) raw.push({ kind: 'line-crosses-title', arrowId: a.id, groupId: t.id });
+        }
+        const first = a.points[0];
+        const last = a.points[a.points.length - 1];
+        const from = screens.find((sc) => sc.id === a.from);
+        const to = screens.find((sc) => sc.id === a.to);
+        if (first && from) {
+            const side = edgeSide(first, from.rect, ['left', 'top']);
+            if (side === 'left' || side === 'top') raw.push({ kind: 'starts-wrong-side', arrowId: a.id, screenId: from.id, side });
+        }
+        if (last && to) {
+            const side = edgeSide(last, to.rect, ['right', 'bottom']);
+            if (side === 'right' || side === 'bottom') raw.push({ kind: 'ends-wrong-side', arrowId: a.id, screenId: to.id, side });
         }
         for (const sc of screens) {
             if (sc.id === a.from || sc.id === a.to) continue;
