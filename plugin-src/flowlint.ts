@@ -48,16 +48,23 @@ export function orderPath(vertices: readonly Vertex[], segments: readonly Segmen
     });
 }
 
-/** Where the arrowhead points, and whether any part of the path travels left. */
-export function classifyArrow(points: readonly Pt[], tolerance = 1): { heading: Heading; issues: ArrowIssue[] } {
+/**
+ * Where the arrowhead points, and whether any part of the path travels left.
+ * `maxLeftHop` (default 0 = none) allows the side-entry fallback of a vertical arrow whose straight line would cross a
+ * group title (`routeViaLeftGutter`): the head points right and the ONLY leftward segment is the first one, leaving
+ * the source, no longer than `maxLeftHop` (half a column gutter).
+ */
+export function classifyArrow(points: readonly Pt[], tolerance = 1, maxLeftHop = 0): { heading: Heading; issues: ArrowIssue[] } {
     const a = points[points.length - 2] as Pt;
     const b = points[points.length - 1] as Pt;
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const heading: Heading = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up';
     const issues: ArrowIssue[] = [];
+    const leftward = points.slice(1).flatMap((p, i) => (p.x - (points[i] as Pt).x < -tolerance ? [i] : []));
+    const firstHopOnly = heading === 'right' && leftward.length === 1 && leftward[0] === 0 && (points[0] as Pt).x - (points[1] as Pt).x <= maxLeftHop + tolerance;
     if (heading === 'left' && dx < -tolerance) issues.push('points-left');
-    else if (points.slice(1).some((p, i) => p.x - (points[i] as Pt).x < -tolerance)) issues.push('runs-left');
+    else if (leftward.length && !firstHopOnly) issues.push('runs-left');
     return { heading, issues };
 }
 
@@ -68,6 +75,8 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
     const tolerance = num(args, 'tolerance') ?? 1;
     const issues: JsonObject[] = [];
     let checked = 0;
+    const boardMetas = ('children' in root ? [root, ...root.children] : [root]).flatMap((n) => readMeta(n, BOARD_KEY, parseBoardMeta) ?? []);
+    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => (m.colWidth - m.screenW) / 2));
     for (const n of walk(root, 100_000)) {
         if (n.type !== 'VECTOR' || !isScene(n)) continue;
         const net = n.vectorNetwork;
@@ -76,7 +85,7 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
         checked++;
         const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
         const abs = local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
-        const result = classifyArrow(abs, tolerance);
+        const result = classifyArrow(abs, tolerance, maxLeftHop);
         if (result.issues.length) {
             issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0] as Pt, to: abs[abs.length - 1] as Pt });
         }

@@ -353,4 +353,24 @@ describe('arrow lanes on a uniform board', () => {
         const end = home.points[home.points.length - 1] as Pt;
         expect(end.x).toBe(target.x);
     });
+
+    test('side-exit drops from different sources in one column get distinct gutter lanes, the deeper target outermost', () => {
+        const cellAt = (col: number, row: number): Rect => ({ x: 164 + col * PITCH_X, y: 2174 + row * PITCH_Y, width: W, height: H });
+        const buttonOf = (s: Rect): Rect => ({ x: s.x + 20, y: s.y + 617, width: 353, height: 56 });
+        const a = cellAt(1, 0);
+        const b = cellAt(1, 1);
+        const mk = (id: string, s: Rect, t: Rect) => ({ id, ends: { ...ends(s, t), trigger: buttonOf(s) } });
+        const its = [mk('A', a, cellAt(2, 4)), mk('A2', a, cellAt(2, 1)), mk('B', b, cellAt(2, 3)), mk('B2', b, cellAt(2, 2))];
+        const plans = planRoutes({ gutter: PITCH_X - W, limits: its.map(() => undefined) }, its);
+        const pts = (id: string) => ((plans.find((p) => p.id === id) as (typeof plans)[number]).route as Route).points;
+        const dropX = (id: string) => (pts(id)[1] as Pt).x;
+        const xs = [...new Set(['A', 'A2', 'B', 'B2'].map(dropX))];
+        expect(xs.length).toBe(4);
+        for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) expect(Math.abs((xs[i] as number) - (xs[j] as number))).toBeGreaterThanOrEqual(24);
+        expect(dropX('A')).toBeGreaterThan(dropX('B'));
+        const cross = lint(plans).filter((i) => i.kind === 'lines-overlap' && i.arrowId[0] !== (i as { otherId: string }).otherId[0]);
+        expect(cross).toEqual([]);
+        const first = planRoutes({ gutter: PITCH_X - W, limits: [undefined, undefined] }, [mk('A', a, cellAt(2, 4)), mk('B', b, cellAt(2, 3))]);
+        expect(lint(first).filter((i) => i.kind === 'lines-overlap')).toEqual([]);
+    });
 });
