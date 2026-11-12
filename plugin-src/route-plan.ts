@@ -359,7 +359,8 @@ const bandsFor = (target: Rect, rowGap: number): number[] => {
  * target's trunk sits nearest the column and the trunks of higher targets stack further out without crossing it. Merged routes have no lane builder: they stay put and
  * other arrows move around them. Replaces routes of arrows entering a target together with at least one other.
  */
-function joinTargets(
+function joinPass(
+    order: 'lower' | 'upper',
     routes: Routed[],
     items: { id: string; ends: Endpoints }[],
     screens: readonly Rect[],
@@ -368,7 +369,7 @@ function joinTargets(
     edges: readonly Edge[],
     builders: (((lane: number) => Routed) | null)[],
     gutter: number,
-): void {
+): { total: number; members: number[] } {
     const groups = new Map<string, number[]>();
     items.forEach((it, i) => {
         const r = routes[i] as Routed;
@@ -385,7 +386,9 @@ function joinTargets(
     const joined = [...groups.values()].filter((g) => g.length >= 2);
     const pending = new Set(joined.flat());
     const lowerFirst = (g: number[]) => (items[g[0] as number] as (typeof items)[number]).ends.target.y;
-    for (const idx of [...joined].sort((p, q) => lowerFirst(q) - lowerFirst(p))) {
+    let grand = 0;
+    const done: number[] = [];
+    for (const idx of [...joined].sort((p, q) => (order === 'lower' ? lowerFirst(q) - lowerFirst(p) : lowerFirst(p) - lowerFirst(q)))) {
         const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
         const members = new Set(idx);
         for (const i of idx) pending.delete(i);
@@ -414,6 +417,13 @@ function joinTargets(
                 const around = relation(source, target) !== 'right';
                 const plain = around ? routeViaGap(source, target, trigger, gutter, 0, { laneX: trunkX, shared: true, ...(relation(source, target) === 'left' ? { kind: 'backwards' as const, backwards: true } : {}) }) : routeJoin(source, target, trigger, trunkX, null);
                 let pick: { route: Routed; c: number } = { route: plain, c: cost(plain.points) };
+                if (pick.c >= 1 && around) {
+                    for (let lane = 1; lane <= 4 && pick.c >= 1; lane++) {
+                        const cand = routeViaGap(source, target, trigger, gutter, lane, { laneX: trunkX, shared: true, ...(relation(source, target) === 'left' ? { kind: 'backwards' as const, backwards: true } : {}) });
+                        const c = cost(cand.points);
+                        if (c < pick.c) pick = { route: cand, c };
+                    }
+                }
                 if (pick.c >= SCREEN_COST && !around) {
                     for (let lane = 0; lane <= 4; lane++) {
                         for (const y of bandsFor(target, rowGap)) {
@@ -431,9 +441,37 @@ function joinTargets(
             if (total < 1) break;
         }
         const chosen = best as { total: number; chosen: Routed[] };
+        grand += chosen.total;
         ordered.forEach((i, n) => {
             routes[i] = chosen.chosen[n] as Routed;
-            builders[i] = null;
+            done.push(i);
         });
+    }
+    return { total: grand, members: done };
+}
+
+/**
+ * Runs `joinPass` with the lower targets first (their trunks nearest the column) and with the higher targets first, on
+ * copies, and keeps the cheaper outcome, so groups whose trunks would collide in one column settle whichever way leaves
+ * no shared line. Merged routes get no lane builder. Mutates `routes` and `builders`.
+ */
+function joinTargets(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    screens: readonly Rect[],
+    rowGap: number,
+    titles: readonly Rect[],
+    edges: readonly Edge[],
+    builders: (((lane: number) => Routed) | null)[],
+    gutter: number,
+): void {
+    const lower = routes.slice();
+    const upper = routes.slice();
+    const a = joinPass('lower', lower, items, screens, rowGap, titles, edges, builders, gutter);
+    const b = joinPass('upper', upper, items, screens, rowGap, titles, edges, builders, gutter);
+    const best = b.total < a.total ? { routes: upper, ...b } : { routes: lower, ...a };
+    for (const i of best.members) {
+        routes[i] = best.routes[i] as Routed;
+        builders[i] = null;
     }
 }
