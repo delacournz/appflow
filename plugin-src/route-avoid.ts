@@ -176,13 +176,17 @@ function runsOf(points: readonly Pt[]): Run[] {
 
 /**
  * Total length two routes share on one line (same axis, same coordinate), the quantity `lines-overlap` measures.
- * `ignore` leaves out the lines of a deliberately merged trunk (`v`: its x) and final run (`h`: its y).
+ * `ignore` leaves out the lines of a deliberately merged trunk (`v`: its x) and final run (`h`: its y). Arrows that
+ * start on the same point share their first horizontal stub on purpose, which is never counted.
  */
 export function sharedRunLength(a: readonly Pt[], b: readonly Pt[], ignore: { v?: number; h?: number } = {}): number {
     const rb = runsOf(b);
     let total = 0;
+    const a0 = a[0];
+    const sameStart = !!a0 && !!b[0] && a0.x === b[0].x && a0.y === b[0].y;
     for (const s of runsOf(a)) {
         if (s.at === (s.axis === 'v' ? ignore.v : ignore.h)) continue;
+        if (sameStart && s.axis === 'h' && s.at === (a0 as Pt).y) continue;
         for (const t of rb) if (s.axis === t.axis && s.at === t.at) total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
     }
     return total;

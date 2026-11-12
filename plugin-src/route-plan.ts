@@ -355,7 +355,8 @@ const bandsFor = (target: Rect, rowGap: number): number[] => {
  * of the target, along it to the entry height, and into the target on a final run they all share, so heads coincide.
  * A branch whose straight run to the trunk would cross a screen leaves through its source's gutter into a row-gap band
  * instead. The trunk moves out lane by lane until the whole group is clear of screens, titles, strokes and other lines
- * (the shared trunk and final run themselves are deliberate). Merged routes have no lane builder: they stay put and
+ * (the shared trunk and final run themselves are deliberate). Groups are handled lowest target first, so the lower
+ * target's trunk sits nearest the column and the trunks of higher targets stack further out without crossing it. Merged routes have no lane builder: they stay put and
  * other arrows move around them. Replaces routes of arrows entering a target together with at least one other.
  */
 function joinTargets(
@@ -379,10 +380,13 @@ function joinTargets(
         const { source, trigger } = (items[i] as (typeof items)[number]).ends;
         return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
     };
-    for (const idx of groups.values()) {
-        if (idx.length < 2) continue;
+    const joined = [...groups.values()].filter((g) => g.length >= 2);
+    const pending = new Set(joined.flat());
+    const lowerFirst = (g: number[]) => (items[g[0] as number] as (typeof items)[number]).ends.target.y;
+    for (const idx of [...joined].sort((p, q) => lowerFirst(q) - lowerFirst(p))) {
         const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
         const members = new Set(idx);
+        for (const i of idx) pending.delete(i);
         const target = (items[idx[0] as number] as (typeof items)[number]).ends.target;
         const ey = target.y + target.height / 2;
         let best: { total: number; chosen: Routed[] } | null = null;
@@ -400,7 +404,7 @@ function joinTargets(
                         else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0) c += 0.5;
                     };
                     routes.forEach((o, j) => {
-                        if (j !== i && !members.has(j)) against(o, {});
+                        if (j !== i && !members.has(j) && !pending.has(j)) against(o, {});
                     });
                     for (const [j, o] of trial) if (j !== i) against(o, { v: trunkX, h: ey });
                     return c;
