@@ -1,12 +1,12 @@
 /** The appflow MCP server: tools, skill resources and prompts, built on the MCP TypeScript SDK. The transport lives in server.ts. */
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
 import pkg from '../package.json' with { type: 'json' };
 import flowLayoutSkill from './skills/flow-layout.md' with { type: 'text' };
 import syncFromCodeSkill from './skills/sync-from-code.md' with { type: 'text' };
 import verifyBuiltSkill from './skills/verify-built.md' with { type: 'text' };
-import { runTool, TOOLS, type ToolContext } from './tools';
+import { runTool, TOOLS, type ToolContext, type ToolDef } from './tools';
 
 const INSTRUCTIONS = [
     'Local Figma tools with the same names as the Figma MCP server, run through the "AppFlow" plugin in the Figma desktop app.',
@@ -67,12 +67,61 @@ function rulesPrompt(args: { clientLanguages?: string; clientFrameworks?: string
 }
 
 /** One appflow server instance. serveStdio calls this once per connection; tests connect it to an in-memory client. */
-export function createServer(ctx: ToolContext): McpServer {
-    const server = new McpServer({ name: 'appflow', version: pkg.version }, { capabilities: { tools: {}, prompts: {}, resources: {} }, instructions: INSTRUCTIONS });
+type Registered = { def: ToolDef; handle: RegisteredTool; schema: string };
+/** Each server's registered tools, so syncTools can update them in place. */
+const registries = new WeakMap<McpServer, Map<string, Registered>>();
 
-    for (const def of TOOLS) {
-        server.registerTool(def.name, { description: def.description, inputSchema: def.inputSchema }, (args) => runTool(def, args, ctx));
+const schemaKey = (def: ToolDef): string => JSON.stringify(z.toJSONSchema(def.inputSchema));
+
+/** The handler reads the current def from the registry, so a reload swaps the code without touching (and re-announcing) the tool. */
+function register(server: McpServer, reg: Map<string, Registered>, def: ToolDef, ctx: ToolContext): Registered {
+    const handle = server.registerTool(def.name, { description: def.description, inputSchema: def.inputSchema }, (args) => runTool(reg.get(def.name)?.def ?? def, args, ctx));
+    return { def, handle, schema: schemaKey(def) };
+}
+
+export type ToolChanges = { added: string[]; removed: string[]; updated: string[] };
+
+/**
+ * Brings a running server's tools in line with `defs` (a freshly imported tool list): registers new tools, removes gone ones
+ * and updates changed descriptions or schemas. Handlers always run the newest def. The SDK sends
+ * notifications/tools/list_changed only for real changes, so the client refetches the list without a reconnect.
+ */
+export function syncTools(server: McpServer, defs: readonly ToolDef[], ctx: ToolContext): ToolChanges {
+    const reg = registries.get(server);
+    if (!reg) throw new Error('syncTools: server was not made by createServer.');
+    const changes: ToolChanges = { added: [], removed: [], updated: [] };
+    const wanted = new Set(defs.map((d) => d.name));
+    for (const [name, r] of [...reg]) {
+        if (wanted.has(name)) continue;
+        r.handle.remove();
+        reg.delete(name);
+        changes.removed.push(name);
     }
+    for (const def of defs) {
+        const prev = reg.get(def.name);
+        if (!prev) {
+            reg.set(def.name, register(server, reg, def, ctx));
+            changes.added.push(def.name);
+            continue;
+        }
+        const schema = schemaKey(def);
+        const changed = prev.def.description !== def.description || prev.schema !== schema;
+        reg.set(def.name, { def, handle: prev.handle, schema });
+        if (changed) prev.handle.update({ description: def.description, paramsSchema: def.inputSchema });
+        if (changed) changes.updated.push(def.name);
+    }
+    return changes;
+}
+
+export function createServer(ctx: ToolContext, tools: readonly ToolDef[] = TOOLS): McpServer {
+    const server = new McpServer(
+        { name: 'appflow', version: pkg.version },
+        { capabilities: { tools: { listChanged: true }, prompts: {}, resources: {} }, instructions: INSTRUCTIONS },
+    );
+
+    const reg = new Map<string, Registered>();
+    for (const def of tools) reg.set(def.name, register(server, reg, def, ctx));
+    registries.set(server, reg);
 
     for (const skill of SKILLS) {
         server.registerResource(skill.name, skill.uri, { description: skill.description, mimeType: 'text/markdown' }, async (uri) => ({
