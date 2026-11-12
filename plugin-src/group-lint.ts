@@ -1,5 +1,6 @@
 import type { Pt, Rect } from './route';
 import type { PrototypeLintIssue } from './prototype-lint';
+import type { LabelStackIssue } from './arrow-labels';
 import { groupConflicts, validateNesting, type ConflictContent, type ConflictGroup, type GroupIssue, type NestingIssue } from './flow-group';
 
 /** Pure group checks for lint_flow_layout. No `figma` global. */
@@ -16,7 +17,7 @@ export type ArrowLayoutIssue =
 /** A build badge on the board that no screen points at. */
 export type OrphanBadgeIssue = { kind: 'orphan-badge'; badgeId: string };
 
-export type LayoutIssue = ((GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string }) | (OrphanBadgeIssue & { message: string }) | PrototypeLintIssue;
+export type LayoutIssue = ((GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string }) | (OrphanBadgeIssue & { message: string }) | (LabelStackIssue & { message: string }) | PrototypeLintIssue;
 
 export type GroupLint = { issues: LayoutIssue[]; counts: Record<string, number> };
 

@@ -2,6 +2,7 @@ import type { JsonObject } from '../shared/protocol';
 import { loadScreens } from './board-ops';
 import { boardScreens, collectBadges, collectScreens, listArrows, readMeta, rectOf, sceneById, type Board } from './flow';
 import { orphanBadges } from './badge-link';
+import { labelStackIssue, type LabelStackIssue } from './arrow-labels';
 import { SCREEN_KEY, parseScreenMeta } from './flowmeta';
 import type { Rect } from './route';
 import type { ConflictContent, ConflictGroup } from './flow-group';
@@ -107,6 +108,15 @@ function orphanBadgeIssues(board: Board): (OrphanBadgeIssue & { message: string 
     }));
 }
 
+/** `labels-under-lines`: the labels container paints below the arrows container. Any reroute restacks it. */
+function labelStackOf(board: Board): (LabelStackIssue & { message: string }) | null {
+    const parent = board.arrows.parent;
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    if (!parent || !('children' in parent) || !labels) return null;
+    const issue = labelStackIssue(parent.children.map((k) => k.id), board.arrows.id, labels.id);
+    return issue ? { ...issue, message: 'Arrow labels sit under their lines. Run reroute_flow to put the labels layer back on top.' } : null;
+}
+
 export async function boardLayoutLint(board: Board): Promise<{ boardId: string; issues: JsonObject[]; counts: Record<string, number> } | null> {
     const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
     const titles: TitleText[] = [];
@@ -119,6 +129,11 @@ export async function boardLayoutLint(board: Board): Promise<{ boardId: string; 
     const proto = await prototypeIssues(board);
     arrowPart.issues.push(...proto.issues);
     for (const [k, v] of Object.entries(proto.counts)) arrowPart.counts[k] = (arrowPart.counts[k] ?? 0) + v;
+    const stack = labelStackOf(board);
+    if (stack) {
+        arrowPart.issues.push(stack);
+        arrowPart.counts['labels-under-lines'] = 1;
+    }
     const orphans = orphanBadgeIssues(board);
     if (orphans.length) {
         arrowPart.issues.push(...orphans);
