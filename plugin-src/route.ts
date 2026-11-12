@@ -58,7 +58,7 @@ export function fanIndex(items: { id: string; group: string; targetY: number }[]
     }
     return out;
 }
-const EDGE_MARGIN = 8;
+export const EDGE_MARGIN = 8;
 const ROW_TOLERANCE = 2;
 
 /** Lane 0 is centred, then +24, -24, +48, -48 ... */
@@ -85,10 +85,10 @@ export function gutterKey(source: Rect, target: Rect): string {
     switch (relation(source, target)) {
         case 'right':
             return `h:${right(source)}`;
+        // Both directions between stacked screens share one corridor, so A to B and B to A never sit on the same lane.
         case 'below':
-            return `v:${source.x}:${bottom(source)}`;
         case 'above':
-            return `v:${source.x}:${source.y}`;
+            return `v:${Math.max(source.x, target.x)}`;
         case 'left':
             return `b:${Math.max(bottom(source), bottom(target))}`;
         case 'overlap':

@@ -1,5 +1,6 @@
 import type { JsonObject, JsonValue } from '../shared/protocol';
 import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigger, modeOf, type TriggerCandidate } from './adopt';
+import { boardMissingMessage } from './board-missing';
 import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
 import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
@@ -27,7 +28,7 @@ import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
 import { type Exit, type Pt, type Rect, type Route } from './route';
-import { clearLabel, labelObstacles, type GroupObstacle } from './route-avoid';
+import { clearLabel, labelObstacles, LABEL_PAD, separateLabels, titleTextRect, type GroupObstacle } from './route-avoid';
 import { widenedBetween } from './grid';
 import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
 
@@ -70,7 +71,7 @@ export function readMeta<T>(node: BaseNode, key: string, parse: (raw: string) =>
 
 export async function loadBoard(boardId: string): Promise<Board> {
     const node = await sceneById(boardId);
-    if (!node) throw new Error(`No board ${boardId}.`);
+    if (!node) throw new Error(boardMissingMessage(boardId));
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
     if (!meta) throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
     const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
@@ -110,7 +111,7 @@ async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
 
 /** Plans the board's arrows. `groups` are the board's group boxes and titles; without them the plan is the plain one. */
 function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = []): Plan[] {
-    return planRoutesPure({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...(g.strokeWeight ? { strokeWeight: g.strokeWeight } : {}) })) }, items);
+    return planRoutesPure({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...(g.strokeWeight ? { strokeWeight: g.strokeWeight } : {}) })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
 }
 
 type GroupObstacleLoader = (board: Board) => Promise<GroupObstacle[]>;
@@ -250,6 +251,25 @@ async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: 
     return placed.ok ? null : placed.blocked;
 }
 
+/**
+ * Board-wide label pass, run after the arrows are drawn so every label has its real size. Slides each label in
+ * `placed` (already in `stableArrowOrder`) along its own path until it clears the other labels, `fixed` ones
+ * included, and the group strokes and titles. Returns the ids it could not clear.
+ */
+async function separateBoardLabels(placed: { id: string; route: Route; label: FrameNode }[], fixed: readonly FrameNode[], groups: readonly GroupObstacle[]): Promise<string[]> {
+    const items = placed.map((p) => {
+        const r = rectOf(p.label);
+        return { id: p.id, route: p.route, anchor: { x: r.x + r.width / 2, y: r.y + r.height / 2 }, size: { width: r.width, height: r.height } };
+    });
+    const res = separateLabels(items, labelObstacles(groups), LABEL_PAD, fixed.map(rectOf));
+    for (const [i, p] of placed.entries()) {
+        const at = res.anchors.get(p.id);
+        const was = (items[i] as (typeof items)[number]).anchor;
+        if (at && (at.x !== was.x || at.y !== was.y)) centre(p.label, at);
+    }
+    return res.blocked;
+}
+
 export type ScreenNode = { frame: FrameNode; group: GroupNode | null };
 
 /**
@@ -362,6 +382,8 @@ export const connect: Handler = async (args) => {
         parts.vector.name = `Arrow · ${label}`;
     }
     const blocked = await applyRoute(parts, route, style, groups);
+    const fixedLabels = (await Promise.all(existing.filter((a) => a !== match).map((a) => partsOf(a.meta)))).flatMap((p) => (p ? [p.label] : []));
+    const crowded = (await separateBoardLabels([{ id: 'new', route, label: parts.label }], fixedLabels, groups)).length > 0;
 
     const meta: ArrowMeta = {
         v: 1,
@@ -402,7 +424,9 @@ export const connect: Handler = async (args) => {
         prototypeUpdated,
         backwards: route.backwards,
         updated: !!match,
-        ...(blocked ? { warnings: [`label overlaps a group box: ${blocked}`] } : {}),
+        ...(blocked || crowded || mine.warning
+            ? { warnings: [...(blocked ? [`label overlaps a group box: ${blocked}`] : []), ...(crowded ? ['label overlaps another arrow label and no spot on its path is clear'] : []), ...(mine.warning ? [mine.warning] : [])] }
+            : {}),
     });
 };
 
@@ -425,6 +449,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
     const warnings: JsonObject[] = [];
     let obstacleCount = 0;
     for (const board of boards) {
+        board.node.locked = true;
         const ordered = await orderedEntries(listArrows(board));
         for (const o of ordered) {
             if (!o.ends) deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
@@ -433,9 +458,16 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
         const groups = await obstaclesOf(board);
         obstacleCount += groups.length;
         const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
+        const drawn: { id: string; route: Route; label: FrameNode }[] = [];
+        const kept: FrameNode[] = [];
         for (const [i, l] of live.entries()) {
             const plan = plans[i] as Plan;
-            if (only && !only.has(l.entry.group.id)) continue;
+            if (only && !only.has(l.entry.group.id)) {
+                const keptParts = await partsOf(l.entry.meta);
+                if (keptParts) kept.push(keptParts.label);
+                continue;
+            }
+            if (plan.warning) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: plan.warning });
             if (l.ends.triggerMissing) warnings.push({ arrowGroupId: l.entry.group.id, warning: 'trigger node is gone; routed from the screen edge' });
             if (!plan.route) {
                 errors.push({ arrowGroupId: l.entry.group.id, error: plan.error });
@@ -449,7 +481,12 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
             const blocked = await applyRoute(parts, plan.route, board.meta.arrowStyle, groups);
             if (blocked) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
             rerouted.push(l.entry.group.id);
+            drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label });
             if (plan.route.backwards) backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
+        }
+        for (const id of await separateBoardLabels(drawn, kept, groups)) {
+            const meta = live.find((l) => l.entry.group.id === id)?.entry.meta;
+            warnings.push({ arrowGroupId: id, label: meta?.label ?? '', warning: 'label overlaps another arrow label and no spot on its path is clear' });
         }
         raiseArrows(board);
     }
@@ -713,6 +750,7 @@ export const adoptBoard: Handler = async (args) => {
 
     if (!dryRun) {
         boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+        boardNode.locked = true;
         for (const s of screenRects) {
             const cell = cellOfRect(s.rect, boardMeta);
             const assigned = assignScreenTexts(s.rect, texts);

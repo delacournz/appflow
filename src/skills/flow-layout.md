@@ -80,12 +80,12 @@ Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows gr
 Wrap related screens (a feature, a sub-flow such as "Passkeys" or "Device signing") in a labelled box so the board reads when zoomed out. Group when 2+ screens form a named unit; do not box every screen.
 
 - `create_flow_group { name, screenIds | cells }` (defaults to the selection), `update_flow_group { groupId, name?, add?, remove?, parentId?, style? }`, `delete_flow_group { groupId }` (screens stay). `move_screen` and `duplicate_screen` take `group` to join or leave one; a duplicate joins its source's group.
-- Spacing and refit are automatic. Boundaries between groups are widened for the title and stroke, screens shift to make room, and every box refits when screens are added, moved or removed, then arrows reroute. Never hand-size or hand-move a box, never edit the gaps yourself.
+- Spacing and refit are automatic. By default spacing is uniform: one column pitch and one row pitch for the whole board, grown to fit the widest group boundary (title bar, 12 px line, 160 px padding), so every column shares one x and every row one y and all gaps are equal. `reroute_flow { spacing: "banded" }` switches to per-region extras instead (`"uniform"` switches back and clears them). Screens shift to make room, and every box refits when screens are added, moved or removed, then arrows reroute. Never hand-size or hand-move a box, never edit the gaps yourself.
 - Never draw boxes by hand and never use `group_screens` for this (it breaks prototype Play). Screens stay top-level frames.
 - Arrow lines may cross a box stroke. A box and its title never cross screens, route text, badges, arrow labels or other boxes.
 - One level of nesting: a child group sits fully inside a parent (`parentId`). A child of a child is rejected.
 - Old hand-drawn boxes and Section Heading instances: run `adopt_flow_groups` (dry run first) to turn them into real groups.
-- Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds). `describe_board` shows the group tree and flags empty or stale groups.
+- Afterwards run `lint_flow_layout`: `layoutIssues` must be empty (group-crosses-content, group-crosses-label, group-overlaps-group, group-encloses-foreign, title-overlaps, nesting kinds, label-overlaps-label, lines-overlap, line-crosses-title). `describe_board` shows the group tree and flags empty or stale groups.
 
 ## Back navigation, loops and states
 

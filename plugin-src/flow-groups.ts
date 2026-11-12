@@ -10,7 +10,8 @@
  * `finish` or `rerouteBoards`, so hooks can call it freely; callers reroute afterwards when `extrasChanged`.
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
+import { applyBanded, applyExtras, applyMoves, applyPitch, setSpacing, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
+import { basePitchOf, pitchFromNeeds, samePitch, spacingOf } from './pitch';
 import { addBands, gapDeficits, hasDeficits, type Block, type Deficits } from './gap-fix';
 import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, toLocal, type Board } from './flow';
 import {
@@ -32,6 +33,7 @@ import {
 import {
     extrasMoves,
     groupBoundaryExtras,
+    groupBoundaryNeeds,
     internalArrowRects,
     sameBoxes,
     hexToRgb,
@@ -57,6 +59,8 @@ import { fail, ok, str, bool, type Handler } from './types';
 
 const norm = (id: string) => id.replace('-', ':');
 const bandsJson = (extras: ExtrasInput | undefined): JsonObject[] => cleanExtras(extras).map((b) => ({ at: b.at, from: b.from, to: b.to, px: b.px }));
+/** Plugin data on the holder frame: the board's meta, name and rect, so a deleted background could be rebuilt. */
+const BOARD_BACKUP_KEY = 'board-backup';
 const TITLE_FONT: FontName = { family: 'Inter', style: 'Bold' };
 
 /** `title` is the title bar frame; a legacy plain TEXT title is kept until the next paint replaces it with a bar. */
@@ -124,7 +128,7 @@ export const groupObstacles = async (board: Board) =>
     (await loadGroups(board)).map((g) => {
         const box = rectOf(g.rect);
         const t = g.title ? rectOf(g.title) : null;
-        return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight };
+        return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight, titleChars: g.meta.name.length };
     });
 
 const writeGroup = (g: LoadedGroup): void => g.rect.setSharedPluginData(FLOW_NAMESPACE, GROUP_KEY, JSON.stringify(g.meta));
@@ -238,6 +242,9 @@ async function titleBarFor(holder: FrameNode, g: LoadedGroup): Promise<FrameNode
     return bar;
 }
 
+/** Banded fixes measured from the drawn boxes. */
+type Bonus = Pick<Deficits, 'colExtra' | 'rowExtra'>;
+
 export type RefitResult = {
     /** The board has at least one flow group. */
     active: boolean;
@@ -255,7 +262,7 @@ export type RefitResult = {
     summary: JsonObject;
 };
 
-const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [] }, boxes: [], summary: {} };
+const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
 
 const json = (v: unknown): JsonValue => v as JsonValue;
 
@@ -264,25 +271,43 @@ const json = (v: unknown): JsonValue => v as JsonValue;
  * redraws every box and title. A board with groups lets groups own its extras: they are replaced by what the groups need.
  * With no groups left, extras are only cleared when `releaseExtras` (the last group was just deleted).
  */
-export async function refitGroups(board: Board, screens: Screen[], opts: { releaseExtras?: boolean; bonus?: Deficits } = {}): Promise<RefitResult> {
+export async function refitGroups(board: Board, screens: Screen[], opts: { releaseExtras?: boolean; bonus?: Bonus; pitchExtra?: { col: number; row: number } } = {}): Promise<RefitResult> {
     const groups = await loadGroups(board);
     const holder = findHolder(board);
-    if (!groups.length && !(opts.releaseExtras && (board.meta.colExtra || board.meta.rowExtra))) {
+    const leftovers = !!(board.meta.colExtra || board.meta.rowExtra || board.meta.gapExtra || board.meta.baseColWidth !== undefined);
+    if (!groups.length && !(opts.releaseExtras && leftovers)) {
         if (holder && !holder.children.length) holder.remove();
         return INACTIVE;
     }
     reconcile(groups, screens, true);
 
     const cells = cellsOf(screens);
-    if (!groups.length) setGapExtra(board, null);
-    const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta, opts.bonus ?? board.meta.gapExtra);
     let extrasChanged = false;
     let shifted = 0;
-    if (!sameExtras(board.meta.colExtra, desired.colExtra) || !sameExtras(board.meta.rowExtra, desired.rowExtra)) {
-        const moves = extrasMoves(cells, board.meta, desired);
-        applyExtras(board, desired);
-        shifted = (await applyMoves(board, screens, moves)).length;
-        extrasChanged = true;
+    const allMoves = () => cells.map((c) => ({ id: c.id, from: { col: c.col, row: c.row }, to: { col: c.col, row: c.row } }));
+    if (spacingOf(board.meta) === 'uniform') {
+        const base = basePitchOf(board.meta);
+        const needs = groups.length ? groupBoundaryNeeds(groups.map(recOf), cells, { ...base, screenW: board.meta.screenW, screenH: board.meta.screenH }) : { col: 0, row: 0 };
+        const more = opts.pitchExtra ?? { col: 0, row: 0 };
+        const pitch = pitchFromNeeds(base, { col: needs.col + more.col, row: needs.row + more.row });
+        const m = board.meta;
+        const dirty = !samePitch(pitch, { colWidth: m.colWidth, rowHeight: m.rowHeight }) || !!(m.colExtra || m.rowExtra || m.gapExtra) || m.spacing !== 'uniform';
+        if (dirty) {
+            applyPitch(board, base, pitch, groups.length > 0);
+            shifted = (await applyMoves(board, screens, allMoves())).length;
+            extrasChanged = true;
+        }
+    } else {
+        if (!groups.length) setGapExtra(board, null);
+        const restored = board.meta.baseColWidth !== undefined || board.meta.baseRowHeight !== undefined;
+        if (restored) applyBanded(board);
+        const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta, opts.bonus ?? board.meta.gapExtra);
+        if (restored || !sameExtras(board.meta.colExtra, desired.colExtra) || !sameExtras(board.meta.rowExtra, desired.rowExtra)) {
+            const moves = restored ? allMoves() : extrasMoves(cells, board.meta, desired);
+            applyExtras(board, desired);
+            shifted = (await applyMoves(board, screens, moves)).length;
+            extrasChanged = true;
+        }
     }
     if (!groups.length) {
         if (holder && !holder.children.length) holder.remove();
@@ -290,6 +315,9 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     }
 
     const layer = ensureHolder(board);
+    board.node.locked = true;
+    layer.locked = true;
+    layer.setSharedPluginData(FLOW_NAMESPACE, BOARD_BACKUP_KEY, JSON.stringify({ meta: board.meta, name: board.node.name, rect: rectOf(board.node) }));
     await snapBadges(screens);
     const prints = new Map<string, Footprint>();
     for (const s of screens) prints.set(s.node.id, await footprintOf(s));
@@ -327,6 +355,8 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
             continue;
         }
         const title = await paintGroup(layer, g, fit);
+        g.rect.locked = true;
+        if (g.title) g.title.locked = true;
         boxes.push({ id: g.id, name: g.meta.name, ...(g.meta.parentId ? { parentId: g.meta.parentId } : {}), box: fit.box, title, strokeWeight: g.meta.style.strokeWeight });
         layer.appendChild(g.rect);
         if (g.title) layer.appendChild(g.title);
@@ -396,14 +426,17 @@ async function settleBoard(board: Board, screens: Screen[], first: RefitResult, 
     let fit = first;
     let last = reroute;
     let passes = 0;
-    let bonus: Deficits = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
+    const uniform = spacingOf(board.meta) === 'uniform';
+    let bonus: Bonus = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
+    let more = { col: 0, row: 0 };
     while (fit.active && passes < MAX_SETTLE) {
         const short = hasDeficits(fit.deficits);
-        if (short) {
+        if (short && uniform) more = { col: more.col + fit.deficits.uniform.col, row: more.row + fit.deficits.uniform.row };
+        else if (short) {
             bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
             setGapExtra(board, bonus);
         }
-        const again = await refitGroups(board, screens, { bonus });
+        const again = await refitGroups(board, screens, uniform ? { pitchExtra: more } : { bonus });
         passes++;
         const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
         fit = again;
@@ -508,6 +541,21 @@ export const createFlowGroup: Handler = async (args) => {
             ...groups.map(recOf).map((g) => (g.id === plan.parentId ? { ...g, screenIds: g.screenIds.filter((id) => !plan.takeFromParent.includes(id)) } : g)),
             { id: 'new', name: plan.name, ...(plan.parentId ? { parentId: plan.parentId } : {}), screenIds: plan.screenIds, style: styled.style },
         ];
+        const base = { ...basePitchOf(board.meta), screenW: board.meta.screenW, screenH: board.meta.screenH };
+        if (spacingOf(board.meta) === 'uniform') {
+            const pitch = pitchFromNeeds(base, groupBoundaryNeeds(next, cellsOf(screens), base));
+            return ok({
+                dryRun: true,
+                boardId: board.node.id,
+                name: plan.name,
+                ...(plan.parentId ? { parentId: plan.parentId } : {}),
+                screens: describeScreens(screens, plan.screenIds),
+                movedFromParent: plan.takeFromParent,
+                spacing: 'uniform',
+                pitch: { colWidth: pitch.colWidth, rowHeight: pitch.rowHeight },
+                screensShifted: samePitch(pitch, { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight }) ? 0 : screens.length,
+            });
+        }
         const extras = groupBoundaryExtras(next, cellsOf(screens), board.meta);
         return ok({
             dryRun: true,
@@ -701,6 +749,9 @@ export async function joinAndRefit(boardId: string, screenId: string, groupId: s
 /** reroute_flow: refits every grouped board first, so a hand-moved screen pulls its box along. */
 export const rerouteFlowWithGroups: Handler = async (args) => {
     const boards = await boardsFor(args);
+    const mode = str(args, 'spacing');
+    if (mode !== undefined && mode !== 'uniform' && mode !== 'banded') return fail('spacing must be "uniform" or "banded".');
+    if (mode) for (const board of boards) setSpacing(board, mode);
     const fits: JsonObject[] = [];
     const first = new Map<string, RefitResult>();
     for (const board of boards) {
@@ -717,7 +768,7 @@ export const rerouteFlowWithGroups: Handler = async (args) => {
         const { screens } = await loadScreens(board);
         const settled = await settleBoard(board, screens, fit0, {});
         await resizeBoard(board, screens, false, settled.fit.extent);
-        fits.push({ boardId: board.node.id, settlePasses: settled.passes, ...settled.fit.summary });
+        fits.push({ boardId: board.node.id, spacing: spacingOf(board.meta), pitch: { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight }, settlePasses: settled.passes, ...settled.fit.summary });
     }
     if (!reply.ok || !fits.length || typeof reply.result !== 'object' || reply.result === null || Array.isArray(reply.result)) return reply;
     return ok({ ...reply.result, groups: fits });
