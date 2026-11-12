@@ -10,7 +10,8 @@
  * `finish` or `rerouteBoards`, so hooks can call it freely; callers reroute afterwards when `extrasChanged`.
  */
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, snapBadges, writeScreen, type Screen } from './board-ops';
+import { applyExtras, applyMoves, cellsOf, loadScreens, resizeBoard, setGapExtra, snapBadges, writeScreen, type Screen } from './board-ops';
+import { addBands, gapDeficits, hasDeficits, type Block, type Deficits } from './gap-fix';
 import { boardsFor, connect, listArrows, loadBoard, readMeta, rectOf, rerouteBoards, rerouteFlow, sceneById, toLocal, type Board } from './flow';
 import {
     TITLE_COLOR,
@@ -248,11 +249,13 @@ export type RefitResult = {
     issues: GroupIssue[];
     nesting: NestingIssue[];
     emptyGroups: string[];
+    /** Extra room the drawn boxes still need (see gap-fix.ts); empty when every gap is wide enough. */
+    deficits: Deficits;
     boxes: { id: string; name: string; parentId?: string; box: Rect; title: Rect; strokeWeight: number }[];
     summary: JsonObject;
 };
 
-const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], boxes: [], summary: {} };
+const INACTIVE: RefitResult = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [] }, boxes: [], summary: {} };
 
 const json = (v: unknown): JsonValue => v as JsonValue;
 
@@ -261,7 +264,7 @@ const json = (v: unknown): JsonValue => v as JsonValue;
  * redraws every box and title. A board with groups lets groups own its extras: they are replaced by what the groups need.
  * With no groups left, extras are only cleared when `releaseExtras` (the last group was just deleted).
  */
-export async function refitGroups(board: Board, screens: Screen[], opts: { releaseExtras?: boolean } = {}): Promise<RefitResult> {
+export async function refitGroups(board: Board, screens: Screen[], opts: { releaseExtras?: boolean; bonus?: Deficits } = {}): Promise<RefitResult> {
     const groups = await loadGroups(board);
     const holder = findHolder(board);
     if (!groups.length && !(opts.releaseExtras && (board.meta.colExtra || board.meta.rowExtra))) {
@@ -271,7 +274,8 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     reconcile(groups, screens, true);
 
     const cells = cellsOf(screens);
-    const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta);
+    if (!groups.length) setGapExtra(board, null);
+    const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta, opts.bonus ?? board.meta.gapExtra);
     let extrasChanged = false;
     let shifted = 0;
     if (!sameExtras(board.meta.colExtra, desired.colExtra) || !sameExtras(board.meta.rowExtra, desired.rowExtra)) {
@@ -344,6 +348,22 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
     const nesting = validateNesting(conflictGroups);
     const extent = unionRect(boxes.flatMap((b) => [b.box, b.title]));
 
+    const familyOf = (id: string): string[] => [...(groups.find((g) => g.id === id)?.meta.screenIds ?? []), ...groups.filter((k) => k.meta.parentId === id).flatMap((k) => k.meta.screenIds)];
+    const cellOfId = new Map(cells.map((c) => [c.id, { col: c.col, row: c.row }]));
+    const blocks: Block[] = [
+        ...boxes.map((b) => ({
+            id: b.id,
+            rect: unionRect([b.box, b.title]) as Rect,
+            cells: familyOf(b.id).flatMap((id) => (cellOfId.has(id) ? [cellOfId.get(id) as { col: number; row: number }] : [])),
+            grouped: true,
+            ...(b.parentId ? { parentId: b.parentId } : {}),
+        })),
+        ...screens
+            .filter((s) => !groups.some((g) => g.meta.screenIds.includes(s.node.id)))
+            .map((s) => ({ id: s.node.id, rect: (prints.get(s.node.id) as Footprint).content, cells: [{ col: s.meta.col, row: s.meta.row }], grouped: false })),
+    ];
+    const deficits = gapDeficits(blocks);
+
     const summary: JsonObject = {
         count: groups.length,
         extrasChanged,
@@ -352,7 +372,7 @@ export async function refitGroups(board: Board, screens: Screen[], opts: { relea
         ...(nesting.length ? { nesting: json(nesting) } : {}),
         ...(emptyGroups.length ? { emptyGroups } : {}),
     };
-    return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, boxes, summary };
+    return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
 }
 
 /** Each arrow's ends and the rects of its label and line, for boxes that must wrap arrows running inside them. */
@@ -365,20 +385,29 @@ async function internalArrowsOf(board: Board): Promise<{ from: string; to: strin
     return out;
 }
 
+const MAX_SETTLE = 6;
+
 /**
  * After arrows were rerouted, refit again: boxes now wrap the labels that landed inside them, and the conflict check sees the
- * final label positions. Repeats (reroute, refit) until the boxes stop changing, at most 3 times. Returns the last fit.
+ * final label positions. Repeats (reroute, refit) until the boxes stop changing, at most 6 times. It also grows the board's extras by whatever the drawn boxes still lack (gap-fix.ts), keeping them on the board
+ * so extras only grow within a settle. Returns the last fit.
  */
 async function settleBoard(board: Board, screens: Screen[], first: RefitResult, reroute: JsonObject): Promise<{ fit: RefitResult; reroute: JsonObject; passes: number }> {
     let fit = first;
     let last = reroute;
     let passes = 0;
-    while (fit.active && passes < 3) {
-        const again = await refitGroups(board, screens);
+    let bonus: Deficits = board.meta.gapExtra ?? { colExtra: [], rowExtra: [] };
+    while (fit.active && passes < MAX_SETTLE) {
+        const short = hasDeficits(fit.deficits);
+        if (short) {
+            bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
+            setGapExtra(board, bonus);
+        }
+        const again = await refitGroups(board, screens, { bonus });
         passes++;
-        const stable = sameBoxes(fit.boxes, again.boxes);
+        const settled = !short && !again.extrasChanged && sameBoxes(fit.boxes, again.boxes);
         fit = again;
-        if (stable) break;
+        if (settled && !hasDeficits(again.deficits)) break;
         await resizeBoard(board, screens, false, fit.extent);
         last = await rerouteBoards([board]);
     }

@@ -23,6 +23,8 @@ export type BoardMeta = {
     colExtra?: Extras;
     /** Extra px added before row `at`, for the columns `from`..`to` only (cumulative). Absent = uniform rows. */
     rowExtra?: Extras;
+    /** Extra room measured from the drawn group boxes (gap-fix.ts), added to the planned extras; kept so refits do not undo it. */
+    gapExtra?: { colExtra: Extras; rowExtra: Extras };
     screenW: number;
     screenH: number;
     labelOffset: number;
@@ -142,6 +144,13 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
         const clean = isObj(raw) || Array.isArray(raw) ? cleanExtras(raw as ExtrasInput) : [];
         if (clean.length) meta[k] = clean;
         else delete meta[k];
+    }
+    const gap = o.gapExtra;
+    if (gap !== undefined) {
+        const clean = (v: unknown) => (isObj(v) || Array.isArray(v) ? cleanExtras(v as ExtrasInput) : []);
+        const [colExtra, rowExtra] = isObj(gap) ? [clean(gap.colExtra), clean(gap.rowExtra)] : [[], []];
+        if (colExtra.length || rowExtra.length) meta.gapExtra = { colExtra, rowExtra };
+        else delete meta.gapExtra;
     }
     return meta;
 }

@@ -149,6 +149,12 @@ describe('board extras', () => {
         expect(m?.colExtra).toEqual([{ at: 2, from: 0, to: FULL_SPAN, px: 100 }]);
         expect(m?.rowExtra).toBeUndefined();
     });
+    test('gapExtra round-trips and empty or junk is dropped', () => {
+        const gap = { colExtra: [], rowExtra: [{ at: 8, from: 11, to: 25, px: 160 }] };
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: gap }))?.gapExtra).toEqual(gap);
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: { colExtra: [], rowExtra: [] } }))?.gapExtra).toBeUndefined();
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: 'x' }))?.gapExtra).toBeUndefined();
+    });
     test('cellOfRect reads widened boundaries', () => {
         expect(cellOfRect({ x: 1500, y: 0 }, { ...base, colExtra: { 2: 100 } })).toEqual({ col: 2, row: 0 });
         expect(cellOfRect({ x: 1400, y: 0 }, base)).toEqual({ col: 2, row: 0 });

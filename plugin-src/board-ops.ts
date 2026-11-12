@@ -192,3 +192,10 @@ export function applyExtras(board: Board, extras: ExtrasPair): void {
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
 }
 
+
+/** Stores the measured gap extras on the board (empty = cleared). */
+export function setGapExtra(board: Board, gap: ExtrasPair | null): void {
+    const { gapExtra: _drop, ...rest } = board.meta;
+    board.meta = { ...rest, ...(gap && (gap.colExtra.length || gap.rowExtra.length) ? { gapExtra: gap } : {}) };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+}
