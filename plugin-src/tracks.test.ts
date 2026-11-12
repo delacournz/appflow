@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { cleanExtras, compactExtras, extraBetween, extrasFromPositions, shiftExtras, trackOf, trackStart } from './tracks';
+import { FULL_SPAN, cleanExtras, compactExtras, extraBetween, extrasFromPositions, shiftExtras, trackOf, trackStart } from './tracks';
+
+/** Old Record form as full-span bands. */
+const full = (r: Record<number, number>) => Object.entries(r).map(([k, v]) => ({ at: Number(k), from: 0, to: FULL_SPAN, px: v }));
 
 describe('trackStart', () => {
     test('no extras is index * size', () => {
@@ -43,31 +46,31 @@ describe('trackOf', () => {
 
 describe('shiftExtras', () => {
     test('moves extras after the insertion point and keeps earlier ones', () => {
-        expect(shiftExtras({ 1: 10, 3: 30 }, 1, 2)).toEqual({ 1: 10, 5: 30 });
+        expect(shiftExtras({ 1: 10, 3: 30 }, 1, 2)).toEqual(full({ 1: 10, 5: 30 }));
     });
     test('-1 inserts before the first track', () => {
-        expect(shiftExtras({ 1: 10 }, -1, 1)).toEqual({ 2: 10 });
+        expect(shiftExtras({ 1: 10 }, -1, 1)).toEqual(full({ 2: 10 }));
     });
     test('empty stays empty', () => {
-        expect(shiftExtras({}, 0, 3)).toEqual({});
+        expect(shiftExtras({}, 0, 3)).toEqual([]);
     });
 });
 
 describe('compactExtras', () => {
     test('re-keys extras to the compacted index of the next used track', () => {
-        expect(compactExtras({ 3: 100 }, [0, 1, 3])).toEqual({ 2: 100 });
+        expect(compactExtras({ 3: 100 }, [0, 1, 3])).toEqual(full({ 2: 100 }));
     });
     test('an extra on an emptied track moves to the next used track', () => {
-        expect(compactExtras({ 2: 100 }, [0, 1, 3])).toEqual({ 2: 100 });
+        expect(compactExtras({ 2: 100 }, [0, 1, 3])).toEqual(full({ 2: 100 }));
     });
     test('collapsing extras keep the larger one', () => {
-        expect(compactExtras({ 2: 100, 3: 150 }, [0, 1, 3])).toEqual({ 2: 150 });
+        expect(compactExtras({ 2: 100, 3: 150 }, [0, 1, 3])).toEqual(full({ 2: 150 }));
     });
     test('extras at or before the first used track and past the last are dropped', () => {
-        expect(compactExtras({ 1: 10, 2: 20, 9: 90 }, [2, 3])).toEqual({});
+        expect(compactExtras({ 1: 10, 2: 20, 9: 90 }, [2, 3])).toEqual([]);
     });
     test('first used track keeps its index', () => {
-        expect(compactExtras({ 5: 40 }, [2, 5])).toEqual({ 3: 40 });
+        expect(compactExtras({ 5: 40 }, [2, 5])).toEqual(full({ 3: 40 }));
     });
 });
 
@@ -78,22 +81,22 @@ describe('extraBetween / cleanExtras', () => {
         expect(extraBetween({}, 0, 5)).toBe(0);
     });
     test('cleanExtras drops junk', () => {
-        expect(cleanExtras({ 1: 10, 2: 0, 3: -5, 4: Number.NaN })).toEqual({ 1: 10 });
-        expect(cleanExtras(undefined)).toEqual({});
+        expect(cleanExtras({ 1: 10, 2: 0, 3: -5, 4: Number.NaN })).toEqual(full({ 1: 10 }));
+        expect(cleanExtras(undefined)).toEqual([]);
     });
 });
 
 describe('extrasFromPositions', () => {
     test('uniform spacing has no extras', () => {
-        expect(extrasFromPositions([0, 700, 1400], 700)).toEqual({});
+        expect(extrasFromPositions([0, 700, 1400], 700)).toEqual([]);
     });
     test('a missing column is not an extra', () => {
-        expect(extrasFromPositions([0, 700, 2100], 700)).toEqual({});
+        expect(extrasFromPositions([0, 700, 2100], 700)).toEqual([]);
     });
     test('a wider boundary is recorded before the track after it', () => {
-        expect(extrasFromPositions([0, 700, 1700, 2400], 700)).toEqual({ 2: 300 });
+        expect(extrasFromPositions([0, 700, 1700, 2400], 700)).toEqual(full({ 2: 300 }));
     });
     test('small wobble is ignored', () => {
-        expect(extrasFromPositions([0, 710, 1400], 700)).toEqual({});
+        expect(extrasFromPositions([0, 710, 1400], 700)).toEqual([]);
     });
 });

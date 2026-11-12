@@ -27,13 +27,13 @@ const distinct = (values: number[], tolerance: number): number[] => {
 
 const gaps = (positions: number[]): number[] => positions.slice(1).map((p, i) => p - (positions[i] as number));
 
-/** Extras for boundaries wider than `colWidth` / `rowHeight`, read off the screens' origins. Empty maps are omitted. */
+/** Extras for boundaries wider than `colWidth` / `rowHeight`, read off the screens' origins. Always full-span bands (a list of origins cannot say which rows a gap belongs to); empty lists are omitted. */
 export function extrasFor(screens: readonly Rect[], colWidth: number, rowHeight: number): { colExtra?: Extras; rowExtra?: Extras } {
     const xs = distinct(screens.map((s) => s.x), 4);
     const ys = distinct(screens.map((s) => s.y), 4);
     const colExtra = extrasFromPositions(xs, colWidth);
     const rowExtra = extrasFromPositions(ys, rowHeight);
-    return { ...(Object.keys(colExtra).length ? { colExtra } : {}), ...(Object.keys(rowExtra).length ? { rowExtra } : {}) };
+    return { ...(colExtra.length ? { colExtra } : {}), ...(rowExtra.length ? { rowExtra } : {}) };
 }
 
 /**

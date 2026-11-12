@@ -24,9 +24,9 @@ import { fitRoute } from './anatomy';
 import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
-import { extraBetween, trackOf } from './tracks';
 import { type Exit, type Pt, type Rect, type Route } from './route';
 import { clearLabel, labelObstacles, type GroupObstacle } from './route-avoid';
+import { widenedBetween } from './grid';
 import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
 
 const norm = (id: string) => id.replace('-', ':');
@@ -91,13 +91,12 @@ const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
 
 /**
  * Where labels must stop for an arrow whose source-to-target span crosses a widened column boundary: the end of the
- * base gutter beside the source. Undefined when no extra lies in the span, so uniform boards behave as before.
+ * base gutter beside the source. Undefined when the cells the two screens sit in are no further apart than the plain
+ * grid makes them, so uniform boards behave as before. Bands make this depend on the rows of both screens, so it is
+ * read off their cell rects (`widenedBetween`).
  */
 function labelLimitOf(meta: BoardMeta, ends: { source: Rect; target: Rect }): number | undefined {
-    if (!meta.colExtra) return undefined;
-    const from = trackOf(ends.source.x - meta.originX, meta.colWidth, meta.colExtra);
-    const to = trackOf(ends.target.x - meta.originX, meta.colWidth, meta.colExtra);
-    return extraBetween(meta.colExtra, from, to) > 0 ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
+    return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
 }
 
 async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {

@@ -47,10 +47,12 @@ import {
 } from './flow-group-plan';
 import { FLOW_NAMESPACE, GROUP_KEY, GROUP_LAYER_KEY, SCREEN_KEY, parseGroupMeta, parseScreenMeta, type GroupMeta, type GroupStyle } from './flowmeta';
 import type { Rect } from './rect';
+import { cleanExtras, type ExtrasInput } from './tracks';
 import { unionRect } from './rect';
 import { fail, ok, str, bool, type Handler } from './types';
 
 const norm = (id: string) => id.replace('-', ':');
+const bandsJson = (extras: ExtrasInput | undefined): JsonObject[] => cleanExtras(extras).map((b) => ({ at: b.at, from: b.from, to: b.to, px: b.px }));
 const TITLE_FONT: FontName = { family: 'Inter', style: 'Bold' };
 
 export type LoadedGroup = { id: string; rect: RectangleNode; title: TextNode | null; meta: GroupMeta };
@@ -422,7 +424,7 @@ export const createFlowGroup: Handler = async (args) => {
             ...(plan.parentId ? { parentId: plan.parentId } : {}),
             screens: describeScreens(screens, plan.screenIds),
             movedFromParent: plan.takeFromParent,
-            extras: { colExtra: { ...extras.colExtra }, rowExtra: { ...extras.rowExtra } },
+            extras: { colExtra: bandsJson(extras.colExtra), rowExtra: bandsJson(extras.rowExtra) },
             screensShifted: extrasMoves(cellsOf(screens), board.meta, extras).length,
         });
     }
@@ -450,7 +452,7 @@ export const createFlowGroup: Handler = async (args) => {
         ...(plan.parentId ? { parentId: plan.parentId } : {}),
         screens: describeScreens(screens, plan.screenIds),
         ...boxOf(fit, rect.id),
-        extras: { colExtra: { ...(board.meta.colExtra ?? {}) }, rowExtra: { ...(board.meta.rowExtra ?? {}) } },
+        extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
         screensShifted: fit.shifted,
         board: size,
         issues: json(fit.issues),
@@ -511,7 +513,7 @@ export const updateFlowGroup: Handler = async (args) => {
         ...(plan.parentId ? { parentId: plan.parentId } : {}),
         screens: describeScreens(screens, plan.screenIds),
         ...boxOf(fit, group.id),
-        extras: { colExtra: { ...(board.meta.colExtra ?? {}) }, rowExtra: { ...(board.meta.rowExtra ?? {}) } },
+        extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
         screensShifted: fit.shifted,
         board: size,
         issues: json(fit.issues),
@@ -550,7 +552,7 @@ export const deleteFlowGroup: Handler = async (args) => {
         boardId: board.node.id,
         freedScreens: plan.screenIds,
         promoted: plan.promote,
-        extras: { colExtra: { ...(board.meta.colExtra ?? {}) }, rowExtra: { ...(board.meta.rowExtra ?? {}) } },
+        extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
         screensShifted: fit.shifted,
         board: size,
         issues: json(fit.issues),

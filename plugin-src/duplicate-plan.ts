@@ -7,7 +7,7 @@ import { trackStart, type Extras } from './tracks';
 export type GridBoard = { originX: number; originY: number; colWidth: number; rowHeight: number; colExtra?: Extras; rowExtra?: Extras; screenW: number; screenH: number };
 
 export function cellRect(board: GridBoard, col: number, row: number): Rect {
-    return { x: board.originX + trackStart(col, board.colWidth, board.colExtra), y: board.originY + trackStart(row, board.rowHeight, board.rowExtra), width: board.screenW, height: board.screenH };
+    return { x: board.originX + trackStart(col, board.colWidth, board.colExtra, row), y: board.originY + trackStart(row, board.rowHeight, board.rowExtra, col), width: board.screenW, height: board.screenH };
 }
 
 /** Index of the first rect that overlaps `target` (touching edges do not count), or -1. */

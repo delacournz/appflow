@@ -3,7 +3,7 @@ import { boundaryExtras, type BoundaryExtras } from './flow-group';
 import { ROUTE_TOP } from './flow-group';
 import type { Move } from './grid';
 import type { GroupStyle } from './flowmeta';
-import { cleanExtras, trackStart, type Extras } from './tracks';
+import { cleanExtras, trackStart, type Extras, type ExtrasInput } from './tracks';
 
 /** The group fields the rules need. A group's `screenIds` are its own screens only; a child's screens are not repeated on its parent. */
 export type GroupRec = { id: string; name: string; parentId?: string; screenIds: string[] };
@@ -185,7 +185,7 @@ export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readon
     const cellsOf = (id: string) => screens.filter((s) => owner.get(s.id) === id).map((s) => ({ col: s.col, row: s.row }));
     const boundary = groups.map((g) => ({ id: g.id, ...(g.parentId ? { parentId: g.parentId } : {}), cells: cellsOf(g.id) }));
     const ungrouped = screens.filter((s) => !owner.has(s.id)).map((s) => cellOf.get(s.id) as { col: number; row: number });
-    if (!boundary.some((b) => b.cells.length)) return { colExtra: {}, rowExtra: {} };
+    if (!boundary.some((b) => b.cells.length)) return { colExtra: [], rowExtra: [] };
     const colGap = base.colWidth - base.screenW;
     const rowGap = base.rowHeight - base.screenH;
     const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap });
@@ -193,26 +193,25 @@ export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readon
     return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
 }
 
-export const sameExtras = (a: Extras | undefined, b: Extras | undefined): boolean => {
+export const sameExtras = (a: ExtrasInput | undefined, b: ExtrasInput | undefined): boolean => {
     const [x, y] = [cleanExtras(a), cleanExtras(b)];
-    const keys = Object.keys(x);
-    return keys.length === Object.keys(y).length && keys.every((k) => x[Number(k)] === y[Number(k)]);
+    return x.length === y.length && x.every((b, i) => b.at === y[i]?.at && b.from === y[i]?.from && b.to === y[i]?.to && b.px === y[i]?.px);
 };
 
 /**
- * One move (cell to the same cell) for every screen whose position changes when the board's extras change: every screen
- * at or after a changed boundary. `applyMoves` shifts it by the difference between its new cell rect and where it is.
+ * One move (cell to the same cell) for every screen whose position changes when the board's extras change: only screens
+ * at or after a changed boundary AND inside its band. `applyMoves` shifts it by the difference between its new cell rect and where it is.
  */
 export function extrasMoves(
     screens: readonly CellScreen[],
-    meta: BaseGrid & { colExtra?: Extras; rowExtra?: Extras },
-    next: { colExtra: Extras; rowExtra: Extras },
+    meta: BaseGrid & { colExtra?: ExtrasInput; rowExtra?: ExtrasInput },
+    next: { colExtra: ExtrasInput; rowExtra: ExtrasInput },
 ): Move[] {
     return screens
         .filter(
             (s) =>
-                trackStart(s.col, meta.colWidth, meta.colExtra) !== trackStart(s.col, meta.colWidth, next.colExtra) ||
-                trackStart(s.row, meta.rowHeight, meta.rowExtra) !== trackStart(s.row, meta.rowHeight, next.rowExtra),
+                trackStart(s.col, meta.colWidth, meta.colExtra, s.row) !== trackStart(s.col, meta.colWidth, next.colExtra, s.row) ||
+                trackStart(s.row, meta.rowHeight, meta.rowExtra, s.col) !== trackStart(s.row, meta.rowHeight, next.rowExtra, s.col),
         )
         .map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: { col: s.col, row: s.row } }));
 }
