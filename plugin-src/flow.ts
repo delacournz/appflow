@@ -32,6 +32,7 @@ import { fail, ok, str, bool, type Handler } from './types';
 import { leadRoute, startLabelAnchor, type Exit, type Pt, type Rect, type Route } from './route';
 import { clearLabel, labelObstacles, LABEL_PAD, separateLabels, titleTextRect, type GroupObstacle } from './route-avoid';
 import { widenedBetween } from './grid';
+import { labelLimitBetween } from './grid-plan';
 import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
 
 const norm = (id: string) => id.replace('-', ':');
@@ -205,6 +206,7 @@ const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
  * read off their cell rects (`widenedBetween`).
  */
 function labelLimitOf(meta: BoardMeta, ends: { source: Rect; target: Rect }): number | undefined {
+    if (meta.spacing === 'grouped') return labelLimitBetween(meta, ends.source, ends.target);
     return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
 }
 

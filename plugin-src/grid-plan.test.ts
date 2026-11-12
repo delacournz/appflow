@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { boundsOfRects, compactGridPlan, groupOriginOf, placeJoiners, planBlockShifts, planGridMove, planRegrid, shiftGridPlan, type GridScreen, type RegridScreen } from './grid-plan';
+import { boundsOfRects, labelLimitBetween, compactGridPlan, groupOriginOf, placeJoiners, planBlockShifts, planGridMove, planRegrid, shiftGridPlan, type GridScreen, type RegridScreen } from './grid-plan';
 import type { LayoutGrid } from './layout-grid';
 
 const A: GridScreen[] = [
@@ -214,5 +214,23 @@ describe('planRegrid', () => {
     test('a group that is gone sends its screens to the board grid', () => {
         const screens = [at('u', 164, 2174, { flowGroupId: 'GONE', layoutId: 'GONE' })];
         expect(planRegrid(board, screens, []).cells.get('u')).toEqual({ layoutId: 'board', col: 0, row: 0 });
+    });
+});
+
+describe('labelLimitBetween', () => {
+    const meta = { colWidth: 700, screenW: 393 };
+    const src = { x: 1000, width: 393 };
+
+    test('screens a whole number of pitches apart have no limit, same grid or not', () => {
+        expect(labelLimitBetween(meta, src, { x: 1700 })).toBeUndefined();
+        expect(labelLimitBetween(meta, src, { x: 1000 + 3 * 700 })).toBeUndefined();
+    });
+
+    test('a target in another group (not a pitch multiple away) limits labels to the base gutter beside the source', () => {
+        expect(labelLimitBetween(meta, src, { x: 1000 + 700 + 640 })).toBe(1000 + 393 + 307);
+    });
+
+    test('a target left of the source has no limit', () => {
+        expect(labelLimitBetween(meta, src, { x: 400 })).toBeUndefined();
     });
 });

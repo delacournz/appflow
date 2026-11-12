@@ -1,6 +1,6 @@
 /** Pure arrow planning: lanes, fans, label placement and group-stroke avoidance. No `figma` global, so it runs under bun test. */
 import { boxEdges, crowdedRunLength, laneConflicts, screensCrossed, sharedRunLength, titleHitCount, type Edge, type StrokedBox } from './route-avoid';
-import { EDGE_MARGIN, FORK_ROW, FORK_STEP, FORK_X0, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaGap, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
+import { BACKWARDS_DROP, EDGE_MARGIN, FORK_ROW, FORK_STEP, FORK_X0, LANE_STEP, assignLanes, clearOfLanes, fanIndex, gutterKey, routeArrow, relation, routeJoin, routeViaBand, routeViaGap, TRUNK_GAP, type Exit, type Pt, type Rect, type Route } from './route';
 
 export type Endpoints = { source: Rect; target: Rect; trigger: Rect | null; triggerMissing: boolean; exit: Exit };
 /** `warning` is set when a line could not be kept off a group title's text. */
@@ -140,6 +140,7 @@ export function planRoutes(cfg: PlanConfig, items: { id: string; ends: Endpoints
     });
     joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    clearGapRuns(final, items, cfg.screens ?? [], titles, edges, builders, gutter);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map<number, string>();
     separateLines(final, builders, titles, edges);
     forkStarts(final, items);
@@ -404,6 +405,52 @@ function detourAroundScreens(
         if (!chosen || chosen.c >= SCREEN_COST) return;
         routes[i] = chosen.route;
         builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane);
+    });
+}
+
+const GAP_RUN_STEPS = 48;
+
+/**
+ * Backwards and around routes drop below the source and run left along a gap. With rows that every screen shares that gap
+ * is always clear; with groups laid out on grids of their own the screens below the source can sit anywhere. When the run
+ * crosses a screen, it moves down in lane steps to the first height that is clear of screens, titles, strokes and other lines.
+ * Replaces the route and its lane builder; mutates `routes`.
+ */
+function clearGapRuns(
+    routes: Routed[],
+    items: { id: string; ends: Endpoints }[],
+    screens: readonly Rect[],
+    titles: readonly Rect[],
+    edges: readonly Edge[],
+    builders: (((lane: number) => Routed) | null)[],
+    gutter: number,
+): void {
+    if (!screens.length) return;
+    routes.forEach((r, i) => {
+        if (!r.ok || (r.kind !== 'around' && r.kind !== 'backwards')) return;
+        const { source, target, trigger } = (items[i] as (typeof items)[number]).ends;
+        if (screensCrossed(r.points, screens, [source, target]) === 0) return;
+        const cost = (pts: readonly Pt[]): number => {
+            let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+            routes.forEach((o, j) => {
+                if (j === i || !o.ok) return;
+                if (sharedRunLength(pts, o.points) > 1) c += 1000;
+                else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0) c += 0.5;
+            });
+            return c;
+        };
+        let best: { route: Routed; c: number; gapY: number } | null = null;
+        const base = source.y + source.height + BACKWARDS_DROP;
+        for (let k = 0; k <= GAP_RUN_STEPS && (!best || best.c >= 1); k++) {
+            const gapY = base + k * LANE_STEP;
+            const cand = routeViaGap(source, target, trigger, gutter, 0, { gapY, kind: r.kind, backwards: r.backwards });
+            const c = cost(cand.points);
+            if (!best || c < best.c) best = { route: cand, c, gapY };
+        }
+        const chosen = best as { route: Routed; c: number; gapY: number } | null;
+        if (!chosen || chosen.c >= SCREEN_COST) return;
+        routes[i] = chosen.route;
+        builders[i] = (lane) => (lane < NEAR_LANE ? routeViaGap(source, target, trigger, gutter, lane, { gapY: chosen.gapY, kind: r.kind, backwards: r.backwards }) : { ok: false, error: 'no near-column lane' });
     });
 }
 

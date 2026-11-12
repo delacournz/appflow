@@ -1,14 +1,14 @@
 import type { JsonObject } from '../shared/protocol';
-import { loadScreens } from './board-ops';
+import { isGrouped, layoutOfScreen, loadScreens } from './board-ops';
 import { boardScreens, collectBadges, collectScreens, listArrows, readMeta, rectOf, sceneById, type Board } from './flow';
 import { orphanBadges } from './badge-link';
 import { labelStackIssue, type LabelStackIssue } from './arrow-labels';
 import { SCREEN_KEY, parseScreenMeta } from './flowmeta';
 import type { Rect } from './route';
 import type { ConflictContent, ConflictGroup } from './flow-group';
-import { footprintOf, loadGroups } from './flow-groups';
+import { footprintOf, groupGrids, loadGroups } from './flow-groups';
 import { orderPath } from './flowlint';
-import { lintArrows, lintGroups, type ArrowShape, type LayoutIssue, type OrphanBadgeIssue, type TitleText } from './group-lint';
+import { lintArrows, lintGroups, lintOffGrid, type ArrowShape, type LayoutIssue, type OrphanBadgeIssue, type TitleText } from './group-lint';
 import { lintPrototype, type ProtoArrow, type ProtoReaction } from './prototype-lint';
 import { titleTextRect } from './route-avoid';
 import type { ReactionLike } from './flowmeta';
@@ -141,6 +141,13 @@ export async function boardLayoutLint(board: Board): Promise<{ boardId: string; 
     }
     if (!loaded.length) return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues as unknown as JsonObject[], counts: arrowPart.counts } : null;
     const { screens } = await loadScreens(board);
+    if (isGrouped(board)) {
+        const offGrid = lintOffGrid(screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), rect: rectOf(s.node) })), groupGrids(board, await loadGroups(board)));
+        if (offGrid.length) {
+            arrowPart.issues.push(...offGrid);
+            arrowPart.counts['off-grid'] = offGrid.length;
+        }
+    }
     const contents: ConflictContent[] = [];
     for (const s of screens) {
         const p = await footprintOf(s);

@@ -1836,6 +1836,14 @@ ${logs.join(`
     }
     return { layouts, cells, snapped };
   }
+  var GAP_TOLERANCE = 2;
+  function labelLimitBetween(meta, source, target) {
+    const dx = target.x - source.x;
+    if (target.x < source.x + source.width)
+      return;
+    const off = Math.abs(dx - Math.round(dx / meta.colWidth) * meta.colWidth);
+    return off > GAP_TOLERANCE ? source.x + source.width + (meta.colWidth - meta.screenW) : undefined;
+  }
 
   // plugin-src/pitch.ts
   var spacingOf = (m) => m.spacing ?? "uniform";
@@ -3836,6 +3844,19 @@ ${logs.join(`
       counts[i.kind] = (counts[i.kind] ?? 0) + 1;
     return { issues, counts };
   }
+  function lintOffGrid(screens, gridFor) {
+    const out = [];
+    for (const s of screens) {
+      const grid = gridFor(s.layoutId);
+      if (onGrid(grid, s.rect))
+        continue;
+      const { col, row } = cellOfIn(grid, s.rect);
+      const dx = Math.round(s.rect.x - (grid.originX + col * grid.colWidth));
+      const dy = Math.round(s.rect.y - (grid.originY + row * grid.rowHeight));
+      out.push({ kind: "off-grid", screenId: s.id, layoutId: s.layoutId, col, row, dx, dy, message: `Screen ${s.id} is ${dx}px, ${dy}px off cell (${col},${row}) of its grid ${s.layoutId}. Run move_screen to put it on the pitch.` });
+    }
+    return out;
+  }
 
   // plugin-src/prototype-lint.ts
   var TAB_BAR_NAME = /tab ?bar|bottom ?nav|navigation ?bar/i;
@@ -4218,6 +4239,13 @@ ${logs.join(`
     if (!loaded.length)
       return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues, counts: arrowPart.counts } : null;
     const { screens } = await loadScreens(board);
+    if (isGrouped(board)) {
+      const offGrid = lintOffGrid(screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), rect: rectOf(s.node) })), groupGrids(board, await loadGroups(board)));
+      if (offGrid.length) {
+        arrowPart.issues.push(...offGrid);
+        arrowPart.counts["off-grid"] = offGrid.length;
+      }
+    }
     const contents = [];
     for (const s of screens) {
       const p = await footprintOf(s);
@@ -4550,7 +4578,7 @@ ${logs.join(`
   }
   function routeViaGap(source, target, trigger, gutter, lane, opts = {}) {
     const start = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom3(source) };
-    const gapY = bottom3(source) + BACKWARDS_DROP + lane * LANE_STEP;
+    const gapY = (opts.gapY ?? bottom3(source) + BACKWARDS_DROP) + lane * LANE_STEP;
     const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
     const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
     const r = done(opts.kind ?? "around", [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);
@@ -4718,6 +4746,7 @@ ${logs.join(`
     });
     joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
     detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    clearGapRuns(final, items, cfg.screens ?? [], titles, edges, builders, gutter);
     const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
     separateLines(final, builders, titles, edges);
     forkStarts(final, items);
@@ -4956,6 +4985,44 @@ ${logs.join(`
         return;
       routes[i] = chosen.route;
       builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane);
+    });
+  }
+  var GAP_RUN_STEPS = 48;
+  function clearGapRuns(routes, items, screens, titles, edges, builders, gutter) {
+    if (!screens.length)
+      return;
+    routes.forEach((r, i) => {
+      if (!r.ok || r.kind !== "around" && r.kind !== "backwards")
+        return;
+      const { source, target, trigger } = items[i].ends;
+      if (screensCrossed(r.points, screens, [source, target]) === 0)
+        return;
+      const cost = (pts) => {
+        let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (j === i || !o.ok)
+            return;
+          if (sharedRunLength(pts, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return c;
+      };
+      let best = null;
+      const base = source.y + source.height + BACKWARDS_DROP;
+      for (let k = 0;k <= GAP_RUN_STEPS && (!best || best.c >= 1); k++) {
+        const gapY = base + k * LANE_STEP;
+        const cand = routeViaGap(source, target, trigger, gutter, 0, { gapY, kind: r.kind, backwards: r.backwards });
+        const c = cost(cand.points);
+        if (!best || c < best.c)
+          best = { route: cand, c, gapY };
+      }
+      const chosen = best;
+      if (!chosen || chosen.c >= SCREEN_COST)
+        return;
+      routes[i] = chosen.route;
+      builders[i] = (lane) => lane < NEAR_LANE ? routeViaGap(source, target, trigger, gutter, lane, { gapY: chosen.gapY, kind: r.kind, backwards: r.backwards }) : { ok: false, error: "no near-column lane" };
     });
   }
   var bandsFor = (target, rowGap) => {
@@ -5221,6 +5288,8 @@ ${logs.join(`
   var boardScreenRects = (board) => boardScreens(board).map((s) => s.rect);
   var gutterOf = (m) => m.colWidth - m.screenW;
   function labelLimitOf(meta, ends) {
+    if (meta.spacing === "grouped")
+      return labelLimitBetween(meta, ends.source, ends.target);
     return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
   }
   async function endpointsOf(meta) {
@@ -8800,7 +8869,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "b7197cf3", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "25500d5b", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8808,7 +8877,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"b7197cf3"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"25500d5b"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { lintArrows, lintGroups } from './group-lint';
+import { lintArrows, lintGroups, lintOffGrid } from './group-lint';
+import type { LayoutGrid } from './layout-grid';
 
 const box = { x: 0, y: 0, width: 1000, height: 800 };
 const title = { x: 0, y: -200, width: 300, height: 115 };
@@ -136,5 +137,34 @@ describe('lintArrows starts-wrong-side and ends-wrong-side', () => {
     test('an end on the right or bottom edge is flagged', () => {
         expect(run([[1393, 400], [2600, 400], [2533, 400]])).toEqual(['ends-wrong-side']);
         expect(run([[1393, 400], [2300, 400], [2300, 900], [2300, 852]])).toEqual(['ends-wrong-side']);
+    });
+});
+
+describe('lintOffGrid', () => {
+    const grids: Record<string, LayoutGrid> = {
+        board: { id: 'board', originX: 164, originY: 2174, colWidth: 700, rowHeight: 1112 },
+        G: { id: 'G', originX: 9000, originY: 3500, colWidth: 700, rowHeight: 1112 },
+    };
+    const gridFor = (id: string): LayoutGrid => grids[id] as LayoutGrid;
+
+    test('screens on their own grid are fine, whatever the rows of other groups', () => {
+        const r = lintOffGrid(
+            [
+                { id: 'a', layoutId: 'board', rect: { x: 164 + 700, y: 2174 } },
+                { id: 'b', layoutId: 'G', rect: { x: 9000, y: 3500 + 1112 } },
+            ],
+            gridFor,
+        );
+        expect(r).toEqual([]);
+    });
+
+    test('a screen between pitches is flagged with the nearest cell and the offset', () => {
+        const [issue] = lintOffGrid([{ id: 'b', layoutId: 'G', rect: { x: 9000 + 700 + 40, y: 3500 - 25 } }], gridFor);
+        expect(issue).toMatchObject({ kind: 'off-grid', screenId: 'b', layoutId: 'G', col: 1, row: 0, dx: 40, dy: -25 });
+        expect(issue?.message).toContain('b');
+    });
+
+    test('a couple of pixels of drift is not off-grid', () => {
+        expect(lintOffGrid([{ id: 'b', layoutId: 'G', rect: { x: 9001.5, y: 3499 } }], gridFor)).toEqual([]);
     });
 });

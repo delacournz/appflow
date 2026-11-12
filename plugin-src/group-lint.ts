@@ -1,6 +1,7 @@
 import type { Pt, Rect } from './route';
 import type { PrototypeLintIssue } from './prototype-lint';
 import type { LabelStackIssue } from './arrow-labels';
+import { cellOfIn, onGrid, type LayoutGrid } from './layout-grid';
 import { groupConflicts, validateNesting, type ConflictContent, type ConflictGroup, type GroupIssue, type NestingIssue } from './flow-group';
 
 /** Pure group checks for lint_flow_layout. No `figma` global. */
@@ -18,7 +19,10 @@ export type ArrowLayoutIssue =
 /** A build badge on the board that no screen points at. */
 export type OrphanBadgeIssue = { kind: 'orphan-badge'; badgeId: string };
 
-export type LayoutIssue = ((GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string }) | (OrphanBadgeIssue & { message: string }) | (LabelStackIssue & { message: string }) | PrototypeLintIssue;
+/** A screen that does not sit on a cell of its layout grid: `col`/`row` are the nearest cell, `dx`/`dy` how far the frame is from it. */
+export type OffGridIssue = { kind: 'off-grid'; screenId: string; layoutId: string; col: number; row: number; dx: number; dy: number };
+
+export type LayoutIssue = ((GroupIssue | NestingIssue | ArrowLayoutIssue) & { message: string }) | (OffGridIssue & { message: string }) | (OrphanBadgeIssue & { message: string }) | (LabelStackIssue & { message: string }) | PrototypeLintIssue;
 
 export type GroupLint = { issues: LayoutIssue[]; counts: Record<string, number> };
 
@@ -197,4 +201,21 @@ export function lintArrows(arrows: readonly ArrowShape[], titles: readonly Title
     const counts: Record<string, number> = {};
     for (const i of issues) counts[i.kind] = (counts[i.kind] ?? 0) + 1;
     return { issues, counts };
+}
+
+/**
+ * `off-grid` for grouped boards: a screen not on the pitch of its own grid (`layoutId`). Screens in different groups need not
+ * share rows or columns, so only the screen's own grid is checked.
+ */
+export function lintOffGrid(screens: readonly { id: string; layoutId: string; rect: { x: number; y: number } }[], gridFor: (layoutId: string) => LayoutGrid): (OffGridIssue & { message: string })[] {
+    const out: (OffGridIssue & { message: string })[] = [];
+    for (const s of screens) {
+        const grid = gridFor(s.layoutId);
+        if (onGrid(grid, s.rect)) continue;
+        const { col, row } = cellOfIn(grid, s.rect);
+        const dx = Math.round(s.rect.x - (grid.originX + col * grid.colWidth));
+        const dy = Math.round(s.rect.y - (grid.originY + row * grid.rowHeight));
+        out.push({ kind: 'off-grid', screenId: s.id, layoutId: s.layoutId, col, row, dx, dy, message: `Screen ${s.id} is ${dx}px, ${dy}px off cell (${col},${row}) of its grid ${s.layoutId}. Run move_screen to put it on the pitch.` });
+    }
+    return out;
 }
