@@ -132,23 +132,23 @@ describe('groupBoundaryExtras and extrasMoves', () => {
         { id: 'u', col: 2, row: 0 },
     ];
     test('no groups, no extras', () => {
-        expect(groupBoundaryExtras([], screens, base)).toEqual({ colExtra: {}, rowExtra: {} });
+        expect(groupBoundaryExtras([], screens, base)).toEqual({ colExtra: [], rowExtra: [] });
     });
     test('stacked groups widen the row boundary; the title fits', () => {
         const e = groupBoundaryExtras([g('p', ['a', 'b']), g('q', ['c'])], screens, base);
-        expect(e.rowExtra[1]).toBeGreaterThan(0);
-        expect(e.colExtra[2]).toBeGreaterThan(0);
-        expect(e.colExtra[1]).toBeUndefined();
+        expect(e.rowExtra.some((b) => b.at === 1 && b.px > 0)).toBe(true);
+        expect(e.colExtra.some((b) => b.at === 2 && b.px > 0)).toBe(true);
+        expect(e.colExtra.some((b) => b.at === 1)).toBe(false);
     });
     test('moves cover every screen whose track start changes', () => {
         const meta = { ...base, colExtra: undefined, rowExtra: undefined };
         const moves = extrasMoves(screens, meta, { colExtra: { 2: 100 }, rowExtra: { 1: 50 } });
         expect(moves.map((m) => m.id).sort()).toEqual(['c', 'u']);
         expect(moves.every((m) => m.from.col === m.to.col && m.from.row === m.to.row)).toBe(true);
-        expect(extrasMoves(screens, { ...base, colExtra: { 2: 100 } }, { colExtra: { 2: 100 }, rowExtra: {} })).toEqual([]);
+        expect(extrasMoves(screens, { ...base, colExtra: { 2: 100 } }, { colExtra: { 2: 100 }, rowExtra: [] })).toEqual([]);
     });
     test('removing an extra moves the screens back', () => {
-        const moves = extrasMoves(screens, { ...base, colExtra: { 2: 100 } }, { colExtra: {}, rowExtra: {} });
+        const moves = extrasMoves(screens, { ...base, colExtra: { 2: 100 } }, { colExtra: [], rowExtra: [] });
         expect(moves.map((m) => m.id)).toEqual(['u']);
     });
 });
@@ -184,9 +184,9 @@ describe('planAssign', () => {
 });
 
 describe('mergeStyle', () => {
-    const base = { color: '#FFFFFF', strokeWeight: 4, titleSize: 96 };
+    const base = { color: '#FFFFFF', strokeWeight: 12, titleSize: 96, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' };
     test('overlays fields', () => {
-        expect(mergeStyle(base, { color: '#FF0000', titleSize: 64 })).toEqual({ ok: true, style: { color: '#FF0000', strokeWeight: 4, titleSize: 64 } });
+        expect(mergeStyle(base, { color: '#FF0000', titleSize: 64 })).toEqual({ ok: true, style: { ...base, color: '#FF0000', titleSize: 64 } });
         expect(mergeStyle(base, undefined)).toEqual({ ok: true, style: base });
     });
     test('rejects junk', () => {
@@ -194,5 +194,10 @@ describe('mergeStyle', () => {
         expect(mergeStyle(base, { strokeWeight: 0 }).ok).toBe(false);
         expect(mergeStyle(base, { size: 3 }).ok).toBe(false);
         expect(mergeStyle(base, 'x').ok).toBe(false);
+        expect(mergeStyle(base, { titleFill: 'dark' }).ok).toBe(false);
+    });
+    test('sets padding, title fill and colour; padding may not drop below the clearance', () => {
+        expect(mergeStyle(base, { padding: 200, titleFill: '#101010', titleColor: '#EEEEEE' })).toEqual({ ok: true, style: { ...base, padding: 200, titleFill: '#101010', titleColor: '#EEEEEE' } });
+        expect(mergeStyle(base, { padding: 10 }).ok).toBe(false);
     });
 });

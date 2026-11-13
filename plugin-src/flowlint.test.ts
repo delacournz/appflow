@@ -63,10 +63,9 @@ describe('classifyArrow', () => {
         expect(classifyArrow([{ x: 300, y: 0 }, { x: 0, y: 0 }])).toEqual({ heading: 'left', issues: ['points-left'] });
     });
 
-    test('a path that runs left before turning is flagged even when the head points down', () => {
+    test('a path that runs left out of the source side before turning is flagged even when the head points down', () => {
         expect(
             classifyArrow([
-                { x: 1000, y: 0 },
                 { x: 1000, y: 100 },
                 { x: 0, y: 100 },
                 { x: 0, y: 300 },
@@ -76,5 +75,28 @@ describe('classifyArrow', () => {
 
     test('jitter under the tolerance is ignored', () => {
         expect(classifyArrow([{ x: 0, y: 0 }, { x: -0.5, y: 200 }])).toEqual({ heading: 'down', issues: [] });
+    });
+});
+
+describe('classifyArrow bottom-exit detour', () => {
+    const detour = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }];
+
+    test('drop, one run left inside the gap, vertical, head right: accepted', () => {
+        expect(classifyArrow(detour)).toEqual({ heading: 'right', issues: [] });
+    });
+
+    test('a head down onto a top edge is accepted too', () => {
+        const top = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }, { x: 1000, y: 9200 }];
+        expect(classifyArrow(top)).toEqual({ heading: 'down', issues: [] });
+        const clean = [{ x: 1000, y: 3000 }, { x: 1000, y: 3060 }, { x: 800, y: 3060 }, { x: 800, y: 9000 }];
+        expect(classifyArrow(clean)).toEqual({ heading: 'down', issues: [] });
+    });
+
+    test('a leftward run that does not follow a drop, a second one, or a head pointing left still fails', () => {
+        const late = [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 200 }, { x: 40, y: 200 }, { x: 40, y: 500 }];
+        expect(classifyArrow(late).issues).toEqual(['runs-left']);
+        const fromSide = [{ x: 1000, y: 3000 }, { x: 800, y: 3000 }, { x: 800, y: 9000 }, { x: 1000, y: 9000 }];
+        expect(classifyArrow(fromSide).issues).toEqual(['runs-left']);
+        expect(classifyArrow([{ x: 300, y: 0 }, { x: 0, y: 0 }]).issues).toEqual(['points-left']);
     });
 });

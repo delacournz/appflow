@@ -1,12 +1,13 @@
 import { bannerName, cellRect, findDescendant, frameName, growBounds, labelName, overlapsAny, pickBanner, routeName } from './duplicate-plan';
 import { ensureBadge } from './badge';
-import { collectScreens, toLocal } from './flow';
+import { collectScreens, loadBoard, toLocal } from './flow';
+import { BOARD_GRID, cellRectIn } from './layout-grid';
 import { isScreenGroupName, routeSlot, screenGroupName } from './screen-group';
 import { fitRoute } from './anatomy';
 import { badgeName } from './screen-status';
 import { ARROW_KEY, BOARD_KEY, FLOW_NAMESPACE, SCREEN_KEY, parseBoardMeta, parseScreenMeta, type ScreenMeta } from './flowmeta';
 import type { Rect } from './rect';
-import { checkGroupArg, joinAndRefit } from './flow-groups';
+import { checkGroupArg, groupGrids, joinAndRefit, loadGroups } from './flow-groups';
 import { fail, ok, str, type Handler } from './types';
 
 const norm = (id: string) => id.replace('-', ':');
@@ -136,7 +137,17 @@ export const duplicateScreen: Handler = async (args) => {
     if (!wanted.ok) return fail(wanted.error);
     const flowGroupId = wanted.groupId;
 
-    const target = cellRect(board, col, row);
+    const groupedBoard = board.spacing === 'grouped';
+    const layoutId = flowGroupId ?? BOARD_GRID;
+    let target: Rect;
+    if (groupedBoard) {
+        const loaded = await loadBoard(meta.boardId);
+        const groups = await loadGroups(loaded);
+        if (flowGroupId && !groups.find((g) => g.id === flowGroupId)?.meta.layout) return fail(`The group ${flowGroupId} has no grid yet (it has no screens of its own). Add a screen to it first.`);
+        target = cellRectIn(groupGrids(loaded, groups)(layoutId), col, row, { width: board.screenW, height: board.screenH });
+    } else {
+        target = cellRect(board, col, row);
+    }
     const grouped = src.parent?.type === 'GROUP' && isScreenGroupName(src.parent.name) ? src.parent : null;
     const container = grouped ? grouped.parent : src.parent;
     const siblings = container && 'children' in container ? container.children : [];
@@ -219,6 +230,7 @@ export const duplicateScreen: Handler = async (args) => {
         build: { status: 'not-built' },
         badgeId: badgeCopy?.id ?? null,
         flowGroupId,
+        ...(groupedBoard ? { layoutId } : {}),
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build) await ensureBadge(copy, fresh, fresh.build);

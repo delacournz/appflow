@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { FULL_SPAN } from './tracks';
 
 import {
     arrowGroupName,
@@ -39,6 +40,12 @@ describe('meta parsing', () => {
         expect(parseBoardMeta(JSON.stringify(board))).toEqual(board);
         expect(parseScreenMeta(JSON.stringify(screenMeta))).toEqual(screenMeta);
         expect(parseArrowMeta(JSON.stringify(arrow))).toEqual(arrow);
+    });
+
+    test('keeps an optional labelsGroupId and drops a malformed one', () => {
+        expect(parseBoardMeta(JSON.stringify({ ...board, labelsGroupId: '9:9' }))?.labelsGroupId).toBe('9:9');
+        expect(parseBoardMeta(JSON.stringify({ ...board, labelsGroupId: 5 }))?.labelsGroupId).toBeUndefined();
+        expect(parseBoardMeta(JSON.stringify(board))?.labelsGroupId).toBeUndefined();
     });
 
     test('rejects empty, malformed, wrong-kind and wrong-version data', () => {
@@ -145,8 +152,14 @@ describe('board extras', () => {
     });
     test('extras round-trip and junk is dropped', () => {
         const m = parseBoardMeta(JSON.stringify({ ...base, colExtra: { 2: 100, 3: -1 }, rowExtra: 'x' }));
-        expect(m?.colExtra).toEqual({ 2: 100 });
+        expect(m?.colExtra).toEqual([{ at: 2, from: 0, to: FULL_SPAN, px: 100 }]);
         expect(m?.rowExtra).toBeUndefined();
+    });
+    test('gapExtra round-trips and empty or junk is dropped', () => {
+        const gap = { colExtra: [], rowExtra: [{ at: 8, from: 11, to: 25, px: 160 }] };
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: gap }))?.gapExtra).toEqual(gap);
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: { colExtra: [], rowExtra: [] } }))?.gapExtra).toBeUndefined();
+        expect(parseBoardMeta(JSON.stringify({ ...base, gapExtra: 'x' }))?.gapExtra).toBeUndefined();
     });
     test('cellOfRect reads widened boundaries', () => {
         expect(cellOfRect({ x: 1500, y: 0 }, { ...base, colExtra: { 2: 100 } })).toEqual({ col: 2, row: 0 });
@@ -162,6 +175,20 @@ describe('flow group meta', () => {
         expect(m?.parentId).toBe('p');
         expect(parseGroupMeta(JSON.stringify(ok))?.parentId).toBeUndefined();
     });
+    test('a legacy style (no padding) migrates: 4px stroke becomes 12, padding and title bar defaults fill in', () => {
+        const m = parseGroupMeta(JSON.stringify(ok));
+        expect(m?.style).toEqual({ color: '#FFFFFF', strokeWeight: 12, titleSize: 96, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' });
+        const custom = parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, strokeWeight: 6 } }));
+        expect(custom?.style.strokeWeight).toBe(6);
+    });
+    test('a full style keeps its values, even a 4px stroke', () => {
+        const style = { color: '#FF0000', strokeWeight: 4, titleSize: 50, padding: 90, titleFill: '#111111', titleColor: '#EEEEEE' };
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style }))?.style).toEqual(style);
+    });
+    test('rejects a bad title fill or padding', () => {
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, titleFill: 'dark' } }))).toBeNull();
+        expect(parseGroupMeta(JSON.stringify({ ...ok, style: { ...ok.style, padding: 0 } }))).toBeNull();
+    });
     test('rejects malformed data', () => {
         expect(parseGroupMeta('')).toBeNull();
         expect(parseGroupMeta('nope')).toBeNull();
@@ -175,5 +202,25 @@ describe('flow group meta', () => {
         expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: 'g' }))?.flowGroupId).toBe('g');
         expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: null }))).not.toBeNull();
         expect(parseScreenMeta(JSON.stringify({ ...s, flowGroupId: 5 }))).toBeNull();
+    });
+});
+
+describe('layout grid meta', () => {
+    test('spacing grouped is a valid board mode; unknown modes are dropped', () => {
+        expect(parseBoardMeta(JSON.stringify({ ...board, spacing: 'grouped' }))?.spacing).toBe('grouped');
+        expect(parseBoardMeta(JSON.stringify({ ...board, spacing: 'wobbly' }))?.spacing).toBeUndefined();
+    });
+
+    test('a screen keeps its layoutId; a non-string one is refused; old screens without it still parse', () => {
+        expect(parseScreenMeta(JSON.stringify({ ...screenMeta, layoutId: 'g1' }))?.layoutId).toBe('g1');
+        expect(parseScreenMeta(JSON.stringify({ ...screenMeta, layoutId: 4 }))).toBeNull();
+        expect(parseScreenMeta(JSON.stringify(screenMeta))?.layoutId).toBeUndefined();
+    });
+
+    test('a group keeps its layout origin; a malformed one is dropped, not fatal', () => {
+        const ok = { boardId: 'b', name: 'Passkeys', screenIds: ['1:1'], rectId: 'r', titleId: 't', style: { color: '#FFFFFF', strokeWeight: 12, titleSize: 96 } };
+        expect(parseGroupMeta(JSON.stringify({ ...ok, layout: { originX: 900, originY: 40 } }))?.layout).toEqual({ originX: 900, originY: 40 });
+        expect(parseGroupMeta(JSON.stringify({ ...ok, layout: { originX: 'a', originY: 40 } }))?.layout).toBeUndefined();
+        expect(parseGroupMeta(JSON.stringify(ok))?.layout).toBeUndefined();
     });
 });

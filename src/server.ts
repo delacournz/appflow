@@ -6,16 +6,19 @@
  * stdout carries only MCP messages (via the SDK's stdio transport).
  * Everything else is logged to stderr.
  */
+import { watch } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+
+import type { McpServer } from '@modelcontextprotocol/server';
 
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { startBridge } from './bridge';
 import { readExpectedBuild, stalePlugin, STALE_FIX } from './build';
-import { createServer } from './mcp';
+import { createServer, syncTools } from './mcp';
 import { CodeConnectStore } from './store';
-import type { ToolContext } from './tools';
+import { TOOLS, type ToolContext, type ToolDef } from './tools';
 const PORT = Number(process.env.APPFLOW_PORT ?? process.env.FIGMA_BRIDGE_PORT ?? 3055);
 const HOME = process.env.APPFLOW_HOME ?? process.env.FIGMA_BRIDGE_HOME ?? join(homedir(), '.appflow');
 const log = (...parts: unknown[]) => console.error('[appflow]', ...parts);
@@ -45,13 +48,49 @@ const ctx: ToolContext = {
     },
 };
 
-const handle = serveStdio(() => createServer(ctx), { onerror: (error) => log('mcp:', error.message) });
+const servers = new Set<McpServer>();
+let liveTools: readonly ToolDef[] = TOOLS;
+const handle = serveStdio(
+    () => {
+        const server = createServer(ctx, liveTools);
+        servers.add(server);
+        return server;
+    },
+    { onerror: (error) => log('mcp:', error.message) },
+);
+
+/**
+ * Every `bun run build` rewrites plugin/build.json. Re-import the tool list then (cache-busted) and sync it into the running
+ * servers, which notify the client with tools/list_changed, so new or changed tools appear without /mcp. Only tools.ts is
+ * re-read; a change to a module it imports still needs a restart.
+ */
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+async function reloadTools(): Promise<void> {
+    try {
+        expectedBuild = await readExpectedBuild(BUILD_JSON);
+        const mod = (await import(`./tools.ts?v=${Date.now()}`)) as { TOOLS: ToolDef[] };
+        liveTools = mod.TOOLS;
+        for (const server of servers) {
+            const c = syncTools(server, liveTools, ctx);
+            if (c.added.length || c.removed.length || c.updated.length) log('tools reloaded:', JSON.stringify(c));
+        }
+    } catch (error) {
+        log('tool reload failed:', error instanceof Error ? error.message : error);
+    }
+}
+const watcher = watch(dirname(BUILD_JSON), (_event, file) => {
+    if (file !== 'build.json') return;
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => void reloadTools(), 300);
+});
+
 
 let stopping = false;
 /** Ends the MCP connection and frees the plugin port. Runs once, on stdin EOF or a signal. */
 async function shutdown() {
     if (stopping) return;
     stopping = true;
+    watcher.close();
     await handle.close().catch((error: unknown) => log('close:', error));
     bridge.stop();
     process.exit(0);

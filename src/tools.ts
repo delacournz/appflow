@@ -387,7 +387,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'lint_flow_layout',
-        'Check that flow arrows read left to right and that flow group boxes are clean. Scans arrow vectors under a node (or the current page) and reports any whose head points left (points-left) or whose path travels left (runs-left), with ids and endpoints. On adopted boards with flow groups it also returns layoutIssues (each with boardId and message) and counts per kind: group-crosses-content (a box stroke cuts a screen, route text or badge), group-crosses-label (a stroke cuts an arrow label), group-overlaps-group, group-encloses-foreign (a non-member screen inside a box), title-overlaps, and nesting-too-deep, child-outside-parent, parent-missing. Arrow lines may cross a box; nothing else may. passed is false on any issue. Run it after laying out, grouping or rerouting a flow; follow the flow-layout skill to fix issues.',
+        'Check that flow arrows read left to right and that flow group boxes are clean. Scans arrow vectors under a node (or the current page) and reports any whose head points left (points-left) or whose path travels left (runs-left), with ids and endpoints. The one leftward run allowed is the bottom-exit detour: drop from the source bottom, one run left along the row gap, head pointing right or down. On adopted boards with flow groups it also returns layoutIssues (each with boardId and message) and counts per kind: group-crosses-content (a box stroke cuts a screen, route text or badge), group-crosses-label (a stroke cuts an arrow label), group-overlaps-group, group-encloses-foreign (a non-member screen inside a box), title-overlaps, and nesting-too-deep, child-outside-parent, parent-missing, plus arrow checks label-overlaps-label, lines-overlap (two collinear arrow lines sharing over 40px), shared-start (two arrows leaving the same dot for different targets that share more than 48px of their first run: they must fork into rows of their own), line-crosses-title (an arrow line through a group title), line-crosses-screen (a line through a screen that is neither its source nor its target), starts-wrong-side (an arrow starting on the left or top edge of its source) and ends-wrong-side (an arrow ending on the right or bottom edge of its target): arrows start only on the bottom or right edge of a screen and end only on its left or top edge. Arrows into one target merge on a shared trunk and final run, which lines-overlap ignores; arrows from one dot to different targets fork (a short stub, then a row each). It also checks the prototype against the arrows: prototype-mismatch (the trigger of an arrow navigates somewhere other than its target, or has no navigate reaction; an error), and, informational only and never failing passed, prototype-without-arrow (a NAVIGATE reaction on a screen or inside it, screen-level AFTER_TIMEOUT included, to another board screen that no arrow connects; back links like Close or Go to wallet may stay prototype-only) and auto-arrow-no-prototype (an arrow with no trigger whose source has no frame-level AFTER_TIMEOUT and no reaction to the target). Reactions to nodes that are not board screens (overlays, back, other pages) are ignored. Persistent navigation is exempt: a reaction on a layer named like a tab bar, bottom nav or navigation bar (or inside one), or on a control named after a tab (a name ending in a tab root, like Hotspot · Pay), or to a tab root or a state variant of one (Account · verify your identity). Tab roots are the screens reached by arrows whose trigger is named Hotspot · … or contains Tab, or whose label is Tap Home/Pay/Activity/Account, needs no arrow; exemptCount in counts shows how many were skipped. Duplicate reactions (the same control and destination) are reported once. Each carries the arrow id when there is one, source and target names, the reaction node id, its name (triggerName) and the actual destination id. Arrow lines may cross a box; nothing else may. passed is false on any issue except informational ones. Run it after laying out, grouping or rerouting a flow; follow the flow-layout skill to fix issues.',
         obj({ nodeId, tolerance: num('Pixels of leftward movement to ignore. Default 1.').optional() }),
     ),
     passthrough(
@@ -408,16 +408,18 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'reroute_flow',
-        'Redraw flow arrows from the current positions of their screens and triggers, after moving screens. Updates each vector, dot and label in place, assigns lanes per gutter in a stable order, and reports arrows whose screens were deleted and arrows that run backwards. Without boardId it covers every adopted board on the current page.',
+        'Redraw flow arrows from the current positions of their screens and triggers, after moving screens. Updates each vector, dot and label in place, assigns lanes per gutter in a stable order, and reports arrows whose screens were deleted and arrows that run backwards. Without boardId it covers every adopted board on the current page. Refuses with pitch-mismatch when the board\'s stored pitch no longer matches where its screens sit (re-deriving cells from those positions would stack screens in one cell); a uniform board whose screens agree on one pitch is repaired from their positions instead. Spacing "grouped": every flow group (nested ones too) lays its own screens on its own grid at the board pitch, so groups need not share rows or columns; the conversion keeps every screen that is on its group’s pitch and snaps the others once to the nearest free cell (dryRun reports the grids and the planned moves first). A group that grows pushes its neighbours right or down, never up or left.',
         obj({
             boardId: str('Board node ID.').optional(),
             arrowIds: z.array(z.string()).describe('Only redraw these arrow group IDs (as returned by connect).').optional(),
+            spacing: z.enum(['uniform', 'banded', 'grouped']).describe('Board spacing mode, stored on the board. "uniform" (default): one column pitch and one row pitch for the whole board, grown to fit the widest group boundary, so every column shares an x and every row a y. "banded": base pitch plus per-region extras (older behaviour). Switching converts the board on this call.').optional(),
+            dryRun: bool('With spacing "grouped": report the grids the conversion would make and the planned snap moves, changing nothing. Default false.').optional(),
         }),
         120_000,
     ),
     passthrough(
         'adopt_board',
-        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and records each screen frame. Screens stay top-level frames (never grouped) so prototype Play and flow starting points work; Figma\'s own frame title is the screen name, so there is no label text. A "Route · {name}" text above the frame and a "Badge · {name}" pill are loose siblings. Reports vectors it could not match instead of guessing. Use dryRun to preview without writing.',
+        'Make an existing hand-built flow board manageable: infers the grid from the screen frames inside the board, stores flowbridge plugin data on the board and screens, and groups each arrow vector with its start dot and label (linking it to its screens and trigger), and records each screen frame. Screens stay top-level frames (never grouped) so prototype Play and flow starting points work; Figma\'s own frame title is the screen name, so there is no label text. A "Route · {name}" text above the frame and a "Badge · {name}" pill are loose siblings. Also links each "Badge · {name}" pill to its screen (exact name, else the pill in the screen\'s own slot) and re-links arrow groups whose stored ids are stale (a copied board): ends are resolved from where the arrow is now, with the group name "Flow · A → B · label" as a tiebreak, tolerating screens shifted by up to ~650px since the arrow was drawn; run reroute_flow afterwards to redraw them. Ends that cannot be told apart are reported (unmatched, with candidates) instead of guessed. Safe to re-run: existing board data, screen status, flow group membership and extras are kept and only missing links are added. Use dryRun to preview without writing.',
         obj({
             boardNodeId: str('The board background rectangle or section.'),
             colWidth: num('Override the inferred column spacing.').optional(),
@@ -429,7 +431,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'describe_board',
-        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, screens, arrows, groups, groupTree, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), each prefixed with its build mark (✓ built, ~ drift, · not built); screens lists { id, name, col, row, route, status, verifiedAt } for the verify-built skill; arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale screen meta, two screens in one cell, arrows with missing endpoints arrows pointing left, screens with no build badge, built screens with no route text, and flow-group problems (empty, hidden or stale groups, missing parents); groups lists flow groups as { id, name, parentId, screens: [names], box } and groupTree draws them indented. Without boardId it covers every adopted board on the current page.',
+        'Describe adopted flow boards as text. Per board returns { boardId, name, cols, rows, grid, screens, arrows, groups, groupTree, issues }: grid is an ASCII table of screen names by column (c0..) and row (r0..), each prefixed with its build mark (✓ built, ~ drift, · not built); screens lists { id, name, col, row, route, status, verifiedAt } for the verify-built skill; arrows lists each link as "From (c,r) --label--> To (c,r) [trigger: name | auto]" (plus [bottom exit]), and issues lists meta/position mismatches, stale screen meta, two screens in one cell, arrows with missing endpoints arrows pointing left, screens with no build badge, built screens with no route text, and flow-group problems (empty, hidden or stale groups, missing parents); groups lists flow groups as { id, name, parentId, screens: [names], box } and groupTree draws them indented. On a grouped board grid holds one titled table per layout grid (titled Group name, origin x,y), cells are local to each grid, and grids lists { id, name, originX, originY, cols, rows, grid }; issues add screens off the pitch of their grid. Without boardId it covers every adopted board on the current page.',
         obj({
             boardId: boardIdAll,
             width: num('Characters per grid cell before a screen name is truncated. Default 16.').optional(),
@@ -465,7 +467,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'create_flow_group',
-        'Draw a labelled box around a set of screens on an adopted board: a white 4 px no-fill rectangle with a bold centred title above it ("Group · {name}" and "Group title · {name}" layers, in a "Flow groups · {board}" frame just above the board background and below the screens, so screens stay top-level and prototype Play works). The box and title are fitted automatically: the board\'s column and row gaps are widened where a box edge meets another group or ungrouped screen (screens after that boundary shift), and the box refits whenever screens are added, moved, duplicated or removed. Rules the layout keeps: arrow lines may cross a box stroke; a box, its stroke and its title never cross a screen, route text, badge, arrow label, or another group\'s box or title (anything that cannot be avoided is listed in issues; fix by moving screens or arrows). Never draw boxes by hand. Members: screenIds, else cells, else the selected screens. A screen is in at most one group, so a screen already in another group is refused (use update_flow_group remove first). Nesting is one level: with parentId the new group is a child inside that group; its screens may be taken from the parent (they move into the child) and the parent\'s box wraps the child\'s box and title. A group nested deeper is refused. Use dryRun to preview members and the extra spacing. Returns { groupId, name, screens, box, title, extras, screensShifted, board, issues, nesting, reroute } (dryRun: { dryRun, screens, extras, screensShifted }).',
+        'Draw a labelled box around a set of screens on an adopted board: a white 12 px no-fill rectangle with 160 px padding and a dark title bar (an auto-layout frame, full box width, flush on the box top, bold white left-aligned name) above it ("Group · {name}" and "Group title · {name}" layers, in a "Flow groups · {board}" frame just above the board background and below the screens, so screens stay top-level and prototype Play works). The box and title are fitted automatically: the board\'s column and row gaps are widened where a box edge meets another group or ungrouped screen (screens after that boundary shift), and the box refits whenever screens are added, moved, duplicated or removed. Rules the layout keeps: arrow lines may cross a box stroke; a box, its stroke and its title never cross a screen, route text, badge, arrow label, or another group\'s box or title (anything that cannot be avoided is listed in issues; fix by moving screens or arrows). Never draw boxes by hand. Members: screenIds, else cells, else the selected screens. A screen is in at most one group, so a screen already in another group is refused (use update_flow_group remove first). Nesting is one level: with parentId the new group is a child inside that group; its screens may be taken from the parent (they move into the child) and the parent\'s box wraps the child\'s box and title. A group nested deeper is refused. On a grouped board (reroute_flow spacing "grouped") the group gets a grid of its own at the top-left of its members and no screen moves; a screen that joins and is off the grid pitch snaps to the nearest free cell and is listed in snapped, and a box that grows pushes neighbouring groups right or down. Use dryRun to preview members and the extra spacing. Returns { groupId, name, screens, box, title, extras, screensShifted, board, issues, nesting, reroute } (dryRun: { dryRun, screens, extras, screensShifted }).',
         obj({
             name: str('Group title, such as "Passkeys".'),
             boardId: str('Board node ID. Default: the board of the given or selected screens, else the only board on the page.').optional(),
@@ -473,9 +475,12 @@ const RAW_TOOLS: ToolDef[] = [
             cells: z.array(obj({ col: z.int(), row: z.int() })).describe('Grid cells whose screens go in the group. Used when screenIds is omitted.').optional(),
             parentId: str('Nest the new group inside this flow group (one level only).').optional(),
             style: obj({
-                color: str('#RRGGBB for the stroke and title. Default #FFFFFF.').optional(),
-                strokeWeight: num('Stroke width in px. Default 4.').optional(),
+                color: str('#RRGGBB for the box line. Default #FFFFFF.').optional(),
+                strokeWeight: num('Box line width in px. Default 12.').optional(),
+                padding: num('Gap from screens and route text to the box line, px (min 48). Default 160.').optional(),
                 titleSize: num('Title font size. Default 96 (63 for a nested group).').optional(),
+                titleFill: str('#RRGGBB title bar fill. Default #2C2C2C.').optional(),
+                titleColor: str('#RRGGBB title text. Default #FFFFFF.').optional(),
             })
                 .describe('Box and title style.')
                 .optional(),
@@ -495,7 +500,10 @@ const RAW_TOOLS: ToolDef[] = [
             style: obj({
                 color: str('#RRGGBB.').optional(),
                 strokeWeight: num().optional(),
+                padding: num().optional(),
                 titleSize: num().optional(),
+                titleFill: str().optional(),
+                titleColor: str().optional(),
             })
                 .describe('Fields to change.')
                 .optional(),
@@ -515,6 +523,15 @@ const RAW_TOOLS: ToolDef[] = [
             boardId: boardIdAll,
             dryRun: bool('Report the plan without changing the file. Default true.').optional(),
             removeOld: bool('Also delete the hand-drawn boxes, titles and Section Heading instances that were turned into groups. Default false; only with user consent.').optional(),
+        }),
+        180_000,
+    ),
+    passthrough(
+        'repair_board',
+        'Rebuild a board whose background node was deleted. Screens, arrows, flow groups and the group holder still carry the old board id; this draws a new locked background under them, infers a uniform grid from the screens\' stored cells (or uses the holder\'s board backup), relinks every screen, arrow and group to the new id, then settles and reroutes the board. Without boardId it repairs the only missing board on the page. Run dryRun first to see the inferred grid and counts. Returns { boardId, missingBoardId, name, fromBackup, grid, screens, arrows, groups, settled }.',
+        obj({
+            boardId: str('The deleted board background id that screens still point at. Default: the only missing board on the page.').optional(),
+            dryRun: bool('Report what would be rebuilt without changing the file. Default false.').optional(),
         }),
         180_000,
     ),
@@ -546,7 +563,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'badge_screens',
-        'Add or refresh the build badge on every adopted screen, showing its stored status (Not built when none). Idempotent; run once on existing boards. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, skipped: [{ id, name, reason }] }.',
+        'Add or refresh the build badge on every adopted screen, showing its stored status (Not built when none; a screen with no stored status keeps the Built or Drift its current badge shows, marked recovered), and delete orphan badges: "Badge · …" pills on the board that no screen points at (left behind by renames, duplicates or deletes; listed in removed with their old text). Idempotent; run once on existing boards. Without boardId it covers every adopted board on the current page. Returns { dryRun, boards, added, refreshed, removed: [{ id, name, text }], skipped: [{ id, name, reason }] }.',
         obj({
             boardId: boardIdAll,
             dryRun: bool('Report what would change without editing the file. Default false.').optional(),
@@ -570,7 +587,7 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'move_screen',
-        'Move an adopted screen to a grid cell, taking its route text and badge with it, and update its stored cell. Refuses an occupied cell unless swap is true (the two screens then trade cells). Grows the board background when the cell is outside it, then reroutes the board’s arrows. Screens whose stored data was copied by duplicating a frame in Figma are repaired from their position and reported in stale. Flow group boxes refit to the new positions. Returns { boardId, moved: [{id, name, from, to}], stale, board, reroute, groups? }.',
+        'Move an adopted screen to a grid cell, taking its route text and badge with it, and update its stored cell. On a grouped board col and row are local to the screen’s own grid (its group’s, or the board grid for ungrouped screens); with group the screen moves into that group’s grid at that local cell (a swap across two groups is refused). Refuses an occupied cell unless swap is true (the two screens then trade cells). Grows the board background when the cell is outside it, then reroutes the board’s arrows. Screens whose stored data was copied by duplicating a frame in Figma are repaired from their position and reported in stale. Flow group boxes refit to the new positions. Returns { boardId, moved: [{id, name, from, to}], stale, board, reroute, groups? }.',
         obj({
             id: str('Screen frame ID.'),
             col: num('Target column, 0-based.'),
@@ -582,27 +599,29 @@ const RAW_TOOLS: ToolDef[] = [
     ),
     passthrough(
         'insert_columns',
-        'Make room for new columns: every screen with a column greater than `after` (and its route text and badge) moves `count` columns right, the board grows, and arrows are rerouted. Use after: -1 to insert before the first column. Returns { boardId, moved, stale, board, reroute }.',
+        'Make room for new columns: every screen with a column greater than `after` (and its route text and badge) moves `count` columns right, the board grows, and arrows are rerouted. Use after: -1 to insert before the first column. On a grouped board only one grid shifts: groupId names the group (default: the board grid of ungrouped screens), other groups stay where they are and the box refits, pushing neighbours only if it overlaps. Returns { boardId, moved, stale, board, reroute }.',
         obj({
             boardId: str('Board node ID.'),
             after: num('Insert after this column (0-based). -1 inserts before the first.'),
             count: num('Columns to insert. Default 1.').optional(),
+            groupId: str('Grouped boards: the flow group whose grid to shift. Default: the board grid (ungrouped screens).').optional(),
         }),
         120_000,
     ),
     passthrough(
         'insert_rows',
-        'Make room for new rows: every screen with a row greater than `after` (and its route text and badge) moves `count` rows down, the board grows, and arrows are rerouted. Use after: -1 to insert before the first row. Returns { boardId, moved, stale, board, reroute }.',
+        'Make room for new rows: every screen with a row greater than `after` (and its route text and badge) moves `count` rows down, the board grows, and arrows are rerouted. Use after: -1 to insert before the first row. On a grouped board only one grid shifts: groupId names the group (default: the board grid of ungrouped screens), other groups stay where they are and the box refits, pushing neighbours only if it overlaps. Returns { boardId, moved, stale, board, reroute }.',
         obj({
             boardId: str('Board node ID.'),
             after: num('Insert after this row (0-based). -1 inserts before the first.'),
             count: num('Rows to insert. Default 1.').optional(),
+            groupId: str('Grouped boards: the flow group whose grid to shift. Default: the board grid (ungrouped screens).').optional(),
         }),
         120_000,
     ),
     passthrough(
         'compact_board',
-        'Close empty columns and rows between screens (the first used column and row keep their index), shrink the board background to fit, and reroute arrows. Returns { boardId, moved, stale, board, reroute }.',
+        'Close empty columns and rows between screens (the first used column and row keep their index; on a grouped board each grid is compacted on its own), shrink the board background to fit, and reroute arrows. Returns { boardId, moved, stale, board, reroute }.',
         obj({ boardId: str('Board node ID.') }),
         120_000,
     ),

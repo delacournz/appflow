@@ -1,6 +1,6 @@
 /** Shared plugin data model for flow boards, plus pure helpers. No `figma` global. */
 
-import { cleanExtras, trackOf, type Extras } from './tracks';
+import { cellOfPoint, cleanExtras, type Extras, type ExtrasInput } from './tracks';
 
 export const FLOW_NAMESPACE = 'flowbridge';
 export const BOARD_KEY = 'board';
@@ -19,16 +19,28 @@ export type BoardMeta = {
     originY: number;
     colWidth: number;
     rowHeight: number;
-    /** Extra px added before column i (cumulative). Absent = uniform columns. */
+    /** Extra px added before column `at`, for the rows `from`..`to` only (cumulative). Absent = uniform columns. */
     colExtra?: Extras;
-    /** Extra px added before row i (cumulative). Absent = uniform rows. */
+    /** Extra px added before row `at`, for the columns `from`..`to` only (cumulative). Absent = uniform rows. */
     rowExtra?: Extras;
+    /**
+     * 'uniform' (default): one column pitch and one row pitch for the whole board; `colWidth`/`rowHeight` are the effective
+     * pitch and no extras apply. 'banded': base pitch plus per-region extras.
+     */
+    spacing?: 'uniform' | 'banded' | 'grouped';
+    /** The pitch without group needs (uniform spacing only); `colWidth`/`rowHeight` are base plus the largest need. */
+    baseColWidth?: number;
+    baseRowHeight?: number;
+    /** Extra room measured from the drawn group boxes (gap-fix.ts), added to the planned extras; kept so refits do not undo it. */
+    gapExtra?: { colExtra: Extras; rowExtra: Extras };
     screenW: number;
     screenH: number;
     labelOffset: number;
     margin: number;
     headingId: string | null;
     arrowsGroupId: string;
+    /** The `Flow arrow labels · {board}` container holding every arrow label above all arrow lines; absent on boards not yet migrated. */
+    labelsGroupId?: string;
     arrowStyle: { strokeVariableId: string | null; color: Rgb; weight: number; cornerRadius: number };
 };
 
@@ -48,10 +60,20 @@ export type ScreenMeta = {
     badgeId?: string | null;
     /** The flow group (labelled box) this screen belongs to: the id of the group's rect. Distinct from the legacy `groupId`. */
     flowGroupId?: string | null;
+    /** The layout grid `col`/`row` are local to: a flow group's id, or `board` / absent for the board grid. Only on boards with `spacing: 'grouped'`. */
+    layoutId?: string;
 };
 
-/** How a flow group's box and title are drawn. `color` is `#RRGGBB`. */
-export type GroupStyle = { color: string; strokeWeight: number; titleSize: number };
+/**
+ * How a flow group's box and title bar are drawn. Colours are `#RRGGBB`. `color` is the box line, `titleFill` the title bar
+ * fill, `titleColor` the title text. `padding` is the gap from member content to the line's inner edge.
+ */
+export type GroupStyle = { color: string; strokeWeight: number; titleSize: number; padding: number; titleFill: string; titleColor: string };
+
+/** Defaults for style fields; mirrors the constants in flow-group.ts (kept here so this module stays dependency-free). */
+export const STYLE_DEFAULTS = { strokeWeight: 12, padding: 160, titleFill: '#2C2C2C', titleColor: '#FFFFFF' } as const;
+/** Stroke weight old groups (drawn before padding existed) were created with; they migrate to the new default. */
+const LEGACY_STROKE = 4;
 
 /** Stored on a flow group's rectangle node. The group's id is that node's id (`rectId`). */
 export type GroupMeta = {
@@ -64,6 +86,8 @@ export type GroupMeta = {
     /** Set on a nested child. One level only. */
     parentId?: string;
     style: GroupStyle;
+    /** Where this group's own layout grid starts (cell 0,0) in absolute coordinates; the pitch is the board's. Only on grouped boards. */
+    layout?: { originX: number; originY: number };
 };
 
 export type BuildStatus =
@@ -131,9 +155,19 @@ export function parseBoardMeta(raw: string): BoardMeta | null {
     for (const k of ['colExtra', 'rowExtra'] as const) {
         const raw = o[k];
         if (raw === undefined) continue;
-        const clean = isObj(raw) ? cleanExtras(raw as Extras) : {};
-        if (Object.keys(clean).length) meta[k] = clean;
+        const clean = isObj(raw) || Array.isArray(raw) ? cleanExtras(raw as ExtrasInput) : [];
+        if (clean.length) meta[k] = clean;
         else delete meta[k];
+    }
+    if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId)) delete meta.labelsGroupId;
+    if (o.spacing !== undefined && o.spacing !== 'uniform' && o.spacing !== 'banded' && o.spacing !== 'grouped') delete meta.spacing;
+    for (const k of ['baseColWidth', 'baseRowHeight'] as const) if (o[k] !== undefined && !(isNum(o[k]) && (o[k] as number) > 0)) delete meta[k];
+    const gap = o.gapExtra;
+    if (gap !== undefined) {
+        const clean = (v: unknown) => (isObj(v) || Array.isArray(v) ? cleanExtras(v as ExtrasInput) : []);
+        const [colExtra, rowExtra] = isObj(gap) ? [clean(gap.colExtra), clean(gap.rowExtra)] : [[], []];
+        if (colExtra.length || rowExtra.length) meta.gapExtra = { colExtra, rowExtra };
+        else delete meta.gapExtra;
     }
     return meta;
 }
@@ -145,6 +179,7 @@ export function parseScreenMeta(raw: string): ScreenMeta | null {
     if (o.groupId !== undefined && !strOrNull(o.groupId)) return null;
     if (o.badgeId !== undefined && !strOrNull(o.badgeId)) return null;
     if (o.flowGroupId !== undefined && !strOrNull(o.flowGroupId)) return null;
+    if (o.layoutId !== undefined && !isStr(o.layoutId)) return null;
     if (o.build !== undefined && !parseBuildStatus(o.build)) return null;
     return o as unknown as ScreenMeta;
 }
@@ -167,6 +202,13 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
     const s = o.style;
     if (!isObj(s) || !isStr(s.color) || !/^#[0-9a-fA-F]{6}$/.test(s.color) || !isNum(s.strokeWeight) || !isNum(s.titleSize)) return null;
     if (s.strokeWeight <= 0 || s.titleSize <= 0) return null;
+    const hex = (v: unknown, d: string): string | null => (v === undefined ? d : isStr(v) && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
+    const titleFill = hex(s.titleFill, STYLE_DEFAULTS.titleFill);
+    const titleColor = hex(s.titleColor, STYLE_DEFAULTS.titleColor);
+    if (!titleFill || !titleColor) return null;
+    if (s.padding !== undefined && (!isNum(s.padding) || s.padding <= 0)) return null;
+    const legacy = s.padding === undefined;
+    const layout = isObj(o.layout) && isNum(o.layout.originX) && isNum(o.layout.originY) ? { originX: o.layout.originX, originY: o.layout.originY } : null;
     return {
         boardId: o.boardId,
         name: o.name,
@@ -174,7 +216,15 @@ export function parseGroupMeta(raw: string): GroupMeta | null {
         rectId: o.rectId,
         titleId: o.titleId,
         ...(o.parentId ? { parentId: o.parentId } : {}),
-        style: { color: s.color, strokeWeight: s.strokeWeight, titleSize: s.titleSize },
+        ...(layout ? { layout } : {}),
+        style: {
+            color: s.color,
+            strokeWeight: legacy && s.strokeWeight === LEGACY_STROKE ? STYLE_DEFAULTS.strokeWeight : s.strokeWeight,
+            titleSize: s.titleSize,
+            padding: isNum(s.padding) ? s.padding : STYLE_DEFAULTS.padding,
+            titleFill,
+            titleColor,
+        },
     };
 }
 
@@ -184,7 +234,7 @@ export function cellOfRect(
     rect: { x: number; y: number },
     board: Pick<BoardMeta, 'originX' | 'originY' | 'colWidth' | 'rowHeight' | 'colExtra' | 'rowExtra'>,
 ): { col: number; row: number } {
-    return { col: trackOf(rect.x - board.originX, board.colWidth, board.colExtra), row: trackOf(rect.y - board.originY, board.rowHeight, board.rowExtra) };
+    return cellOfPoint(rect.x - board.originX, rect.y - board.originY, board.colWidth, board.rowHeight, board.colExtra, board.rowExtra);
 }
 
 /** Stable order for lane assignment: source column, then target row, then id. */

@@ -78,6 +78,7 @@ The `verify-built` skill compares each screen's route code and the running app w
 | `connect` | Draws an arrow from the triggering control and points its prototype at the target. |
 | `reroute_flow` | Redraws arrows from current positions after moves outside the board tools. Reports backwards and dangling arrows. |
 | `create_flow_group` / `update_flow_group` / `delete_flow_group` | Labelled box (stroked rectangle plus bold title) around a set of screens, one level of nesting. Boundaries widen and boxes refit automatically when screens are added, moved or removed. |
+| `repair_board` | Rebuilds a deleted board background and relinks its screens, arrows and groups. |
 | `adopt_flow_groups` | Converts hand-drawn boxes and Section Heading instances into flow groups. Dry run by default. |
 | `lint_flow_layout` | Reports arrows whose head points left or whose path runs left, and flow group boxes that cross screens, labels or each other. |
 | `set_screen_status` | Records `built` / `drift` / `not-built` and shows the badge. Follow `verify-built` first. |

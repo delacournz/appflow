@@ -48,7 +48,11 @@ export function orderPath(vertices: readonly Vertex[], segments: readonly Segmen
     });
 }
 
-/** Where the arrowhead points, and whether any part of the path travels left. */
+/**
+ * Where the arrowhead points, and whether any part of the path travels left. One leftward run is allowed: the run along
+ * a row gap in the bottom-exit detour (`routeViaGap`): the path first drops from the source's bottom, the ONLY leftward
+ * segment is the second one, and the head points right (left-edge entry) or down (top entry).
+ */
 export function classifyArrow(points: readonly Pt[], tolerance = 1): { heading: Heading; issues: ArrowIssue[] } {
     const a = points[points.length - 2] as Pt;
     const b = points[points.length - 1] as Pt;
@@ -56,8 +60,12 @@ export function classifyArrow(points: readonly Pt[], tolerance = 1): { heading: 
     const dy = b.y - a.y;
     const heading: Heading = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up';
     const issues: ArrowIssue[] = [];
+    const leftward = points.slice(1).flatMap((p, i) => (p.x - (points[i] as Pt).x < -tolerance ? [i] : []));
+    const p0 = points[0] as Pt;
+    const p1 = points[1] as Pt;
+    const gapRun = leftward.length === 1 && leftward[0] === 1 && Math.abs(p1.x - p0.x) <= tolerance && p1.y - p0.y > tolerance && (heading === 'right' || heading === 'down');
     if (heading === 'left' && dx < -tolerance) issues.push('points-left');
-    else if (points.slice(1).some((p, i) => p.x - (points[i] as Pt).x < -tolerance)) issues.push('runs-left');
+    else if (leftward.length && !gapRun) issues.push('runs-left');
     return { heading, issues };
 }
 
@@ -68,6 +76,8 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
     const tolerance = num(args, 'tolerance') ?? 1;
     const issues: JsonObject[] = [];
     let checked = 0;
+    const boardMetas = ('children' in root ? [root, ...root.children] : [root]).flatMap((n) => readMeta(n, BOARD_KEY, parseBoardMeta) ?? []);
+    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => m.colWidth - m.screenW));
     for (const n of walk(root, 100_000)) {
         if (n.type !== 'VECTOR' || !isScene(n)) continue;
         const net = n.vectorNetwork;
@@ -92,11 +102,11 @@ export const lintFlowLayout: Handler = async (args: JsonObject) => {
     }
     return ok({
         checked,
-        passed: issues.length === 0 && layoutIssues.length === 0,
+        passed: issues.length === 0 && layoutIssues.every((i) => i.severity === 'info'),
         issues,
         layoutIssues,
         counts,
-        fix: layoutIssues.length
+        fix: layoutIssues.some((i) => i.severity !== 'info')
             ? 'Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines.'
             : issues.length
             ? 'Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up.'

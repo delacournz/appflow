@@ -875,61 +875,134 @@ ${logs.join(`
   };
 
   // plugin-src/tracks.ts
+  var FULL_SPAN = 1e6;
   var MIN_EXTRA = 48;
-  var entries = (extras) => Object.entries(extras).map(([k, v]) => [Number(k), v]).filter(([k, v]) => Number.isInteger(k) && k >= 1 && Number.isFinite(v) && v > 0).sort((a, b) => a[0] - b[0]);
-  function cleanExtras(extras) {
-    return Object.fromEntries(entries(extras ?? {}));
+  var isInt = (n) => typeof n === "number" && Number.isInteger(n);
+  var validBand = (b) => isInt(b.at) && b.at >= 1 && isInt(b.from) && b.from >= 0 && isInt(b.to) && b.to >= b.from && typeof b.px === "number" && Number.isFinite(b.px) && b.px > 0;
+  function rawBands(input) {
+    if (!input)
+      return [];
+    if (Array.isArray(input)) {
+      return input.flatMap((b) => {
+        if (typeof b !== "object" || b === null)
+          return [];
+        const o = b;
+        return [{ at: o.at, from: o.from, to: o.to, px: o.px }];
+      });
+    }
+    return Object.entries(input).map(([k, v]) => ({ at: Number(k), from: 0, to: FULL_SPAN, px: v }));
   }
-  function trackStart(i, size, extras = {}) {
+  function cleanExtras(input) {
+    const sorted = rawBands(input).filter(validBand).sort((a, b) => a.at - b.at || a.from - b.from || a.to - b.to);
+    const out = [];
+    for (const b of sorted) {
+      const prev = out.find((o) => o.at === b.at && o.px === b.px && b.from === o.to + 1);
+      if (prev) {
+        prev.from = Math.min(prev.from, b.from);
+        prev.to = Math.max(prev.to, b.to);
+      } else
+        out.push({ ...b });
+    }
+    return out.sort((a, b) => a.at - b.at || a.from - b.from || a.to - b.to);
+  }
+  var forLine = (extras, cross) => cleanExtras(extras).filter((b) => cross >= b.from && cross <= b.to);
+  function trackStart(i, size, extras = [], cross = 0) {
     let sum = 0;
-    for (const [k, v] of entries(extras))
-      if (k <= i)
-        sum += v;
+    for (const b of forLine(extras, cross))
+      if (b.at <= i)
+        sum += b.px;
     return i * size + sum;
   }
-  function trackOf(pos, size, extras = {}) {
-    const list = entries(extras);
-    if (list.length === 0 || pos < 0)
+  function trackOf(pos, size, extras = [], cross = 0) {
+    const bands = forLine(extras, cross);
+    if (bands.length === 0 || pos < 0)
       return Math.round(pos / size) + 0;
-    const last = list[list.length - 1];
-    let best = Math.round(pos / size);
+    const ats = [...new Set(bands.map((b) => b.at))];
+    const sumAt = (i) => bands.reduce((s, b) => b.at <= i ? s + b.px : s, 0);
+    let best = 0;
     let bestDist = Number.POSITIVE_INFINITY;
     const consider = (i) => {
-      const d = Math.abs(pos - trackStart(i, size, extras));
+      if (i < 0)
+        return;
+      const d = Math.abs(pos - (i * size + sumAt(i)));
       if (d < bestDist || d === bestDist && i > best) {
         best = i;
         bestDist = d;
       }
     };
-    for (let i = 0;i <= last[0]; i++)
-      consider(i);
-    const total = list.reduce((s, [, v]) => s + v, 0);
-    consider(Math.max(last[0], Math.round((pos - total) / size)));
+    const starts = [0, ...ats];
+    starts.forEach((lo, k) => {
+      const hi = k + 1 < starts.length ? starts[k + 1] - 1 : Number.POSITIVE_INFINITY;
+      const guess = Math.round((pos - sumAt(lo)) / size);
+      consider(Math.min(Math.max(guess, lo), hi));
+      consider(lo);
+      if (Number.isFinite(hi))
+        consider(hi);
+    });
+    return best;
+  }
+  function cellOfPoint(dx, dy, colSize, rowSize, colExtra, rowExtra) {
+    const colBands = cleanExtras(colExtra);
+    const rowBands = cleanExtras(rowExtra);
+    if (colBands.length === 0 && rowBands.length === 0 || dx < 0 || dy < 0)
+      return { col: Math.round(dx / colSize) + 0, row: Math.round(dy / rowSize) + 0 };
+    let best = { col: 0, row: 0 };
+    let bestDist = Number.POSITIVE_INFINITY;
+    const consider = (col, row) => {
+      const ex = dx - trackStart(col, colSize, colBands, row);
+      const ey = dy - trackStart(row, rowSize, rowBands, col);
+      const d = ex * ex + ey * ey;
+      if (d < bestDist || d === bestDist && col + row > best.col + best.row) {
+        best = { col, row };
+        bestDist = d;
+      }
+    };
+    const maxRow = Math.round(dy / rowSize) + 1;
+    const maxCol = Math.round(dx / colSize) + 1;
+    for (let r = 0;r <= maxRow; r++)
+      consider(trackOf(dx, colSize, colBands, r), r);
+    for (let c = 0;c <= maxCol; c++)
+      consider(c, trackOf(dy, rowSize, rowBands, c));
     return best;
   }
   function shiftExtras(extras, at, count) {
-    return Object.fromEntries(entries(extras).map(([k, v]) => [k > at ? k + count : k, v]));
+    return cleanExtras(cleanExtras(extras).map((b) => ({ ...b, at: b.at > at ? b.at + count : b.at })));
   }
-  function compactExtras(extras, used) {
+  function shiftRanges(extras, after, count) {
+    const grow = (n) => n >= FULL_SPAN ? n : n > after ? n + count : n;
+    return cleanExtras(cleanExtras(extras).map((b) => ({ ...b, from: grow(b.from), to: grow(b.to) })));
+  }
+  function compactExtras(extras, used, usedCross) {
     const sorted = [...new Set(used)].sort((a, b) => a - b);
     if (sorted.length === 0)
-      return {};
+      return [];
     const first = sorted[0];
-    const out = {};
-    for (const [k, v] of entries(extras)) {
-      const rank = sorted.findIndex((u) => u >= k);
+    const cross = usedCross ? [...new Set(usedCross)].sort((a, b) => a - b) : null;
+    const crossFirst = cross?.[0] ?? 0;
+    const out = [];
+    for (const b of cleanExtras(extras)) {
+      const rank = sorted.findIndex((u) => u >= b.at);
       if (rank <= 0)
         continue;
-      const to = first + rank;
-      out[to] = Math.max(out[to] ?? 0, v);
+      let { from, to } = b;
+      if (cross) {
+        const inside = cross.map((u, i) => ({ u, i })).filter(({ u }) => u >= b.from && u <= b.to);
+        if (inside.length === 0)
+          continue;
+        from = crossFirst + inside[0].i;
+        to = to >= FULL_SPAN ? to : crossFirst + inside[inside.length - 1].i;
+      }
+      const at = first + rank;
+      const same = out.find((o) => o.at === at && o.from === from && o.to === to);
+      if (same)
+        same.px = Math.max(same.px, b.px);
+      else
+        out.push({ at, from, to, px: b.px });
     }
-    return out;
-  }
-  function extraBetween(extras, from, to) {
-    return entries(extras).reduce((s, [k, v]) => k > from && k <= to ? s + v : s, 0);
+    return cleanExtras(out);
   }
   function extrasFromPositions(positions, base) {
-    const out = {};
+    const out = [];
     if (base <= 0)
       return out;
     let idx = 0;
@@ -939,9 +1012,9 @@ ${logs.join(`
       idx += n;
       const extra = Math.round(gap - n * base);
       if (extra >= MIN_EXTRA)
-        out[idx] = extra;
+        out.push({ at: idx, from: 0, to: FULL_SPAN, px: extra });
     });
-    return out;
+    return cleanExtras(out);
   }
 
   // plugin-src/adopt.ts
@@ -970,7 +1043,7 @@ ${logs.join(`
     const ys = distinct(screens.map((s) => s.y), 4);
     const colExtra = extrasFromPositions(xs, colWidth);
     const rowExtra = extrasFromPositions(ys, rowHeight);
-    return { ...Object.keys(colExtra).length ? { colExtra } : {}, ...Object.keys(rowExtra).length ? { rowExtra } : {} };
+    return { ...colExtra.length ? { colExtra } : {}, ...rowExtra.length ? { rowExtra } : {} };
   }
   function inferGrid(screens) {
     const screenW = modeOf(screens.map((s) => s.width), 1) ?? 393;
@@ -987,18 +1060,6 @@ ${logs.join(`
     const dy = Math.max(r.y - p.y, 0, p.y - (r.y + r.height));
     return Math.hypot(dx, dy);
   }
-  function matchScreenAt(p, screens, tolerance = 14, exclude) {
-    let best = null;
-    for (const s of screens) {
-      if (s.id === exclude)
-        continue;
-      const d = distanceToRect(p, s.rect);
-      const current = best;
-      if (d <= tolerance && (!current || d < current.d))
-        best = { s, d };
-    }
-    return best ? best.s : null;
-  }
   function matchTrigger(tail, triggers, targetId, reach = 40) {
     const level = triggers.filter((t) => tail.y >= t.rect.y - 2 && tail.y <= t.rect.y + t.rect.height + 2 && distanceToRect(tail, t.rect) <= reach);
     if (!level.length)
@@ -1009,18 +1070,6 @@ ${logs.join(`
       const rb = rank(b);
       return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2];
     })[0];
-  }
-  function nearestUnclaimed(p, items, within, claimed) {
-    let best = null;
-    for (const item of items) {
-      if (claimed.has(item.id))
-        continue;
-      const d = Math.hypot(item.center.x - p.x, item.center.y - p.y);
-      const current = best;
-      if (d <= within && (!current || d < current.d))
-        best = { item, d };
-    }
-    return best ? best.item : null;
   }
   function longestSegmentMid(points) {
     let best = -1;
@@ -1042,6 +1091,165 @@ ${logs.join(`
     return { labelId: find("Label ·", LABEL_OFFSETS), routeId: find("Route ·", ROUTE_OFFSETS) };
   }
 
+  // plugin-src/board-missing.ts
+  var boardMissingMessage = (boardId) => `Board background ${boardId} is missing (probably deleted). Run repair_board to rebuild it from the screens, arrows and groups that still point at it (or restore it with Cmd+Z / File → Show version history).`;
+  function findOrphans(screenBoardIds, groupBoardIds, existing) {
+    const count = (ids) => ids.reduce((m, id) => m.set(id, (m.get(id) ?? 0) + 1), new Map);
+    const [screens, groups] = [count(screenBoardIds), count(groupBoardIds)];
+    return [...new Set([...screens.keys(), ...groups.keys()])].filter((id) => !existing.has(id)).sort().map((boardId) => ({ kind: "board-background-missing", boardId, screens: screens.get(boardId) ?? 0, groups: groups.get(boardId) ?? 0, message: boardMissingMessage(boardId) }));
+  }
+
+  // plugin-src/arrow-adopt.ts
+  var MAX_OFFSET = 650;
+  var SNAP_MARGIN = 60;
+  var EXACT = 14;
+  var ranked = (p, screens) => screens.map((s) => ({ s, d: distanceToRect(p, s.rect) })).sort((a, b) => a.d - b.d);
+  function resolveEndpoint(p, screens, opts = {}) {
+    const maxOffset = opts.maxOffset ?? MAX_OFFSET;
+    const margin = opts.margin ?? SNAP_MARGIN;
+    const pool = screens.filter((s) => s.id !== opts.exclude);
+    const hint = (opts.hint ?? []).filter((s) => s.id !== opts.exclude);
+    if (hint.length) {
+      const r = ranked(p, hint);
+      const [first, second] = [r[0], r[1]];
+      if (!second || first.d <= EXACT || second.d - first.d >= margin)
+        return { kind: "named", screen: first.s, offset: Math.round(first.d) };
+      return { kind: "ambiguous", candidates: r.map((x) => x.s.id) };
+    }
+    const r = ranked(p, pool);
+    const first = r[0];
+    if (!first || first.d > maxOffset)
+      return { kind: "none" };
+    if (first.d <= EXACT)
+      return { kind: "exact", screen: first.s, offset: Math.round(first.d) };
+    const near = r.filter((x) => x.d <= maxOffset && x.d - first.d < margin);
+    if (near.length > 1)
+      return { kind: "ambiguous", candidates: near.map((x) => x.s.id) };
+    return { kind: "snapped", screen: first.s, offset: Math.round(first.d) };
+  }
+  function endpointsFromName(groupName, screens) {
+    const names = [...new Set(screens.map((s) => s.name))];
+    const pairs = [];
+    for (const a of names) {
+      for (const b of names)
+        if (groupName.startsWith(`Flow · ${a} → ${b} · `))
+          pairs.push({ from: a, to: b });
+    }
+    const longest = pairs.sort((x, y) => y.from.length + y.to.length - (x.from.length + x.to.length))[0];
+    if (!longest)
+      return { from: [], to: [] };
+    return { from: screens.filter((s) => s.name === longest.from), to: screens.filter((s) => s.name === longest.to) };
+  }
+  function pairLooseParts(vectors, dots, labels, reach = { dot: 40, label: 120 }) {
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const claim = (items, pick, within) => {
+      const cands = vectors.flatMap((v) => items.map((it) => ({ v: v.id, it: it.id, d: dist(pick(v), it.at) })).filter((c) => c.d <= within));
+      cands.sort((a, b) => a.d - b.d);
+      const byVector = new Map;
+      const used = new Set;
+      for (const c of cands) {
+        if (byVector.has(c.v) || used.has(c.it))
+          continue;
+        byVector.set(c.v, c.it);
+        used.add(c.it);
+      }
+      return byVector;
+    };
+    const dotOf = claim(dots, (v) => v.tail, reach.dot);
+    const labelOf = claim(labels, (v) => v.mid, reach.label);
+    const pairs = [];
+    const unpaired = [];
+    for (const v of vectors) {
+      const dotId = dotOf.get(v.id);
+      const labelId = labelOf.get(v.id);
+      if (!dotId)
+        unpaired.push({ vectorId: v.id, reason: "no-start-dot" });
+      else if (!labelId)
+        unpaired.push({ vectorId: v.id, reason: "no-label" });
+      else
+        pairs.push({ vectorId: v.id, dotId, labelId });
+    }
+    return { pairs, unpaired };
+  }
+  function resolveArrowEnds(tail, head, screens, memory = {}) {
+    const byId = new Map(screens.map((s) => [s.id, s]));
+    const named = memory.groupName ? endpointsFromName(memory.groupName, screens) : { from: [], to: [] };
+    const remembered = (id) => id ? byId.get(id) : undefined;
+    const rf = remembered(memory.from);
+    const from = rf ? { kind: "named", screen: rf, offset: Math.round(distanceToRect(tail, rf.rect)) } : resolveEndpoint(tail, screens, { hint: named.from });
+    if (from.kind === "none")
+      return { ok: false, reason: "no-source-screen" };
+    if (from.kind === "ambiguous")
+      return { ok: false, reason: "ambiguous-source", candidates: from.candidates };
+    const rt = remembered(memory.to);
+    const to = rt && rt.id !== from.screen.id ? { kind: "named", screen: rt, offset: Math.round(distanceToRect(head, rt.rect)) } : resolveEndpoint(head, screens, { hint: named.to, exclude: from.screen.id });
+    if (to.kind === "none")
+      return { ok: false, reason: "no-target-screen" };
+    if (to.kind === "ambiguous")
+      return { ok: false, reason: "ambiguous-target", candidates: to.candidates };
+    if (to.screen.id === from.screen.id)
+      return { ok: false, reason: "same-screen" };
+    return { ok: true, from: from.screen, to: to.screen, fromHow: from.kind, toHow: to.kind, stale: from.offset > EXACT || to.offset > EXACT };
+  }
+  function planConsolidation(containers) {
+    const [target, ...extra] = containers;
+    if (!target)
+      return null;
+    const rest = extra.filter((c) => c.id !== target.id);
+    return {
+      target: target.id,
+      moves: rest.flatMap((c) => c.childIds.map((nodeId) => ({ nodeId, fromContainer: c.id }))),
+      emptied: rest.map((c) => c.id)
+    };
+  }
+  var restoreDelta = (before, after) => ({ x: before.x - after.x, y: before.y - after.y });
+
+  // plugin-src/arrow-recovery.ts
+  function arrowsContainerName(boardName) {
+    const board = boardName.replace(/^(Board background|Board)\s*·?\s*/, "").trim();
+    return board && board !== boardName.trim() ? `Flow arrows · ${board}` : "Flow arrows";
+  }
+  var isArrowsContainerType = (type) => type === "FRAME" || type === "GROUP" || type === "SECTION";
+  function recoveryIndex(ids, labelsId) {
+    const at = labelsId ? ids.indexOf(labelsId) : -1;
+    return at >= 0 ? at : ids.length;
+  }
+  function recoverableArrowIds(nodes, boardId) {
+    return nodes.filter((n) => n.boardId === boardId).map((n) => n.id);
+  }
+
+  // plugin-src/arrow-labels.ts
+  var LABELS_PREFIX = "Flow arrow labels · ";
+  function labelsContainerName(boardName, arrowsName = "") {
+    const strip = (n, re) => n.replace(re, "").trim();
+    const fromBoard = strip(boardName, /^(Board background|Board)\s*·?\s*/);
+    const fromArrows = strip(arrowsName, /^Flow arrows\s*·?\s*/);
+    const board = fromBoard && fromBoard !== boardName.trim() ? fromBoard : fromArrows || fromBoard;
+    return board ? `${LABELS_PREFIX}${board}` : LABELS_PREFIX.trim().replace(/\s*·$/, "");
+  }
+  var isLabelsContainerName = (name) => name.startsWith("Flow arrow labels");
+  function labelsToMigrate(arrows, labelsId) {
+    return arrows.filter((a) => a.labelParentId !== labelsId).map((a) => a.labelId);
+  }
+  function stackingNeeds(ids, isScreen, arrowsId, labelsId) {
+    const at = ids.indexOf(arrowsId);
+    const raiseArrows = at >= 0 && ids.some((id, i) => i > at && isScreen(id));
+    const placeLabels = labelsId !== null && (raiseArrows || ids.indexOf(labelsId) !== at + 1);
+    return { raiseArrows, placeLabels };
+  }
+  function labelsInsertIndex(ids, arrowsId) {
+    return ids.indexOf(arrowsId) + 1;
+  }
+  function labelStackIssue(ids, arrowsId, labelsId) {
+    if (labelsId === null)
+      return null;
+    const a = ids.indexOf(arrowsId);
+    const l = ids.indexOf(labelsId);
+    if (a < 0 || l < 0 || l > a)
+      return null;
+    return { kind: "labels-under-lines", arrowsId, labelsId };
+  }
+
   // plugin-src/flowmeta.ts
   var FLOW_NAMESPACE = "flowbridge";
   var BOARD_KEY = "board";
@@ -1049,6 +1257,8 @@ ${logs.join(`
   var ARROW_KEY = "arrow";
   var GROUP_KEY = "group";
   var GROUP_LAYER_KEY = "groups-layer";
+  var STYLE_DEFAULTS = { strokeWeight: 12, padding: 160, titleFill: "#2C2C2C", titleColor: "#FFFFFF" };
+  var LEGACY_STROKE = 4;
   var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
   var isStr = (v) => typeof v === "string";
   var isNum = (v) => typeof v === "number" && Number.isFinite(v);
@@ -1103,11 +1313,27 @@ ${logs.join(`
       const raw = o[k];
       if (raw === undefined)
         continue;
-      const clean = isObj(raw) ? cleanExtras(raw) : {};
-      if (Object.keys(clean).length)
+      const clean = isObj(raw) || Array.isArray(raw) ? cleanExtras(raw) : [];
+      if (clean.length)
         meta[k] = clean;
       else
         delete meta[k];
+    }
+    if (o.labelsGroupId !== undefined && !isStr(o.labelsGroupId))
+      delete meta.labelsGroupId;
+    if (o.spacing !== undefined && o.spacing !== "uniform" && o.spacing !== "banded" && o.spacing !== "grouped")
+      delete meta.spacing;
+    for (const k of ["baseColWidth", "baseRowHeight"])
+      if (o[k] !== undefined && !(isNum(o[k]) && o[k] > 0))
+        delete meta[k];
+    const gap = o.gapExtra;
+    if (gap !== undefined) {
+      const clean = (v) => isObj(v) || Array.isArray(v) ? cleanExtras(v) : [];
+      const [colExtra, rowExtra] = isObj(gap) ? [clean(gap.colExtra), clean(gap.rowExtra)] : [[], []];
+      if (colExtra.length || rowExtra.length)
+        meta.gapExtra = { colExtra, rowExtra };
+      else
+        delete meta.gapExtra;
     }
     return meta;
   }
@@ -1122,6 +1348,8 @@ ${logs.join(`
     if (o.badgeId !== undefined && !strOrNull(o.badgeId))
       return null;
     if (o.flowGroupId !== undefined && !strOrNull(o.flowGroupId))
+      return null;
+    if (o.layoutId !== undefined && !isStr(o.layoutId))
       return null;
     if (o.build !== undefined && !parseBuildStatus(o.build))
       return null;
@@ -1154,6 +1382,15 @@ ${logs.join(`
       return null;
     if (s.strokeWeight <= 0 || s.titleSize <= 0)
       return null;
+    const hex = (v, d) => v === undefined ? d : isStr(v) && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null;
+    const titleFill = hex(s.titleFill, STYLE_DEFAULTS.titleFill);
+    const titleColor = hex(s.titleColor, STYLE_DEFAULTS.titleColor);
+    if (!titleFill || !titleColor)
+      return null;
+    if (s.padding !== undefined && (!isNum(s.padding) || s.padding <= 0))
+      return null;
+    const legacy = s.padding === undefined;
+    const layout = isObj(o.layout) && isNum(o.layout.originX) && isNum(o.layout.originY) ? { originX: o.layout.originX, originY: o.layout.originY } : null;
     return {
       boardId: o.boardId,
       name: o.name,
@@ -1161,12 +1398,20 @@ ${logs.join(`
       rectId: o.rectId,
       titleId: o.titleId,
       ...o.parentId ? { parentId: o.parentId } : {},
-      style: { color: s.color, strokeWeight: s.strokeWeight, titleSize: s.titleSize }
+      ...layout ? { layout } : {},
+      style: {
+        color: s.color,
+        strokeWeight: legacy && s.strokeWeight === LEGACY_STROKE ? STYLE_DEFAULTS.strokeWeight : s.strokeWeight,
+        titleSize: s.titleSize,
+        padding: isNum(s.padding) ? s.padding : STYLE_DEFAULTS.padding,
+        titleFill,
+        titleColor
+      }
     };
   }
   var arrowGroupName = (fromName, toName, label) => `Flow · ${fromName} → ${toName} · ${label}`;
   function cellOfRect(rect, board) {
-    return { col: trackOf(rect.x - board.originX, board.colWidth, board.colExtra), row: trackOf(rect.y - board.originY, board.rowHeight, board.rowExtra) };
+    return cellOfPoint(rect.x - board.originX, rect.y - board.originY, board.colWidth, board.rowHeight, board.colExtra, board.rowExtra);
   }
   function stableArrowOrder(items) {
     return [...items].sort((a, b) => a.sourceX - b.sourceX || a.targetY - b.targetY || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -1193,108 +1438,6 @@ ${logs.join(`
     return { reactions: out, replaced: true };
   }
 
-  // plugin-src/duplicate-plan.ts
-  function cellRect(board, col, row) {
-    return { x: board.originX + trackStart(col, board.colWidth, board.colExtra), y: board.originY + trackStart(row, board.rowHeight, board.rowExtra), width: board.screenW, height: board.screenH };
-  }
-  function overlapsAny(target, others) {
-    return others.findIndex((o) => target.x < o.x + o.width && o.x < target.x + target.width && target.y < o.y + o.height && o.y < target.y + target.height);
-  }
-  function growBounds(bounds, rects, margin) {
-    const padded = rects.map((r) => ({ x: r.x - margin, y: r.y - margin, width: r.width + margin * 2, height: r.height + margin * 2 }));
-    return unionRect([bounds, ...padded]) ?? bounds;
-  }
-  var frameName = (name) => name;
-  var labelName = (name) => `Label · ${name}`;
-  var routeName = (name) => `Route · ${name}`;
-  var bannerName = (title) => `ListGroup.Item · ${title}`;
-  function findDescendant(root, test) {
-    for (const c of root.children ?? []) {
-      if (test(c))
-        return c;
-      const deeper = findDescendant(c, test);
-      if (deeper)
-        return deeper;
-    }
-    return null;
-  }
-  function pickBanner(root) {
-    const isFrame = (n) => n.children !== undefined;
-    return findDescendant(root, (n) => isFrame(n) && n.name === "KycEntryRow") ?? findDescendant(root, (n) => isFrame(n) && n.name.startsWith("ListGroup.Item"));
-  }
-
-  // plugin-src/grid.ts
-  function cellRect2(meta, col, row) {
-    return { x: meta.originX + trackStart(col, meta.colWidth, meta.colExtra), y: meta.originY + trackStart(row, meta.rowHeight, meta.rowExtra), width: meta.screenW, height: meta.screenH };
-  }
-  function cellOf(rect, meta) {
-    return cellOfRect(rect, meta);
-  }
-  function shiftPlan(screens, axis, after, count) {
-    return screens.filter((s) => s[axis] > after).map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: axis === "col" ? { col: s.col + count, row: s.row } : { col: s.col, row: s.row + count } }));
-  }
-  function compactPlan(screens) {
-    const rank = (values) => {
-      const sorted = [...new Set(values)].sort((a, b) => a - b);
-      const first = sorted[0] ?? 0;
-      return new Map(sorted.map((v, i) => [v, first + i]));
-    };
-    const cols = rank(screens.map((s) => s.col));
-    const rows = rank(screens.map((s) => s.row));
-    const out = [];
-    for (const s of screens) {
-      const to = { col: cols.get(s.col) ?? s.col, row: rows.get(s.row) ?? s.row };
-      if (to.col !== s.col || to.row !== s.row)
-        out.push({ id: s.id, from: { col: s.col, row: s.row }, to });
-    }
-    return out;
-  }
-  function shiftedExtras(meta, axis, after, count) {
-    const colExtra = meta.colExtra ?? {};
-    const rowExtra = meta.rowExtra ?? {};
-    return axis === "col" ? { colExtra: shiftExtras(colExtra, after, count), rowExtra } : { colExtra, rowExtra: shiftExtras(rowExtra, after, count) };
-  }
-  function compactedExtras(meta, screens) {
-    return { colExtra: compactExtras(meta.colExtra ?? {}, screens.map((s) => s.col)), rowExtra: compactExtras(meta.rowExtra ?? {}, screens.map((s) => s.row)) };
-  }
-  function planMove(screens, id, col, row, swap) {
-    const me = screens.find((s) => s.id === id);
-    if (!me)
-      return { ok: false, error: `${id} is not a screen on this board.` };
-    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0)
-      return { ok: false, error: "col and row must be whole numbers, 0 or more." };
-    if (me.col === col && me.row === row)
-      return { ok: true, moves: [] };
-    const occupant = screens.find((s) => s.id !== id && s.col === col && s.row === row);
-    const mine = { id, from: { col: me.col, row: me.row }, to: { col, row } };
-    if (!occupant)
-      return { ok: true, moves: [mine] };
-    if (!swap)
-      return { ok: false, error: `Cell (${col},${row}) is occupied by ${occupant.id}. Pass swap: true to trade places.` };
-    return { ok: true, moves: [mine, { id: occupant.id, from: { col, row }, to: { col: me.col, row: me.row } }] };
-  }
-  function boardBounds(meta, screens) {
-    const maxCol = Math.max(0, ...screens.map((s) => s.col));
-    const maxRow = Math.max(0, ...screens.map((s) => s.row));
-    return {
-      x: meta.originX - meta.margin,
-      y: meta.originY - meta.labelOffset - meta.margin,
-      width: trackStart(maxCol, meta.colWidth, meta.colExtra) + meta.screenW + 2 * meta.margin,
-      height: trackStart(maxRow, meta.rowHeight, meta.rowExtra) + meta.labelOffset + meta.screenH + 2 * meta.margin
-    };
-  }
-  var LABEL_TOLERANCE = 2;
-  function staleReason(meta, stored, frame, label, hasLabelId) {
-    if (hasLabelId) {
-      if (!label)
-        return "label-missing";
-      if (Math.abs(label.x - frame.x) > LABEL_TOLERANCE)
-        return "label-misplaced";
-    }
-    const at = cellOf(frame, meta);
-    return at.col !== stored.col || at.row !== stored.row ? "cell-mismatch" : null;
-  }
-
   // plugin-src/screen-status.ts
   var hex2 = (h) => ({ r: parseInt(h.slice(1, 3), 16) / 255, g: parseInt(h.slice(3, 5), 16) / 255, b: parseInt(h.slice(5, 7), 16) / 255 });
   var BADGE_SPECS = {
@@ -1306,6 +1449,14 @@ ${logs.join(`
   var MARKS = { built: "✓", drift: "~", "not-built": "·" };
   var statusMark = (s) => MARKS[s];
   var buildStatusOf = (build) => build ?? { status: "not-built" };
+  var RECOVERED = "Recovered from the badge; verify again.";
+  function statusFromBadgeText(text, now) {
+    if (text === BADGE_SPECS.built.text)
+      return { status: "built", verifiedAt: now, commit: null, confidence: "static", notes: RECOVERED };
+    if (text === BADGE_SPECS.drift.text)
+      return { status: "drift", verifiedAt: now, commit: null, notes: RECOVERED };
+    return null;
+  }
   var optStr = (v) => typeof v === "string" && v.trim() ? v.trim() : null;
   function statusFromInput(input, now) {
     const commit = optStr(input.commit);
@@ -1382,13 +1533,474 @@ ${logs.join(`
   var ROUTE_BADGE_GAP = 12;
   var routeWidth = (frameWidth, badgeWidth) => badgeWidth === null ? frameWidth : Math.max(1, frameWidth - badgeWidth - ROUTE_BADGE_GAP);
 
+  // plugin-src/badge-link.ts
+  function slotDistance(frame, badge) {
+    const dx = Math.abs(badge.x + badge.width - (frame.x + frame.width));
+    const dy = Math.abs(badge.y + badge.height - (frame.y - ROUTE_ABOVE + badge.height / 2));
+    return dx + dy;
+  }
+  var nearest = (screen, pool) => [...pool].sort((a, b) => slotDistance(screen.rect, a.rect) - slotDistance(screen.rect, b.rect))[0] ?? null;
+  function linkBadges(screens, badges, claimed = new Set, skip = new Set) {
+    const taken = new Set(claimed);
+    const out = new Map;
+    const todo = screens.filter((s) => !skip.has(s.id));
+    for (const s of todo) {
+      const hit = nearest(s, badges.filter((b) => !taken.has(b.id) && b.name === badgeName(s.name)));
+      if (!hit)
+        continue;
+      out.set(s.id, hit.id);
+      taken.add(hit.id);
+    }
+    for (const s of todo) {
+      if (out.has(s.id))
+        continue;
+      const hit = nearest(s, badges.filter((b) => !taken.has(b.id) && badgeBelongsTo(s.rect, b.rect)));
+      if (!hit)
+        continue;
+      out.set(s.id, hit.id);
+      taken.add(hit.id);
+    }
+    return out;
+  }
+  function badgeLine(frame, lines) {
+    return lines.find((r) => Math.abs(r.x - frame.x) <= 4 && r.y < frame.y && r.y >= frame.y - ROUTE_ABOVE - 200) ?? null;
+  }
+  function badgeSnap(frame, lines, badge, fallbackOffset) {
+    const line = badgeLine(frame, lines);
+    const x = frame.x + frame.width - badge.width;
+    const y = line ? line.y + (line.height - badge.height) / 2 : frame.y - fallbackOffset;
+    const [dx, dy] = [x - badge.x, y - badge.y];
+    return Math.abs(dx) <= 0.5 && Math.abs(dy) <= 0.5 ? null : { dx, dy };
+  }
+  function orphanBadges(badges, referenced, board) {
+    const inside = (r) => r.x >= board.x && r.y >= board.y && r.x + r.width <= board.x + board.width && r.y + r.height <= board.y + board.height;
+    return badges.filter((b) => !referenced.has(b.id) && inside(b.rect)).map((b) => b.id);
+  }
+
+  // plugin-src/duplicate-plan.ts
+  function cellRect(board, col, row) {
+    return { x: board.originX + trackStart(col, board.colWidth, board.colExtra, row), y: board.originY + trackStart(row, board.rowHeight, board.rowExtra, col), width: board.screenW, height: board.screenH };
+  }
+  function overlapsAny(target, others) {
+    return others.findIndex((o) => target.x < o.x + o.width && o.x < target.x + target.width && target.y < o.y + o.height && o.y < target.y + target.height);
+  }
+  function growBounds(bounds, rects, margin) {
+    const padded = rects.map((r) => ({ x: r.x - margin, y: r.y - margin, width: r.width + margin * 2, height: r.height + margin * 2 }));
+    return unionRect([bounds, ...padded]) ?? bounds;
+  }
+  var frameName = (name) => name;
+  var labelName = (name) => `Label · ${name}`;
+  var routeName = (name) => `Route · ${name}`;
+  var bannerName = (title) => `ListGroup.Item · ${title}`;
+  function findDescendant(root, test) {
+    for (const c of root.children ?? []) {
+      if (test(c))
+        return c;
+      const deeper = findDescendant(c, test);
+      if (deeper)
+        return deeper;
+    }
+    return null;
+  }
+  function pickBanner(root) {
+    const isFrame = (n) => n.children !== undefined;
+    return findDescendant(root, (n) => isFrame(n) && n.name === "KycEntryRow") ?? findDescendant(root, (n) => isFrame(n) && n.name.startsWith("ListGroup.Item"));
+  }
+
+  // plugin-src/grid.ts
+  function cellRect2(meta, col, row) {
+    return { x: meta.originX + trackStart(col, meta.colWidth, meta.colExtra, row), y: meta.originY + trackStart(row, meta.rowHeight, meta.rowExtra, col), width: meta.screenW, height: meta.screenH };
+  }
+  function cellOf(rect, meta) {
+    return cellOfRect(rect, meta);
+  }
+  function shiftPlan(screens, axis, after, count) {
+    return screens.filter((s) => s[axis] > after).map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: axis === "col" ? { col: s.col + count, row: s.row } : { col: s.col, row: s.row + count } }));
+  }
+  function compactPlan(screens) {
+    const rank = (values) => {
+      const sorted = [...new Set(values)].sort((a, b) => a - b);
+      const first = sorted[0] ?? 0;
+      return new Map(sorted.map((v, i) => [v, first + i]));
+    };
+    const cols = rank(screens.map((s) => s.col));
+    const rows = rank(screens.map((s) => s.row));
+    const out = [];
+    for (const s of screens) {
+      const to = { col: cols.get(s.col) ?? s.col, row: rows.get(s.row) ?? s.row };
+      if (to.col !== s.col || to.row !== s.row)
+        out.push({ id: s.id, from: { col: s.col, row: s.row }, to });
+    }
+    return out;
+  }
+  function shiftedExtras(meta, axis, after, count) {
+    const colExtra = meta.colExtra ?? [];
+    const rowExtra = meta.rowExtra ?? [];
+    return axis === "col" ? { colExtra: shiftExtras(colExtra, after, count), rowExtra: shiftRanges(rowExtra, after, count) } : { colExtra: shiftRanges(colExtra, after, count), rowExtra: shiftExtras(rowExtra, after, count) };
+  }
+  function compactedExtras(meta, screens) {
+    const [cols, rows] = [screens.map((s) => s.col), screens.map((s) => s.row)];
+    return { colExtra: compactExtras(meta.colExtra ?? [], cols, rows), rowExtra: compactExtras(meta.rowExtra ?? [], rows, cols) };
+  }
+  function planMove(screens, id, col, row, swap) {
+    const me = screens.find((s) => s.id === id);
+    if (!me)
+      return { ok: false, error: `${id} is not a screen on this board.` };
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0)
+      return { ok: false, error: "col and row must be whole numbers, 0 or more." };
+    if (me.col === col && me.row === row)
+      return { ok: true, moves: [] };
+    const occupant = screens.find((s) => s.id !== id && s.col === col && s.row === row);
+    const mine = { id, from: { col: me.col, row: me.row }, to: { col, row } };
+    if (!occupant)
+      return { ok: true, moves: [mine] };
+    if (!swap)
+      return { ok: false, error: `Cell (${col},${row}) is occupied by ${occupant.id}. Pass swap: true to trade places.` };
+    return { ok: true, moves: [mine, { id: occupant.id, from: { col, row }, to: { col: me.col, row: me.row } }] };
+  }
+  function boardBounds(meta, screens) {
+    const reachX = Math.max(0, ...screens.map((s) => trackStart(s.col, meta.colWidth, meta.colExtra, s.row)));
+    const reachY = Math.max(0, ...screens.map((s) => trackStart(s.row, meta.rowHeight, meta.rowExtra, s.col)));
+    return {
+      x: meta.originX - meta.margin,
+      y: meta.originY - meta.labelOffset - meta.margin,
+      width: reachX + meta.screenW + 2 * meta.margin,
+      height: reachY + meta.labelOffset + meta.screenH + 2 * meta.margin
+    };
+  }
+  var LABEL_TOLERANCE = 2;
+  function staleReason(meta, stored, frame, label, hasLabelId) {
+    if (hasLabelId) {
+      if (!label)
+        return "label-missing";
+      if (Math.abs(label.x - frame.x) > LABEL_TOLERANCE)
+        return "label-misplaced";
+    }
+    const at = cellOf(frame, meta);
+    return at.col !== stored.col || at.row !== stored.row ? "cell-mismatch" : null;
+  }
+  function widenedBetween(meta, source, target) {
+    if (!meta.colExtra?.length)
+      return false;
+    const [a, b] = [cellOf(source, meta), cellOf(target, meta)];
+    const plain = (b.col - a.col) * meta.colWidth;
+    return cellRect2(meta, b.col, b.row).x - cellRect2(meta, a.col, a.row).x - plain > 0;
+  }
+
+  // plugin-src/layout-grid.ts
+  var BOARD_GRID = "board";
+  var POS_TOLERANCE = 2;
+  function cellRectIn(grid, col, row, size) {
+    return { x: grid.originX + col * grid.colWidth, y: grid.originY + row * grid.rowHeight, width: size.width, height: size.height };
+  }
+  function cellOfIn(grid, rect) {
+    return { col: Math.round((rect.x - grid.originX) / grid.colWidth) + 0, row: Math.round((rect.y - grid.originY) / grid.rowHeight) + 0 };
+  }
+  function onGrid(grid, rect) {
+    const { col, row } = cellOfIn(grid, rect);
+    return Math.abs(grid.originX + col * grid.colWidth - rect.x) <= POS_TOLERANCE && Math.abs(grid.originY + row * grid.rowHeight - rect.y) <= POS_TOLERANCE;
+  }
+  var boardGrid = (board) => ({ id: BOARD_GRID, originX: board.originX, originY: board.originY, colWidth: board.colWidth, rowHeight: board.rowHeight });
+  function gridOfScreen(screen, groups, board) {
+    if (!screen.layoutId || screen.layoutId === BOARD_GRID)
+      return boardGrid(board);
+    const group = groups.find((g) => g.id === screen.layoutId);
+    if (!group?.layout)
+      return boardGrid(board);
+    return { id: group.id, originX: group.layout.originX, originY: group.layout.originY, colWidth: board.colWidth, rowHeight: board.rowHeight };
+  }
+  var SNAP_RADIUS = 8;
+  var onPitch = (d, pitch) => Math.abs(d - Math.round(d / pitch) * pitch) <= POS_TOLERANCE;
+  function mainClass(members, board) {
+    const first = [...members].sort((a, b) => a.y - b.y || a.x - b.x)[0];
+    return members.filter((m) => onPitch(m.x - first.x, board.colWidth) && onPitch(m.y - first.y, board.rowHeight));
+  }
+  function nearestFreeCell(grid, at, taken) {
+    const near = { col: Math.round((at.x - grid.originX) / grid.colWidth), row: Math.round((at.y - grid.originY) / grid.rowHeight) };
+    let best = null;
+    for (let col = Math.max(0, near.col - SNAP_RADIUS);col <= near.col + SNAP_RADIUS; col++) {
+      for (let row = Math.max(0, near.row - SNAP_RADIUS);row <= near.row + SNAP_RADIUS; row++) {
+        if (taken.has(`${col},${row}`))
+          continue;
+        const d = Math.hypot(grid.originX + col * grid.colWidth - at.x, grid.originY + row * grid.rowHeight - at.y);
+        const better = !best || d < best.d - 0.000001 || Math.abs(d - best.d) <= 0.000001 && (col > best.col || col === best.col && row > best.row);
+        if (better)
+          best = { col, row, d };
+      }
+    }
+    return best ? { col: best.col, row: best.row } : { col: Math.max(0, near.col), row: Math.max(0, near.row) };
+  }
+  function migrateToGrouped(board, screens, groups) {
+    const known = new Set(groups.map((g) => g.id));
+    const layoutOf = (s) => s.flowGroupId && known.has(s.flowGroupId) ? s.flowGroupId : BOARD_GRID;
+    const grids = [];
+    for (const g of groups) {
+      const members = screens.filter((s) => layoutOf(s) === g.id);
+      if (!members.length)
+        continue;
+      const main = mainClass(members, board);
+      grids.push({ id: g.id, originX: Math.min(...main.map((m) => m.x)), originY: Math.min(...main.map((m) => m.y)), colWidth: board.colWidth, rowHeight: board.rowHeight });
+    }
+    const loose = screens.filter((s) => layoutOf(s) === BOARD_GRID);
+    if (loose.length) {
+      const atBoard = boardGrid(board);
+      const fits = loose.every((s) => onGrid(atBoard, s));
+      grids.push(fits ? atBoard : { ...atBoard, originX: Math.min(...loose.map((s) => s.x)), originY: Math.min(...loose.map((s) => s.y)) });
+    }
+    const cells = new Map;
+    const moves = [];
+    const taken = new Map;
+    const off = [];
+    for (const s of screens) {
+      const layoutId = layoutOf(s);
+      const grid = grids.find((g) => g.id === layoutId);
+      if (!onGrid(grid, s)) {
+        off.push(s);
+        continue;
+      }
+      const cell = cellOfIn(grid, s);
+      cells.set(s.id, { layoutId, ...cell });
+      taken.set(layoutId, (taken.get(layoutId) ?? new Set).add(`${cell.col},${cell.row}`));
+    }
+    for (const s of [...off].sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : 1))) {
+      const layoutId = layoutOf(s);
+      const grid = grids.find((g) => g.id === layoutId);
+      const used = taken.get(layoutId) ?? new Set;
+      const cell = nearestFreeCell(grid, s, used);
+      used.add(`${cell.col},${cell.row}`);
+      taken.set(layoutId, used);
+      cells.set(s.id, { layoutId, ...cell });
+      moves.push({ id: s.id, layoutId, ...cell, from: { x: s.x, y: s.y }, to: { x: grid.originX + cell.col * grid.colWidth, y: grid.originY + cell.row * grid.rowHeight } });
+    }
+    return { grids, cells, moves, offGrid: [] };
+  }
+
+  // plugin-src/grid-plan.ts
+  var inGrid = (screens, layoutId) => screens.filter((s) => s.layoutId === layoutId).map(({ id, col, row }) => ({ id, col, row }));
+  var tag = (moves, from, to) => moves.map((m) => ({ id: m.id, from: { ...m.from, layoutId: from }, to: { ...m.to, layoutId: to } }));
+  function planGridMove(screens, id, col, row, swap, toLayoutId) {
+    const me = screens.find((s) => s.id === id);
+    if (!me)
+      return { ok: false, error: `${id} is not a screen on this board.` };
+    const target = toLayoutId ?? me.layoutId;
+    if (target === me.layoutId) {
+      const plan = planMove(inGrid(screens, target), id, col, row, swap);
+      return plan.ok ? { ok: true, moves: tag(plan.moves, target, target) } : plan;
+    }
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0)
+      return { ok: false, error: "col and row must be whole numbers, 0 or more." };
+    const occupant = screens.find((s) => s.layoutId === target && s.col === col && s.row === row);
+    const mine = { id, from: { layoutId: me.layoutId, col: me.col, row: me.row }, to: { layoutId: target, col, row } };
+    if (!occupant)
+      return { ok: true, moves: [mine] };
+    if (!swap)
+      return { ok: false, error: `Cell (${col},${row}) of that group is occupied by ${occupant.id}. Pass swap: true to trade places.` };
+    return { ok: true, moves: [mine, { id: occupant.id, from: { layoutId: target, col, row }, to: { layoutId: me.layoutId, col: me.col, row: me.row } }] };
+  }
+  function shiftGridPlan(screens, layoutId, axis, after, count) {
+    return tag(shiftPlan(inGrid(screens, layoutId), axis, after, count), layoutId, layoutId);
+  }
+  function compactGridPlan(screens) {
+    const ids = [...new Set(screens.map((s) => s.layoutId))];
+    return ids.flatMap((layoutId) => tag(compactPlan(inGrid(screens, layoutId)), layoutId, layoutId));
+  }
+  function placeJoiners(grid, members, taken) {
+    const used = new Set(taken.map((c) => `${c.col},${c.row}`));
+    const cells = new Map;
+    const snapped = [];
+    for (const m of members) {
+      const near = cellOfIn(grid, m);
+      const rect = cellRectIn(grid, near.col, near.row, { width: 0, height: 0 });
+      let moved = Math.abs(rect.x - m.x) > 2 || Math.abs(rect.y - m.y) > 2;
+      let row = near.row;
+      while (used.has(`${near.col},${row}`)) {
+        row++;
+        moved = true;
+      }
+      used.add(`${near.col},${row}`);
+      cells.set(m.id, { col: near.col, row });
+      if (moved)
+        snapped.push(m.id);
+    }
+    return { cells, snapped };
+  }
+  function groupOriginOf(members) {
+    return { originX: Math.min(...members.map((m) => m.x)), originY: Math.min(...members.map((m) => m.y)) };
+  }
+  function planBlockShifts(moves, groups) {
+    const screens = new Map;
+    const layouts = new Map;
+    for (const m of moves) {
+      const g = groups.find((x) => x.id === m.id);
+      if (!g)
+        continue;
+      for (const id of g.screenIds)
+        screens.set(id, { dx: m.dx, dy: m.dy });
+      if (g.layout)
+        layouts.set(g.id, { originX: g.layout.originX + m.dx, originY: g.layout.originY + m.dy });
+    }
+    return { screens, layouts };
+  }
+  function boundsOfRects(meta, rects) {
+    const reachX = Math.max(0, ...rects.map((r) => r.x + r.width - meta.originX));
+    const reachY = Math.max(0, ...rects.map((r) => r.y + r.height - meta.originY));
+    return { x: meta.originX - meta.margin, y: meta.originY - meta.labelOffset - meta.margin, width: reachX + 2 * meta.margin, height: reachY + meta.labelOffset + 2 * meta.margin };
+  }
+  function planRegrid(board, screens, groups) {
+    const known = new Set(groups.map((g) => g.id));
+    const layoutOf = (s) => s.flowGroupId && known.has(s.flowGroupId) ? s.flowGroupId : BOARD_GRID;
+    const layouts = new Map;
+    for (const g of groups) {
+      if (g.layout)
+        continue;
+      const members = screens.filter((s) => layoutOf(s) === g.id);
+      if (members.length)
+        layouts.set(g.id, groupOriginOf(members));
+    }
+    const withLayouts = groups.map((g) => ({ id: g.id, layout: g.layout ?? layouts.get(g.id) }));
+    const cells = new Map;
+    const snapped = [];
+    for (const layoutId of [BOARD_GRID, ...groups.map((g) => g.id)]) {
+      const members = screens.filter((s) => layoutOf(s) === layoutId);
+      const joiners = members.filter((s) => (s.layoutId ?? BOARD_GRID) !== layoutId);
+      if (!joiners.length)
+        continue;
+      const grid = gridOfScreen({ id: "", layoutId }, withLayouts, board);
+      const taken = members.filter((s) => (s.layoutId ?? BOARD_GRID) === layoutId);
+      const placed = placeJoiners(grid, joiners, taken);
+      for (const [id, cell] of placed.cells)
+        cells.set(id, { layoutId, ...cell });
+      snapped.push(...placed.snapped);
+    }
+    return { layouts, cells, snapped };
+  }
+  var GAP_TOLERANCE = 2;
+  function labelLimitBetween(meta, source, target) {
+    const dx = target.x - source.x;
+    if (target.x < source.x + source.width)
+      return;
+    const off = Math.abs(dx - Math.round(dx / meta.colWidth) * meta.colWidth);
+    return off > GAP_TOLERANCE ? source.x + source.width + (meta.colWidth - meta.screenW) : undefined;
+  }
+
+  // plugin-src/pitch.ts
+  var spacingOf = (m) => m.spacing ?? "uniform";
+  var basePitchOf = (m) => ({ colWidth: m.baseColWidth ?? m.colWidth, rowHeight: m.baseRowHeight ?? m.rowHeight });
+  var pitchFromNeeds = (base, needs) => ({
+    colWidth: base.colWidth + Math.max(0, Math.ceil(needs.col)),
+    rowHeight: base.rowHeight + Math.max(0, Math.ceil(needs.row))
+  });
+  var samePitch = (a, b) => a.colWidth === b.colWidth && a.rowHeight === b.rowHeight;
+  function uniformFields(base, effective) {
+    return { colWidth: effective.colWidth, rowHeight: effective.rowHeight, baseColWidth: base.colWidth, baseRowHeight: base.rowHeight, spacing: "uniform" };
+  }
+  function growPitch(base, more, deficit, previous) {
+    const total = (n) => Math.max(0, n.col) + Math.max(0, n.row);
+    if (previous && total(deficit) >= total(previous))
+      return { more, stop: true };
+    const col = more.col + Math.max(0, deficit.col);
+    const row = more.row + Math.max(0, deficit.row);
+    const capped = { col: Math.min(col, base.colWidth), row: Math.min(row, base.rowHeight) };
+    return { more: capped, stop: capped.col !== col || capped.row !== row };
+  }
+  var MISMATCH_SHARE = 0.3;
+  var AGREE_SHARE = 0.6;
+  var POS_TOLERANCE2 = 2;
+  var MIN_SCREENS = 3;
+  var median = (xs) => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  function agreedPitch(samples) {
+    const usable = samples.filter((s) => s.index >= 1).map((s) => s.offset / s.index);
+    if (usable.length < 2)
+      return null;
+    const mid = median(usable);
+    const near = usable.filter((p) => Math.abs(p - mid) <= 1);
+    return near.length >= AGREE_SHARE * usable.length ? Math.round(mid) : null;
+  }
+  function checkPitch(meta, screens) {
+    if (screens.length < MIN_SCREENS || meta.spacing === "grouped")
+      return { kind: "ok" };
+    const off = screens.filter((s) => {
+      const want = cellRect2(meta, s.col, s.row);
+      return Math.abs(want.x - s.x) > POS_TOLERANCE2 || Math.abs(want.y - s.y) > POS_TOLERANCE2;
+    });
+    if (off.length < MISMATCH_SHARE * screens.length)
+      return { kind: "ok" };
+    const banded = !!(meta.colExtra?.length || meta.rowExtra?.length) || meta.spacing === "banded";
+    const pitchNow = `${meta.colWidth} x ${meta.rowHeight}`;
+    if (banded)
+      return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored banded spacing (${pitchNow}). Restore the board or re-adopt it; reroute_flow will not re-derive cells from these positions.` };
+    const col = agreedPitch(screens.map((s) => ({ index: s.col, offset: s.x - meta.originX })));
+    const row = agreedPitch(screens.map((s) => ({ index: s.row, offset: s.y - meta.originY })));
+    const colOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).x - s.x) <= POS_TOLERANCE2).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const rowOk = screens.filter((s) => Math.abs(cellRect2(meta, s.col, s.row).y - s.y) <= POS_TOLERANCE2).length >= (1 - MISMATCH_SHARE) * screens.length;
+    const pitch = { colWidth: colOk ? meta.colWidth : col ?? Number.NaN, rowHeight: rowOk ? meta.rowHeight : row ?? Number.NaN };
+    if (Number.isNaN(pitch.colWidth) || Number.isNaN(pitch.rowHeight)) {
+      return { kind: "refuse", reason: `pitch-mismatch: ${off.length} of ${screens.length} screens are not where their cells put them under the stored pitch (${pitchNow}) and their positions agree on no single pitch. reroute_flow will not re-derive cells from them; restore the board or pass colWidth and rowHeight.` };
+    }
+    if (pitch.colWidth === meta.colWidth && pitch.rowHeight === meta.rowHeight)
+      return { kind: "ok" };
+    return { kind: "repair", pitch };
+  }
+
   // plugin-src/board-ops.ts
   var writeScreen = (node, meta) => node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
+  function guardPitch(board, entries) {
+    const screens = entries.flatMap((e) => {
+      const stored = readMeta(e.frame, SCREEN_KEY, parseScreenMeta);
+      if (!stored || stored.boardId !== board.node.id)
+        return [];
+      const r = rectOf(e.frame);
+      return [{ col: stored.col, row: stored.row, x: r.x, y: r.y }];
+    });
+    const verdict = checkPitch(board.meta, screens);
+    if (verdict.kind === "ok")
+      return null;
+    if (verdict.kind === "refuse")
+      throw new Error(verdict.reason);
+    const from = { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight };
+    const base = board.meta.baseColWidth !== undefined && board.meta.baseRowHeight !== undefined && board.meta.baseColWidth <= verdict.pitch.colWidth && board.meta.baseRowHeight <= verdict.pitch.rowHeight;
+    const { baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...base ? board.meta : rest, colWidth: verdict.pitch.colWidth, rowHeight: verdict.pitch.rowHeight };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return { from, to: verdict.pitch };
+  }
+  var isGrouped = (board) => board.meta.spacing === "grouped";
+  function readGroupLayouts(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const holder = parent.children.find((c) => c.type === "FRAME" && c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) === board.node.id);
+    if (!holder || !("children" in holder))
+      return [];
+    const out = [];
+    for (const c of holder.children) {
+      if (c.type !== "RECTANGLE")
+        continue;
+      const meta = parseGroupMeta(c.getSharedPluginData(FLOW_NAMESPACE, GROUP_KEY));
+      if (meta && meta.boardId === board.node.id)
+        out.push({ id: c.id, ...meta.layout ? { layout: meta.layout } : {} });
+    }
+    return out;
+  }
+  var gridLookup = (board, layouts) => (layoutId) => gridOfScreen({ id: "", layoutId }, layouts, board.meta);
+  var layoutOfScreen = (meta) => meta.flowGroupId ?? BOARD_GRID;
+  var gridMetaOf = (meta, grid) => {
+    const { colExtra: _c, rowExtra: _r, ...rest } = meta;
+    return { ...rest, originX: grid.originX, originY: grid.originY, colWidth: grid.colWidth, rowHeight: grid.rowHeight };
+  };
   async function loadScreens(board) {
     const parent = board.node.parent;
     if (!parent || !("children" in parent))
       return { screens: [], stale: [] };
+    const pitchRepaired = guardPitch(board, collectScreens(parent.children));
     const texts = collectTexts(parent.children).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
+    const grouped = isGrouped(board);
+    const layouts = grouped ? readGroupLayouts(board) : [];
+    const lookup = gridLookup(board, layouts);
+    const hasGrid = (stored) => !stored.flowGroupId || layouts.some((g) => g.id === stored.flowGroupId && !!g.layout);
     const screens = [];
     const stale = [];
     for (const entry of collectScreens(parent.children)) {
@@ -1400,7 +2012,9 @@ ${logs.join(`
       const anchorId = stored.labelId ?? stored.routeId;
       const anchor = anchorId ? await sceneById(anchorId) : null;
       const rect = rectOf(c);
-      const reason = staleReason(board.meta, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
+      const grid = grouped && hasGrid(stored) ? lookup(layoutOfScreen({ ...stored, flowGroupId: stored.flowGroupId ?? null })) : null;
+      const against = !grouped ? board.meta : grid ? gridMetaOf(board.meta, grid) : gridMetaOf(board.meta, { id: BOARD_GRID, originX: rect.x - stored.col * board.meta.colWidth, originY: rect.y - stored.row * board.meta.rowHeight, colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight });
+      const reason = staleReason(against, stored, rect, anchor ? rectOf(anchor) : null, anchorId !== null);
       if (!reason) {
         if ((stored.groupId ?? null) === groupId) {
           screens.push({ node: c, meta: stored });
@@ -1411,13 +2025,54 @@ ${logs.join(`
         }
         continue;
       }
-      const cell = cellOf(rect, board.meta);
+      const cell = grouped && grid ? cellOfIn(grid, rect) : cellOf(rect, board.meta);
       const meta = { ...stored, ...cell, ...assignScreenTexts(rect, texts), groupId, ...await ownBadge(stored, groupId, rect) };
       writeScreen(c, meta);
       stale.push({ id: c.id, name: c.name, reason, fixedTo: cell });
       screens.push({ node: c, meta });
     }
-    return { screens, stale };
+    await healBadges(screens, collectBadges(parent.children));
+    return { screens, stale, ...pitchRepaired ? { pitchRepaired } : {} };
+  }
+  async function healBadges(screens, badgeNodes) {
+    if (!badgeNodes.length)
+      return;
+    const missing = [];
+    const claimed = new Set;
+    for (const s of screens) {
+      const live = s.meta.badgeId ? await sceneById(s.meta.badgeId) : null;
+      if (live)
+        claimed.add(live.id);
+      else
+        missing.push(s);
+    }
+    if (!missing.length)
+      return;
+    const links = linkBadges(missing.map((s) => ({ id: s.node.id, name: s.node.name, rect: rectOf(s.node) })), badgeNodes.map((n) => ({ id: n.id, name: n.name, rect: rectOf(n) })), claimed);
+    for (const s of missing) {
+      const badgeId = links.get(s.node.id);
+      if (!badgeId)
+        continue;
+      s.meta = { ...s.meta, badgeId };
+      writeScreen(s.node, s.meta);
+    }
+  }
+  async function snapBadges(screens) {
+    let moved = 0;
+    for (const s of screens) {
+      const badge = s.meta.badgeId ? await sceneById(s.meta.badgeId) : null;
+      if (!badge || !("width" in badge))
+        continue;
+      const frame = rectOf(s.node);
+      const [label, route] = await Promise.all([s.meta.labelId ? sceneById(s.meta.labelId) : null, s.meta.routeId ? sceneById(s.meta.routeId) : null]);
+      const lines = [label, route].flatMap((n) => n ? [rectOf(n)] : []);
+      const delta = badgeSnap(frame, lines, rectOf(badge), badgeFallbackOffset(badge.height));
+      if (!delta)
+        continue;
+      shiftNode(badge, delta.dx, delta.dy);
+      moved++;
+    }
+    return moved;
   }
   async function ownBadge(stored, groupId, frame) {
     const badge = stored.badgeId ? await sceneById(stored.badgeId) : null;
@@ -1433,35 +2088,39 @@ ${logs.join(`
     node.x += dx;
     node.y += dy;
   }
-  async function applyMoves(board, screens, moves) {
+  async function shiftScreen(s, dx, dy) {
+    if (dx === 0 && dy === 0)
+      return;
+    const [label, route, badge] = await Promise.all([
+      s.meta.labelId ? sceneById(s.meta.labelId) : null,
+      s.meta.routeId ? sceneById(s.meta.routeId) : null,
+      s.meta.badgeId ? sceneById(s.meta.badgeId) : null
+    ]);
+    const targets = shiftTargets({
+      frameId: s.node.id,
+      groupId: s.meta.groupId,
+      frameParentId: s.node.parent?.id ?? null,
+      labelId: label?.id ?? null,
+      labelParentId: label?.parent?.id ?? null,
+      routeId: route?.id ?? null,
+      routeParentId: route?.parent?.id ?? null,
+      badgeId: badge?.id ?? null,
+      badgeParentId: badge?.parent?.id ?? null
+    });
+    for (const id of targets)
+      shiftNode(await sceneById(id), dx, dy);
+    await snapBadges([s]);
+  }
+  async function applyMoves(board, screens, moves, grids) {
     const out = [];
     for (const m of moves) {
       const s = screens.find((x) => x.node.id === m.id);
       if (!s)
         continue;
-      const want = cellRect2(board.meta, m.to.col, m.to.row);
+      const want = m.to.layoutId !== undefined && grids ? cellRectIn(grids(m.to.layoutId), m.to.col, m.to.row, { width: board.meta.screenW, height: board.meta.screenH }) : cellRect2(board.meta, m.to.col, m.to.row);
       const have = rectOf(s.node);
-      const dx = want.x - have.x;
-      const dy = want.y - have.y;
-      const [label, route, badge] = await Promise.all([
-        s.meta.labelId ? sceneById(s.meta.labelId) : null,
-        s.meta.routeId ? sceneById(s.meta.routeId) : null,
-        s.meta.badgeId ? sceneById(s.meta.badgeId) : null
-      ]);
-      const targets = shiftTargets({
-        frameId: s.node.id,
-        groupId: s.meta.groupId,
-        frameParentId: s.node.parent?.id ?? null,
-        labelId: label?.id ?? null,
-        labelParentId: label?.parent?.id ?? null,
-        routeId: route?.id ?? null,
-        routeParentId: route?.parent?.id ?? null,
-        badgeId: badge?.id ?? null,
-        badgeParentId: badge?.parent?.id ?? null
-      });
-      for (const id of targets)
-        shiftNode(await sceneById(id), dx, dy);
-      s.meta = { ...s.meta, col: m.to.col, row: m.to.row };
+      await shiftScreen(s, want.x - have.x, want.y - have.y);
+      s.meta = { ...s.meta, col: m.to.col, row: m.to.row, ...m.to.layoutId !== undefined ? { layoutId: m.to.layoutId } : {} };
       writeScreen(s.node, s.meta);
       out.push({ id: s.node.id, name: s.node.name, from: { ...m.from }, to: { ...m.to } });
     }
@@ -1472,7 +2131,7 @@ ${logs.join(`
     const rect = rectOf(bg);
     if (!("resize" in bg))
       return { width: rect.width, height: rect.height };
-    const b = boardBounds(board.meta, screens.map((s) => s.meta));
+    const b = isGrouped(board) ? boundsOfRects(board.meta, screens.map((s) => rectOf(s.node))) : boardBounds(board.meta, screens.map((s) => s.meta));
     const needW = b.x + b.width - rect.x;
     const needH = b.y + b.height - rect.y;
     const width = Math.max(1, shrink ? needW : Math.max(rect.width, needW));
@@ -1497,22 +2156,107 @@ ${logs.join(`
   }
   function applyExtras(board, extras) {
     const { colExtra: _c, rowExtra: _r, ...rest } = board.meta;
-    board.meta = { ...rest, ...Object.keys(extras.colExtra).length ? { colExtra: extras.colExtra } : {}, ...Object.keys(extras.rowExtra).length ? { rowExtra: extras.rowExtra } : {} };
+    board.meta = { ...rest, ...extras.colExtra.length ? { colExtra: extras.colExtra } : {}, ...extras.rowExtra.length ? { rowExtra: extras.rowExtra } : {} };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+  }
+  function setGapExtra(board, gap) {
+    const { gapExtra: _drop, ...rest } = board.meta;
+    board.meta = { ...rest, ...gap && (gap.colExtra.length || gap.rowExtra.length) ? { gapExtra: gap } : {} };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+  }
+  function applyPitch(board, base, effective, keepBase) {
+    const { colExtra: _c, rowExtra: _r, gapExtra: _g, baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = keepBase ? { ...rest, ...uniformFields(base, effective) } : { ...rest, colWidth: base.colWidth, rowHeight: base.rowHeight, spacing: "uniform" };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+  }
+  function applyBanded(board) {
+    const { baseColWidth, baseRowHeight, ...rest } = board.meta;
+    const had = baseColWidth !== undefined || baseRowHeight !== undefined || board.meta.spacing !== "banded";
+    board.meta = { ...rest, colWidth: baseColWidth ?? board.meta.colWidth, rowHeight: baseRowHeight ?? board.meta.rowHeight, spacing: "banded" };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return had;
+  }
+  function setSpacing(board, mode) {
+    board.meta = { ...board.meta, spacing: mode };
     board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
   }
 
+  // plugin-src/group-place.ts
+  var MAX_PASSES = 1000;
+  var right = (r) => r.x + r.width;
+  var bottom = (r) => r.y + r.height;
+  function separation(a, b, clear) {
+    const inX = Math.min(right(a), right(b)) - Math.max(a.x, b.x) + clear;
+    const inY = Math.min(bottom(a), bottom(b)) - Math.max(a.y, b.y) + clear;
+    if (inX <= 0 || inY <= 0)
+      return null;
+    const toX = Math.min(right(a) + clear - b.x, right(b) + clear - a.x);
+    const toY = Math.min(bottom(a) + clear - b.y, bottom(b) + clear - a.y);
+    return { x: toX, y: toY };
+  }
+  function resolveOverlaps(boxes, clear) {
+    const sorted = [...boxes].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const at = new Map(sorted.map((b) => [b.id, { ...b.rect }]));
+    const kidsOf = (id) => sorted.filter((b) => b.parentId === id).flatMap((b) => [b.id, ...kidsOf(b.id)]);
+    const shift = (id, dx, dy) => {
+      for (const k of [id, ...kidsOf(id)]) {
+        const r = at.get(k);
+        at.set(k, { ...r, x: r.x + dx, y: r.y + dy });
+      }
+    };
+    for (let pass = 0;pass < MAX_PASSES; pass++) {
+      let changed = false;
+      for (let i = 0;i < sorted.length && !changed; i++) {
+        for (let j = i + 1;j < sorted.length && !changed; j++) {
+          const [a, b] = [sorted[i], sorted[j]];
+          if (a.parentId !== b.parentId)
+            continue;
+          const ra = at.get(a.id);
+          const rb = at.get(b.id);
+          const sep = separation(ra, rb, clear);
+          if (!sep)
+            continue;
+          const alongX = sep.x <= sep.y;
+          const [fixed, mover] = alongX ? ra.x + ra.width / 2 <= rb.x + rb.width / 2 ? [ra, b] : [rb, a] : ra.y + ra.height / 2 <= rb.y + rb.height / 2 ? [ra, b] : [rb, a];
+          const fixedRect = fixed;
+          const moverRect = at.get(mover.id);
+          const need = alongX ? right(fixedRect) + clear - moverRect.x : bottom(fixedRect) + clear - moverRect.y;
+          shift(mover.id, alongX ? need : 0, alongX ? 0 : need);
+          changed = true;
+        }
+      }
+      if (!changed)
+        break;
+    }
+    return sorted.flatMap((b) => {
+      const now = at.get(b.id);
+      const dx = now.x - b.rect.x;
+      const dy = now.y - b.rect.y;
+      return dx === 0 && dy === 0 ? [] : [{ id: b.id, dx, dy }];
+    });
+  }
+
   // plugin-src/flow-group.ts
-  var GROUP_PAD = 64;
-  var GROUP_STROKE = 4;
+  var GROUP_PAD = 160;
+  var GROUP_STROKE = 12;
   var GROUP_CLEAR = 48;
   var TITLE_SIZE = 96;
-  var TITLE_GAP = 32;
+  var TITLE_PAD_Y = 48;
+  var TITLE_PAD_X = 64;
+  var TITLE_FILL = "#2C2C2C";
+  var TITLE_COLOR = "#FFFFFF";
   var CHILD_TITLE_SCALE = 0.66;
   var TITLE_LINE_HEIGHT = 1.2;
   var FRAME_TITLE_CLEAR = 28;
   var ROUTE_TOP = ROUTE_ABOVE + FRAME_TITLE_CLEAR;
-  var titleHeightOf = (size) => Math.ceil(size * TITLE_LINE_HEIGHT);
-  var EDGE = GROUP_PAD + GROUP_STROKE;
+  var defaultMetrics = (nested = false) => ({
+    padding: GROUP_PAD,
+    strokeWeight: GROUP_STROKE,
+    titleSize: nested ? Math.round(TITLE_SIZE * CHILD_TITLE_SCALE) : TITLE_SIZE
+  });
+  var titleLineOf = (size) => Math.ceil(size * TITLE_LINE_HEIGHT);
+  var titleHeightOf = (size) => titleLineOf(size) + 2 * TITLE_PAD_Y;
+  var edgeOf = (m) => m.padding + m.strokeWeight;
   var inflate = (r, by) => ({ x: r.x - by, y: r.y - by, width: r.width + 2 * by, height: r.height + 2 * by });
   var overlaps = (a, b) => overlapsAny(a, [b]) === 0;
   var contains = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
@@ -1521,23 +2265,24 @@ ${logs.join(`
     const head = { x: frame.x, y: topLine - FRAME_TITLE_CLEAR, width: frame.width, height: frame.y - (topLine - FRAME_TITLE_CLEAR) };
     return unionRect([frame, head, ...route ? [route] : [], ...badge ? [badge] : []]);
   }
-  function fitBox(members, children = [], titleHeight = titleHeightOf(TITLE_SIZE)) {
+  function fitBox(members, children = [], metrics = defaultMetrics()) {
     const content = unionRect([...members, ...children.flatMap((c) => [c.box, c.title])]);
     if (!content)
       throw new Error("fitBox needs at least one member or child");
-    const box = inflate(content, EDGE);
-    const title = { x: box.x, y: box.y - TITLE_GAP - titleHeight, width: box.width, height: titleHeight };
+    const box = inflate(content, edgeOf(metrics));
+    const height = titleHeightOf(metrics.titleSize);
+    const title = { x: box.x, y: box.y - height, width: box.width, height };
     return { box, title };
   }
-  function strokeBands(box) {
-    const t = GROUP_STROKE + 2 * GROUP_CLEAR;
+  function strokeBands(box, stroke = GROUP_STROKE) {
+    const t = stroke + 2 * GROUP_CLEAR;
     const w = box.width + 2 * GROUP_CLEAR;
     const h = box.height + 2 * GROUP_CLEAR;
     return [
       { x: box.x - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: w, height: t },
-      { x: box.x - GROUP_CLEAR, y: box.y + box.height - GROUP_STROKE - GROUP_CLEAR, width: w, height: t },
+      { x: box.x - GROUP_CLEAR, y: box.y + box.height - stroke - GROUP_CLEAR, width: w, height: t },
       { x: box.x - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h },
-      { x: box.x + box.width - GROUP_STROKE - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h }
+      { x: box.x + box.width - stroke - GROUP_CLEAR, y: box.y - GROUP_CLEAR, width: t, height: h }
     ];
   }
   var rangeOf = (cells) => {
@@ -1552,6 +2297,12 @@ ${logs.join(`
   };
   var inRange = (r, col, row) => col >= r.c0 && col <= r.c1 && row >= r.r0 && row <= r.r1;
   function boundaryExtras(input) {
+    return planBoundary(input).extras;
+  }
+  function boundaryNeeds(input) {
+    return planBoundary(input).need;
+  }
+  function planBoundary(input) {
     const { groups, ungrouped, base, laneBand } = input;
     const ranges = new Map;
     for (const g of groups) {
@@ -1567,12 +2318,11 @@ ${logs.join(`
     const allRanges = [...ranges.values()];
     const cols = [...allRanges.flatMap((r) => [r.c0, r.c1]), ...ungrouped.map((c) => c.col)];
     const rows = [...allRanges.flatMap((r) => [r.r0, r.r1]), ...ungrouped.map((c) => c.row)];
-    const colExtra = {};
-    const rowExtra = {};
     if (!cols.length)
-      return { colExtra, rowExtra };
+      return { extras: { colExtra: [], rowExtra: [] }, need: { col: 0, row: 0 } };
     const [minC, maxC, minR, maxR] = [Math.min(...cols), Math.max(...cols), Math.min(...rows), Math.max(...rows)];
-    const titleOf = (g) => titleHeightOf(g.parentId ? TITLE_SIZE * CHILD_TITLE_SCALE : TITLE_SIZE) + TITLE_GAP;
+    const metricsOf = (g) => g.metrics ?? defaultMetrics(!!g.parentId);
+    const titleOf = (g) => titleHeightOf(metricsOf(g).titleSize);
     const needed = (a, b, vertical) => {
       const ids = (xs) => new Set(xs.map((g) => g.id));
       const [idsA, idsB] = [ids(a), ids(b)];
@@ -1580,43 +2330,121 @@ ${logs.join(`
       const entries = b.filter((g) => !idsA.has(g.id));
       if (!exits.length && !entries.length)
         return null;
-      const edges = (exits.length + entries.length) * EDGE;
+      const edges = [...exits, ...entries].reduce((sum, g) => sum + edgeOf(metricsOf(g)), 0);
       const clears = ((exits.length ? 1 : 0) + (entries.length ? 1 : 0)) * GROUP_CLEAR;
       const titles = vertical ? entries.reduce((s, g) => s + titleOf(g), 0) + ROUTE_TOP : 0;
       return edges + clears + titles;
     };
-    const bump = (into, track, need, baseGap) => {
-      const extra = Math.max(0, Math.ceil(need + laneBand - baseGap));
-      if (extra > 0)
-        into[track] = Math.max(into[track] ?? 0, extra);
+    const extraFor = (need, baseGap) => Math.max(0, Math.ceil(need + laneBand - baseGap));
+    const range = (lo, hi) => Array.from({ length: Math.max(0, hi - lo + 1) }, (_, i) => lo + i);
+    const colAxis = {
+      tracks: range(minC + 1, maxC),
+      lines: range(minR, maxR),
+      sides: (t, l) => [[t - 1, l], [t, l]],
+      vertical: false,
+      baseGap: base.colWidth - base.screenW,
+      reach: (r) => [r.c0, r.c1],
+      span: (r) => [r.r0, r.r1]
     };
-    for (let c = minC + 1;c <= maxC; c++) {
-      for (let r = minR;r <= maxR; r++) {
-        const [a, b] = [chainAt(c - 1, r), chainAt(c, r)];
-        if (!occupied(c - 1, r, a) || !occupied(c, r, b))
+    const rowAxis = {
+      tracks: range(minR + 1, maxR),
+      lines: range(minC, maxC),
+      sides: (t, l) => [[l, t - 1], [l, t]],
+      vertical: true,
+      baseGap: base.rowHeight - base.screenH,
+      reach: (r) => [r.r0, r.r1],
+      span: (r) => [r.c0, r.c1]
+    };
+    const bandsOf = (axis) => {
+      const out = [];
+      for (const t of axis.tracks) {
+        const triggers = new Map;
+        for (const l of axis.lines) {
+          const [[ac, ar], [bc, br]] = axis.sides(t, l);
+          const [a, b] = [chainAt(ac, ar), chainAt(bc, br)];
+          if (!occupied(ac, ar, a) || !occupied(bc, br, b))
+            continue;
+          const n = needed(a, b, axis.vertical);
+          if (n === null)
+            continue;
+          const extra = extraFor(n, axis.baseGap);
+          if (extra > 0)
+            triggers.set(l, Math.max(triggers.get(l) ?? 0, extra));
+        }
+        if (!triggers.size)
           continue;
-        const n = needed(a, b, false);
-        if (n !== null)
-          bump(colExtra, c, n, base.colWidth - base.screenW);
+        const sorted = [...triggers.keys()].sort((a, b) => a - b);
+        let runStart = sorted[0];
+        let prev = runStart;
+        const flush = (end) => {
+          const px = Math.max(...[...triggers].filter(([l]) => l >= runStart && l <= end).map(([, v]) => v));
+          out.push({ at: t, from: runStart, to: end, px });
+        };
+        for (const l of sorted.slice(1)) {
+          if (l === prev + 1) {
+            prev = l;
+            continue;
+          }
+          flush(prev);
+          runStart = l;
+          prev = l;
+        }
+        flush(prev);
       }
-    }
-    for (let r = minR + 1;r <= maxR; r++) {
-      for (let c = minC;c <= maxC; c++) {
-        const [a, b] = [chainAt(c, r - 1), chainAt(c, r)];
-        if (!occupied(c, r - 1, a) || !occupied(c, r, b))
-          continue;
-        const n = needed(a, b, true);
-        if (n !== null)
-          bump(rowExtra, r, n, base.rowHeight - base.screenH);
+      return out;
+    };
+    const untear = (axis, primary) => {
+      let cur = cleanExtras(primary);
+      for (let pass = 0;pass < 64; pass++) {
+        const added = [];
+        for (const r of allRanges) {
+          const [a0, a1] = axis.reach(r);
+          const [l0, l1] = axis.span(r);
+          const offsets = (a) => range(l0, l1).map((l) => cur.reduce((s, b) => b.at <= a && l >= b.from && l <= b.to ? s + b.px : s, 0));
+          for (let a = a0;a <= a1; a++) {
+            const offs = offsets(a);
+            const target = Math.max(...offs);
+            if (offs.every((o) => o === target))
+              continue;
+            const deficits = new Map;
+            offs.forEach((o, i) => {
+              if (o < target)
+                deficits.set(target - o, [...deficits.get(target - o) ?? [], l0 + i]);
+            });
+            for (const [px, lines] of deficits) {
+              let from = lines[0];
+              lines.forEach((l, i) => {
+                if (lines[i + 1] === l + 1)
+                  return;
+                added.push({ at: a, from, to: l, px });
+                from = lines[i + 1];
+              });
+            }
+            break;
+          }
+        }
+        if (!added.length)
+          break;
+        cur = cleanExtras([...cur, ...added]);
       }
-    }
-    return { colExtra, rowExtra };
+      return cur;
+    };
+    const [colPrimary, rowPrimary] = [bandsOf(colAxis), bandsOf(rowAxis)];
+    const biggest = (bands) => Math.max(0, ...bands.map((b) => b.px));
+    return {
+      extras: {
+        colExtra: untear(colAxis, [...colPrimary, ...input.bonus?.colExtra ?? []]),
+        rowExtra: untear(rowAxis, [...rowPrimary, ...input.bonus?.rowExtra ?? []])
+      },
+      need: { col: biggest(colPrimary), row: biggest(rowPrimary) }
+    };
   }
   function groupConflicts(groups, contents) {
     const issues = [];
     const descendants = (id) => new Set([id, ...groups.filter((g) => g.parentId === id).map((g) => g.id)]);
     for (const g of groups) {
-      const bands = strokeBands(g.box);
+      const bands = strokeBands(g.box, g.strokeWeight);
+      const titleZone = inflate(g.title, GROUP_CLEAR);
       const family = descendants(g.id);
       for (const c of contents) {
         if (overlapsAny(c.rect, bands) >= 0) {
@@ -1625,13 +2453,13 @@ ${logs.join(`
         if (c.kind === "screen" && overlaps(c.rect, g.box) && !(c.ownerGroupId && family.has(c.ownerGroupId))) {
           issues.push({ kind: "group-encloses-foreign", groupId: g.id, screenId: c.id });
         }
-        if (overlaps(g.title, c.rect))
+        if (overlaps(titleZone, c.rect))
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: c.kind, withId: c.id });
       }
       for (const o of groups) {
         if (o.id === g.id)
           continue;
-        if (overlapsAny(g.title, strokeBands(o.box)) >= 0)
+        if (overlapsAny(g.title, strokeBands(o.box, o.strokeWeight)) >= 0)
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: "box", withId: o.id });
         if (g.id < o.id && overlaps(g.title, o.title))
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: "title", withId: o.id });
@@ -1666,6 +2494,105 @@ ${logs.join(`
         issues.push({ kind: "child-outside-parent", groupId: g.id, parentId: parent.id });
     }
     return issues;
+  }
+
+  // plugin-src/gap-fix.ts
+  var GROUP_GAP = 160;
+  var CONTENT_GAP = 2 * GROUP_CLEAR;
+  var right2 = (r) => r.x + r.width;
+  var bottom2 = (r) => r.y + r.height;
+  var span = (cells, key) => [Math.min(...cells.map((c) => c[key])), Math.max(...cells.map((c) => c[key]))];
+  var interleaved = (a, b) => {
+    const [ac, bc, ar, br] = [span(a, "col"), span(b, "col"), span(a, "row"), span(b, "row")];
+    return ac[0] <= bc[1] && bc[0] <= ac[1] && ar[0] <= br[1] && br[0] <= ar[1];
+  };
+  var wanted = (a, b) => {
+    if (!a.grouped && !b.grouped)
+      return null;
+    if (a.parentId === b.id || b.parentId === a.id)
+      return null;
+    return a.grouped && b.grouped ? GROUP_GAP : CONTENT_GAP;
+  };
+  function gapDeficits(blocks) {
+    const need = new Map;
+    const uniform = { col: 0, row: 0 };
+    const raise = (axis, at, from, to, px) => {
+      const key = `${axis}:${at}:${from}:${to}`;
+      const prev = need.get(key);
+      if (!prev || prev.px < px)
+        need.set(key, { at, from, to, px });
+    };
+    for (let i = 0;i < blocks.length; i++) {
+      for (let j = i + 1;j < blocks.length; j++) {
+        const [a, b] = [blocks[i], blocks[j]];
+        const gap = wanted(a, b);
+        if (gap === null || !a.cells.length || !b.cells.length)
+          continue;
+        if (interleaved(a.cells, b.cells))
+          continue;
+        const overlapX = Math.min(right2(a.rect), right2(b.rect)) - Math.max(a.rect.x, b.rect.x);
+        const overlapY = Math.min(bottom2(a.rect), bottom2(b.rect)) - Math.max(a.rect.y, b.rect.y);
+        if (overlapX > 0 && overlapY > 0 ? overlapY <= overlapX : overlapX > 0) {
+          const [upper, lower] = a.rect.y <= b.rect.y ? [a, b] : [b, a];
+          const have = lower.rect.y - bottom2(upper.rect);
+          const [r0] = span(lower.cells, "row");
+          if (have >= gap || span(upper.cells, "row")[1] >= r0)
+            continue;
+          const [c0, c1] = span(lower.cells, "col");
+          raise("r", r0, c0, c1, Math.ceil(gap - have));
+          uniform.row = Math.max(uniform.row, Math.ceil((gap - have) / (r0 - span(upper.cells, "row")[1])));
+        } else if (overlapY > 0) {
+          const [left, rightB] = a.rect.x <= b.rect.x ? [a, b] : [b, a];
+          const have = rightB.rect.x - right2(left.rect);
+          const [c0] = span(rightB.cells, "col");
+          if (have >= gap || span(left.cells, "col")[1] >= c0)
+            continue;
+          const [r0, r1] = span(rightB.cells, "row");
+          raise("c", c0, r0, r1, Math.ceil(gap - have));
+          uniform.col = Math.max(uniform.col, Math.ceil((gap - have) / (c0 - span(left.cells, "col")[1])));
+        }
+      }
+    }
+    const pick = (axis) => cleanExtras([...need].filter(([k]) => k.startsWith(axis)).map(([, v]) => v));
+    return { colExtra: pick("c"), rowExtra: pick("r"), uniform };
+  }
+  var addBands = (a, b) => cleanExtras([...a, ...b]);
+  var hasDeficits = (d) => d.colExtra.length > 0 || d.rowExtra.length > 0 || d.uniform.col > 0 || d.uniform.row > 0;
+
+  // plugin-src/settle.ts
+  var MAX_SETTLE = 6;
+  async function runSettle(ops, first, reroute) {
+    let more = { col: 0, row: 0 };
+    let bonus = ops.bonus;
+    let previous = null;
+    let frozen = false;
+    let passes = 0;
+    let last = reroute;
+    let drawnAgainst = first;
+    const growth = () => ({ more, bonus });
+    let fit = await ops.refit(growth());
+    while (fit.active && passes < MAX_SETTLE) {
+      const short = hasDeficits(fit.deficits) && !frozen;
+      if (short && ops.uniform) {
+        const step = growPitch(ops.base, more, fit.deficits.uniform, previous);
+        previous = fit.deficits.uniform;
+        frozen = step.stop;
+        more = step.more;
+      } else if (short) {
+        bonus = { colExtra: addBands(bonus.colExtra, fit.deficits.colExtra), rowExtra: addBands(bonus.rowExtra, fit.deficits.rowExtra) };
+        ops.setBonus(bonus);
+      }
+      const again = short ? await ops.refit(growth()) : fit;
+      passes++;
+      const settled = !short && !again.extrasChanged && ops.sameBoxes(drawnAgainst, again);
+      fit = again;
+      if (settled && (frozen || !hasDeficits(again.deficits)))
+        break;
+      last = await ops.redraw(fit);
+      drawnAgainst = fit;
+      fit = await ops.refit(growth());
+    }
+    return { fit, reroute: last, passes };
   }
 
   // plugin-src/flow-group-plan.ts
@@ -1765,22 +2692,26 @@ ${logs.join(`
     }
     return { ok: true, changes };
   }
+  var STYLE_KEYS = ["color", "strokeWeight", "titleSize", "padding", "titleFill", "titleColor"];
   function mergeStyle(base, raw) {
     if (raw === undefined)
       return { ok: true, style: base };
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return { ok: false, error: "style must be an object." };
     const o = raw;
-    const unknown = Object.keys(o).filter((k) => k !== "color" && k !== "strokeWeight" && k !== "titleSize");
+    const unknown = Object.keys(o).filter((k) => !STYLE_KEYS.includes(k));
     if (unknown.length)
       return { ok: false, error: `Unknown style fields: ${unknown.join(", ")}.` };
     const style = { ...base };
-    if (o.color !== undefined) {
-      if (typeof o.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(o.color))
-        return { ok: false, error: "style.color must be #RRGGBB." };
-      style.color = o.color;
+    for (const k of ["color", "titleFill", "titleColor"]) {
+      const v = o[k];
+      if (v === undefined)
+        continue;
+      if (typeof v !== "string" || !/^#[0-9a-fA-F]{6}$/.test(v))
+        return { ok: false, error: `style.${k} must be #RRGGBB.` };
+      style[k] = v;
     }
-    for (const k of ["strokeWeight", "titleSize"]) {
+    for (const k of ["strokeWeight", "titleSize", "padding"]) {
       const v = o[k];
       if (v === undefined)
         continue;
@@ -1788,6 +2719,8 @@ ${logs.join(`
         return { ok: false, error: `style.${k} must be a positive number.` };
       style[k] = v;
     }
+    if (style.padding < GROUP_CLEAR)
+      return { ok: false, error: `style.padding must be at least ${GROUP_CLEAR} (the clearance kept between a box line and content).` };
     return { ok: true, style };
   }
   function reconcileMembership(groups, screens) {
@@ -1808,7 +2741,7 @@ ${logs.join(`
       const parentId = parent && !parent.parentId && parent.id !== g.id ? g.parentId : undefined;
       if (screenIds.length !== g.screenIds.length || parentId !== g.parentId)
         changed.add(g.id);
-      return { id: g.id, name: g.name, screenIds, ...parentId ? { parentId } : {} };
+      return { id: g.id, name: g.name, screenIds, ...parentId ? { parentId } : {}, ...g.style ? { style: g.style } : {} };
     });
     const screenFixes = screens.flatMap((s) => {
       const want = owner.get(s.id) ?? null;
@@ -1816,7 +2749,21 @@ ${logs.join(`
     });
     return { groups: out, changedGroups: [...changed], screenFixes };
   }
-  function groupBoundaryExtras(groups, screens, base) {
+  function groupBoundaryExtras(groups, screens, base, bonus) {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs)
+      return { colExtra: [], rowExtra: [] };
+    const cols = boundaryExtras({ ...inputs.cols, ...bonus ? { bonus } : {} });
+    const rows = boundaryExtras({ ...inputs.rows, ...bonus ? { bonus } : {} });
+    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+  }
+  function groupBoundaryNeeds(groups, screens, base) {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs)
+      return { col: 0, row: 0 };
+    return { col: boundaryNeeds(inputs.cols).col, row: boundaryNeeds(inputs.rows).row };
+  }
+  function boundaryInputs(groups, screens, base) {
     const owner = new Map;
     for (const g of groups)
       for (const id of g.screenIds)
@@ -1824,23 +2771,28 @@ ${logs.join(`
           owner.set(id, g.id);
     const cellOf = new Map(screens.map((s) => [s.id, { col: s.col, row: s.row }]));
     const cellsOf = (id) => screens.filter((s) => owner.get(s.id) === id).map((s) => ({ col: s.col, row: s.row }));
-    const boundary = groups.map((g) => ({ id: g.id, ...g.parentId ? { parentId: g.parentId } : {}, cells: cellsOf(g.id) }));
+    const boundary = groups.map((g) => ({
+      id: g.id,
+      ...g.parentId ? { parentId: g.parentId } : {},
+      cells: cellsOf(g.id),
+      ...g.style ? { metrics: { padding: g.style.padding, strokeWeight: g.style.strokeWeight, titleSize: g.style.titleSize } } : {}
+    }));
     const ungrouped = screens.filter((s) => !owner.has(s.id)).map((s) => cellOf.get(s.id));
     if (!boundary.some((b) => b.cells.length))
-      return { colExtra: {}, rowExtra: {} };
+      return null;
     const colGap = base.colWidth - base.screenW;
     const rowGap = base.rowHeight - base.screenH;
-    const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap });
-    const rows = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) });
-    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+    return {
+      cols: { groups: boundary, ungrouped, base, laneBand: colGap },
+      rows: { groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) }
+    };
   }
   var sameExtras = (a, b) => {
     const [x, y] = [cleanExtras(a), cleanExtras(b)];
-    const keys = Object.keys(x);
-    return keys.length === Object.keys(y).length && keys.every((k) => x[Number(k)] === y[Number(k)]);
+    return x.length === y.length && x.every((b, i) => b.at === y[i]?.at && b.from === y[i]?.from && b.to === y[i]?.to && b.px === y[i]?.px);
   };
   function extrasMoves(screens, meta, next) {
-    return screens.filter((s) => trackStart(s.col, meta.colWidth, meta.colExtra) !== trackStart(s.col, meta.colWidth, next.colExtra) || trackStart(s.row, meta.rowHeight, meta.rowExtra) !== trackStart(s.row, meta.rowHeight, next.rowExtra)).map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: { col: s.col, row: s.row } }));
+    return screens.filter((s) => trackStart(s.col, meta.colWidth, meta.colExtra, s.row) !== trackStart(s.col, meta.colWidth, next.colExtra, s.row) || trackStart(s.row, meta.rowHeight, meta.rowExtra, s.col) !== trackStart(s.row, meta.rowHeight, next.rowExtra, s.col)).map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: { col: s.col, row: s.row } }));
   }
   function holderIndex(childIds, boardId, holderId) {
     const rest = childIds.filter((id) => id !== holderId);
@@ -1857,12 +2809,32 @@ ${logs.join(`
   var holderName = (boardName) => `Flow groups · ${boardName}`;
   var rectName = (name) => `Group · ${name}`;
   var titleName = (name) => `Group title · ${name}`;
+  function internalArrowRects(groups, arrows) {
+    const out = new Map;
+    for (const g of groups) {
+      const family = new Set([...g.screenIds, ...groups.filter((k) => k.parentId === g.id).flatMap((k) => k.screenIds)]);
+      const rects = arrows.filter((a) => family.has(a.from) && family.has(a.to)).flatMap((a) => [...a.rects]);
+      if (rects.length)
+        out.set(g.id, rects);
+    }
+    return out;
+  }
+  var sameRect = (a, b) => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+  function sameBoxes(a, b) {
+    return a.length === b.length && a.every((x) => {
+      const y = b.find((k) => k.id === x.id);
+      return !!y && sameRect(x.box, y.box) && sameRect(x.title, y.title);
+    });
+  }
 
   // plugin-src/flow-groups.ts
   var norm = (id) => id.replace("-", ":");
+  var bandsJson = (extras) => cleanExtras(extras).map((b) => ({ at: b.at, from: b.from, to: b.to, px: b.px }));
+  var BOARD_BACKUP_KEY = "board-backup";
   var TITLE_FONT = { family: "Inter", style: "Bold" };
-  var recOf = (g) => ({ id: g.id, name: g.meta.name, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, screenIds: g.meta.screenIds });
-  var defaultStyle = (nested) => ({ color: "#FFFFFF", strokeWeight: GROUP_STROKE, titleSize: nested ? Math.round(TITLE_SIZE * CHILD_TITLE_SCALE) : TITLE_SIZE });
+  var recOf = (g) => ({ id: g.id, name: g.meta.name, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, screenIds: g.meta.screenIds, style: g.meta.style });
+  var metricsOf = (style) => ({ padding: style.padding, strokeWeight: style.strokeWeight, titleSize: style.titleSize });
+  var defaultStyle = (nested) => ({ color: "#FFFFFF", titleFill: TITLE_FILL, titleColor: TITLE_COLOR, ...defaultMetrics(nested) });
   var boardNameOf = (board) => board.node.name.replace(/^Board background\s*·\s*/, "");
   function findHolder(board) {
     const parent = board.node.parent;
@@ -1909,16 +2881,20 @@ ${logs.join(`
       if (!meta || meta.boardId !== board.node.id)
         continue;
       const t = await sceneById(meta.titleId);
-      out.push({ id: c.id, rect: c, title: t?.type === "TEXT" ? t : null, meta: { ...meta, rectId: c.id } });
+      out.push({ id: c.id, rect: c, title: t?.type === "FRAME" || t?.type === "TEXT" ? t : null, meta: { ...meta, rectId: c.id } });
     }
     return out;
   }
-  setGroupObstacleLoader(async (board) => (await loadGroups(board)).map((g) => {
+  var groupObstacles = async (board) => (await loadGroups(board)).map((g) => {
     const box = rectOf(g.rect);
     const t = g.title ? rectOf(g.title) : null;
-    return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 } };
-  }));
+    return { box, title: { x: box.x, y: t ? t.y : box.y, width: box.width, height: t ? t.height : 0 }, strokeWeight: g.meta.style.strokeWeight, titleChars: g.meta.name.length };
+  });
   var writeGroup = (g) => g.rect.setSharedPluginData(FLOW_NAMESPACE, GROUP_KEY, JSON.stringify(g.meta));
+  function setGroupLayout(g, layout) {
+    g.meta = { ...g.meta, layout };
+    writeGroup(g);
+  }
   function setFlowGroup(s, id) {
     if ((s.meta.flowGroupId ?? null) === id)
       return;
@@ -1962,15 +2938,6 @@ ${logs.join(`
     node.x = p.x;
     node.y = p.y;
   }
-  async function loadTitleFont(title) {
-    if (title && title.fontName !== figma.mixed) {
-      try {
-        await figma.loadFontAsync(title.fontName);
-      } catch {
-        return;
-      }
-    }
-  }
   async function paintGroup(holder, g, fit) {
     const { style, name } = g.meta;
     const rect = g.rect;
@@ -1982,79 +2949,123 @@ ${logs.join(`
     rect.strokeAlign = "INSIDE";
     rect.resize(fit.box.width, fit.box.height);
     place(holder, rect, fit.box);
-    let title = g.title;
-    if (!title) {
-      title = figma.createText();
-      holder.appendChild(title);
-      g.title = title;
-      g.meta = { ...g.meta, titleId: title.id };
-      writeGroup(g);
-    }
-    await loadTitleFont(title);
+    const height = titleHeightOf(style.titleSize);
+    const bar = await titleBarFor(holder, g);
+    bar.visible = true;
+    bar.name = titleName(name);
+    bar.fills = [{ type: "SOLID", color: hexToRgb(style.titleFill) }];
+    bar.layoutMode = "HORIZONTAL";
+    bar.primaryAxisSizingMode = "FIXED";
+    bar.counterAxisSizingMode = "FIXED";
+    bar.primaryAxisAlignItems = "MIN";
+    bar.counterAxisAlignItems = "CENTER";
+    bar.paddingLeft = TITLE_PAD_X;
+    bar.paddingRight = TITLE_PAD_X;
+    bar.paddingTop = Math.round((height - titleLineOf(style.titleSize)) / 2);
+    bar.paddingBottom = bar.paddingTop;
+    bar.clipsContent = true;
+    bar.resize(fit.box.width, height);
+    const text = bar.children.find((c) => c.type === "TEXT") ?? figma.createText();
+    if (text.parent !== bar)
+      bar.appendChild(text);
     await figma.loadFontAsync(TITLE_FONT);
-    title.visible = true;
-    title.fontName = TITLE_FONT;
-    title.fontSize = style.titleSize;
-    title.fills = [{ type: "SOLID", color: hexToRgb(style.color) }];
-    title.textAlignHorizontal = "CENTER";
-    title.textAutoResize = "HEIGHT";
-    if (title.characters !== name)
-      title.characters = name;
-    title.name = titleName(name);
-    title.resize(fit.box.width, Math.max(1, title.height));
-    const height = title.height || fit.title.height;
-    const at = { x: fit.box.x, y: fit.box.y - TITLE_GAP - height };
-    place(holder, title, at);
+    text.fontName = TITLE_FONT;
+    text.fontSize = style.titleSize;
+    text.lineHeight = { unit: "PIXELS", value: titleLineOf(style.titleSize) };
+    text.fills = [{ type: "SOLID", color: hexToRgb(style.titleColor) }];
+    text.textAlignHorizontal = "LEFT";
+    text.textTruncation = "ENDING";
+    text.maxLines = 1;
+    if (text.characters !== name)
+      text.characters = name;
+    text.layoutGrow = 0;
+    text.textAutoResize = "NONE";
+    text.resize(Math.max(1, fit.box.width - TITLE_PAD_X * 2), titleLineOf(style.titleSize));
+    text.name = name;
+    const at = { x: fit.box.x, y: fit.box.y - height };
+    place(holder, bar, at);
     return { x: at.x, y: at.y, width: fit.box.width, height };
   }
-  var INACTIVE = { active: false, extent: null, extrasChanged: false, shifted: 0, issues: [], nesting: [], emptyGroups: [], boxes: [], summary: {} };
+  async function titleBarFor(holder, g) {
+    if (g.title && g.title.type === "FRAME")
+      return g.title;
+    if (g.title)
+      g.title.remove();
+    const bar = figma.createFrame();
+    holder.appendChild(bar);
+    g.title = bar;
+    g.meta = { ...g.meta, titleId: bar.id };
+    writeGroup(g);
+    return bar;
+  }
+  var INACTIVE = { active: false, extent: null, extrasChanged: false, shifted: 0, snapped: [], issues: [], nesting: [], emptyGroups: [], deficits: { colExtra: [], rowExtra: [], uniform: { col: 0, row: 0 } }, boxes: [], summary: {} };
   var json = (v) => v;
   async function refitGroups(board, screens, opts = {}) {
     const groups = await loadGroups(board);
     const holder = findHolder(board);
-    if (!groups.length && !(opts.releaseExtras && (board.meta.colExtra || board.meta.rowExtra))) {
+    const leftovers = !!(board.meta.colExtra || board.meta.rowExtra || board.meta.gapExtra || board.meta.baseColWidth !== undefined);
+    if (!groups.length && isGrouped(board)) {
+      const orphans = screens.some((s) => (s.meta.layoutId ?? BOARD_GRID) !== layoutOfScreen(s.meta));
+      const snapped = orphans ? await regridBoard(board, groups, screens) : [];
+      if (holder && !holder.children.length)
+        holder.remove();
+      return { ...INACTIVE, shifted: snapped.length, snapped };
+    }
+    if (!groups.length && !(opts.releaseExtras && leftovers)) {
       if (holder && !holder.children.length)
         holder.remove();
       return INACTIVE;
     }
     reconcile(groups, screens, true);
     const cells = cellsOf(screens);
-    const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta);
     let extrasChanged = false;
     let shifted = 0;
-    if (!sameExtras(board.meta.colExtra, desired.colExtra) || !sameExtras(board.meta.rowExtra, desired.rowExtra)) {
-      const moves = extrasMoves(cells, board.meta, desired);
-      applyExtras(board, desired);
-      shifted = (await applyMoves(board, screens, moves)).length;
-      extrasChanged = true;
+    const allMoves = () => cells.map((c) => ({ id: c.id, from: { col: c.col, row: c.row }, to: { col: c.col, row: c.row } }));
+    let snapped = [];
+    if (isGrouped(board)) {
+      if (groups.length) {
+        snapped = await regridBoard(board, groups, screens);
+        shifted = snapped.length + await placeGroups(board, groups, screens);
+      }
+    } else if (spacingOf(board.meta) === "uniform") {
+      const base = basePitchOf(board.meta);
+      const needs = groups.length ? groupBoundaryNeeds(groups.map(recOf), cells, { ...base, screenW: board.meta.screenW, screenH: board.meta.screenH }) : { col: 0, row: 0 };
+      const more = opts.pitchExtra ?? { col: 0, row: 0 };
+      const pitch = pitchFromNeeds(base, { col: needs.col + more.col, row: needs.row + more.row });
+      const m = board.meta;
+      const dirty = !samePitch(pitch, { colWidth: m.colWidth, rowHeight: m.rowHeight }) || !!(m.colExtra || m.rowExtra || m.gapExtra) || m.spacing !== "uniform";
+      if (dirty) {
+        applyPitch(board, base, pitch, groups.length > 0);
+        shifted = (await applyMoves(board, screens, allMoves())).length;
+        extrasChanged = true;
+      }
+    } else {
+      if (!groups.length)
+        setGapExtra(board, null);
+      const restored = board.meta.baseColWidth !== undefined || board.meta.baseRowHeight !== undefined;
+      if (restored)
+        applyBanded(board);
+      const desired = groupBoundaryExtras(groups.map(recOf), cells, board.meta, opts.bonus ?? board.meta.gapExtra);
+      if (restored || !sameExtras(board.meta.colExtra, desired.colExtra) || !sameExtras(board.meta.rowExtra, desired.rowExtra)) {
+        const moves = restored ? allMoves() : extrasMoves(cells, board.meta, desired);
+        applyExtras(board, desired);
+        shifted = (await applyMoves(board, screens, moves)).length;
+        extrasChanged = true;
+      }
     }
     if (!groups.length) {
       if (holder && !holder.children.length)
         holder.remove();
-      return { ...INACTIVE, extrasChanged, shifted };
+      return { ...INACTIVE, extrasChanged, shifted, snapped };
     }
     const layer = ensureHolder(board);
-    const prints = new Map;
-    for (const s of screens)
-      prints.set(s.node.id, await footprintOf(s));
-    const membersOf = (g) => g.meta.screenIds.flatMap((id) => {
-      const p = prints.get(id);
-      return p ? [p.content] : [];
-    });
-    const fitted = new Map;
+    board.node.locked = true;
+    layer.locked = true;
+    layer.setSharedPluginData(FLOW_NAMESPACE, BOARD_BACKUP_KEY, JSON.stringify({ meta: board.meta, name: board.node.name, rect: rectOf(board.node) }));
+    await snapBadges(screens);
+    const { prints, fitted } = await measureBoxes(board, groups, screens);
     const children = groups.filter((g) => g.meta.parentId);
     const tops = groups.filter((g) => !g.meta.parentId);
-    for (const g of children) {
-      const m = membersOf(g);
-      if (m.length)
-        fitted.set(g.id, fitBox(m, [], titleHeightOf(g.meta.style.titleSize)));
-    }
-    for (const g of tops) {
-      const m = membersOf(g);
-      const kids = children.flatMap((k) => k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id)] : []);
-      if (m.length || kids.length)
-        fitted.set(g.id, fitBox(m, kids, titleHeightOf(g.meta.style.titleSize)));
-    }
     const emptyGroups = [];
     const boxes = [];
     for (const g of [...tops, ...children]) {
@@ -2067,7 +3078,10 @@ ${logs.join(`
         continue;
       }
       const title = await paintGroup(layer, g, fit);
-      boxes.push({ id: g.id, name: g.meta.name, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, box: fit.box, title });
+      g.rect.locked = true;
+      if (g.title)
+        g.title.locked = true;
+      boxes.push({ id: g.id, name: g.meta.name, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, box: fit.box, title, strokeWeight: g.meta.style.strokeWeight });
       layer.appendChild(g.rect);
       if (g.title)
         layer.appendChild(g.title);
@@ -2086,25 +3100,177 @@ ${logs.join(`
       if (label)
         contents.push({ kind: "label", id: a.meta.labelId, rect: rectOf(label) });
     }
-    const conflictGroups = boxes.map((b) => ({ id: b.id, ...b.parentId ? { parentId: b.parentId } : {}, box: b.box, title: b.title }));
+    const conflictGroups = boxes.map((b) => ({ id: b.id, ...b.parentId ? { parentId: b.parentId } : {}, box: b.box, title: b.title, strokeWeight: b.strokeWeight }));
     const issues = groupConflicts(conflictGroups, contents);
     const nesting = validateNesting(conflictGroups);
     const extent = unionRect(boxes.flatMap((b) => [b.box, b.title]));
+    const familyOf = (id) => [...groups.find((g) => g.id === id)?.meta.screenIds ?? [], ...groups.filter((k) => k.meta.parentId === id).flatMap((k) => k.meta.screenIds)];
+    const cellOfId = new Map(cells.map((c) => [c.id, { col: c.col, row: c.row }]));
+    const blocks = [
+      ...boxes.map((b) => ({
+        id: b.id,
+        rect: unionRect([b.box, b.title]),
+        cells: familyOf(b.id).flatMap((id) => cellOfId.has(id) ? [cellOfId.get(id)] : []),
+        grouped: true,
+        ...b.parentId ? { parentId: b.parentId } : {}
+      })),
+      ...screens.filter((s) => !groups.some((g) => g.meta.screenIds.includes(s.node.id))).map((s) => ({ id: s.node.id, rect: prints.get(s.node.id).content, cells: [{ col: s.meta.col, row: s.meta.row }], grouped: false }))
+    ];
+    const deficits = gapDeficits(blocks);
     const summary = {
       count: groups.length,
       extrasChanged,
       shifted,
+      ...snapped.length ? { snapped: json(snapped) } : {},
       ...issues.length ? { issues: json(issues) } : {},
       ...nesting.length ? { nesting: json(nesting) } : {},
       ...emptyGroups.length ? { emptyGroups } : {}
     };
-    return { active: true, extent, extrasChanged, shifted, issues, nesting, emptyGroups, boxes, summary };
+    return { active: true, extent, extrasChanged, shifted, snapped, issues, nesting, emptyGroups, deficits, boxes, summary: hasDeficits(deficits) ? { ...summary, gapDeficits: json(deficits) } : summary };
+  }
+  async function measureBoxes(board, groups, screens) {
+    const prints = new Map;
+    for (const s of screens)
+      prints.set(s.node.id, await footprintOf(s));
+    const arrowRects = await internalArrowsOf(board);
+    const inside = internalArrowRects(groups.map(recOf), arrowRects);
+    const membersOf = (g) => [
+      ...g.meta.screenIds.flatMap((id) => {
+        const p = prints.get(id);
+        return p ? [p.content] : [];
+      }),
+      ...inside.get(g.id) ?? []
+    ];
+    const fitted = new Map;
+    const children = groups.filter((g) => g.meta.parentId);
+    const tops = groups.filter((g) => !g.meta.parentId);
+    for (const g of children) {
+      const m = membersOf(g);
+      if (m.length)
+        fitted.set(g.id, fitBox(m, [], metricsOf(g.meta.style)));
+    }
+    for (const g of tops) {
+      const m = membersOf(g);
+      const kids = children.flatMap((k) => k.meta.parentId === g.id && fitted.has(k.id) ? [fitted.get(k.id)] : []);
+      if (m.length || kids.length)
+        fitted.set(g.id, fitBox(m, kids, metricsOf(g.meta.style)));
+    }
+    return { prints, fitted };
+  }
+  var MAX_PLACE_PASSES = 8;
+  var groupGrids = (board, groups) => gridLookup(board, groups.map((g) => ({ id: g.id, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+  async function regridBoard(board, groups, screens) {
+    const plan = planRegrid(board.meta, screens.map((s) => {
+      const r = rectOf(s.node);
+      return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, ...s.meta.layoutId ? { layoutId: s.meta.layoutId } : {}, col: s.meta.col, row: s.meta.row, x: r.x, y: r.y };
+    }), groups.map((g) => ({ id: g.id, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+    for (const [id, layout] of plan.layouts) {
+      const g = groups.find((x) => x.id === id);
+      if (!g)
+        continue;
+      g.meta = { ...g.meta, layout };
+      writeGroup(g);
+    }
+    const grids = groupGrids(board, groups);
+    const out = [];
+    for (const [id, cell] of plan.cells) {
+      const s = screens.find((x) => x.node.id === id);
+      if (!s)
+        continue;
+      if (plan.snapped.includes(id)) {
+        const want = cellRectIn(grids(cell.layoutId), cell.col, cell.row, { width: board.meta.screenW, height: board.meta.screenH });
+        const have = rectOf(s.node);
+        await shiftScreen(s, want.x - have.x, want.y - have.y);
+        out.push({ id, name: s.node.name, to: { ...cell } });
+      }
+      s.meta = { ...s.meta, ...cell };
+      writeScreen(s.node, s.meta);
+    }
+    return out;
+  }
+  async function placeGroups(board, groups, screens) {
+    let moved = 0;
+    for (let pass = 0;pass < MAX_PLACE_PASSES; pass++) {
+      const { fitted } = await measureBoxes(board, groups, screens);
+      const boxes = groups.flatMap((g) => {
+        const fit = fitted.get(g.id);
+        const rect = fit ? unionRect([fit.box, fit.title]) : null;
+        return rect ? [{ id: g.id, rect, ...g.meta.parentId ? { parentId: g.meta.parentId } : {} }] : [];
+      });
+      const moves = resolveOverlaps(boxes, GROUP_CLEAR);
+      if (!moves.length)
+        break;
+      const plan = planBlockShifts(moves, groups.map((g) => ({ id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, screenIds: g.meta.screenIds, ...g.meta.layout ? { layout: g.meta.layout } : {} })));
+      for (const [id, d] of plan.screens) {
+        const s = screens.find((x) => x.node.id === id);
+        if (!s)
+          continue;
+        await shiftScreen(s, d.dx, d.dy);
+        moved++;
+      }
+      for (const [id, layout] of plan.layouts) {
+        const g = groups.find((x) => x.id === id);
+        if (!g)
+          continue;
+        g.meta = { ...g.meta, layout };
+        writeGroup(g);
+      }
+    }
+    return moved;
+  }
+  async function internalArrowsOf(board) {
+    const out = [];
+    for (const a of listArrows(board)) {
+      const nodes = await Promise.all([sceneById(a.meta.labelId), sceneById(a.meta.vectorId)]);
+      out.push({ from: a.meta.from, to: a.meta.to, rects: nodes.flatMap((n) => n ? [rectOf(n)] : []) });
+    }
+    return out;
+  }
+  async function settleBoard(board, screens, first, reroute) {
+    if (isGrouped(board))
+      return settleGrouped(board, screens, first, reroute);
+    const uniform = spacingOf(board.meta) === "uniform";
+    const out = await runSettle({
+      uniform,
+      base: basePitchOf(board.meta),
+      bonus: board.meta.gapExtra ?? { colExtra: [], rowExtra: [] },
+      setBonus: (b) => setGapExtra(board, b),
+      refit: (g) => refitGroups(board, screens, uniform ? { pitchExtra: g.more } : { bonus: g.bonus }),
+      redraw: async (f) => {
+        await resizeBoard(board, screens, false, f.extent);
+        return rerouteBoards([board]);
+      },
+      sameBoxes: (a, b) => sameBoxes(a.boxes, b.boxes)
+    }, first, reroute);
+    if (out.fit.active)
+      await resizeBoard(board, screens, true, out.fit.extent);
+    return out;
+  }
+  var MAX_GROUPED_PASSES = 3;
+  async function settleGrouped(board, screens, first, reroute) {
+    let fit = first;
+    let drawn = reroute;
+    let passes = 0;
+    while (passes < MAX_GROUPED_PASSES) {
+      const next = await refitGroups(board, screens);
+      passes++;
+      const same = sameBoxes(fit.boxes, next.boxes);
+      fit = next;
+      if (same && next.shifted === 0)
+        break;
+      await resizeBoard(board, screens, false, next.extent);
+      drawn = await rerouteBoards([board]);
+    }
+    if (fit.active)
+      await resizeBoard(board, screens, true, fit.extent);
+    return { fit, reroute: drawn, passes };
   }
   async function syncBoard(board, screens, opts = {}) {
-    const fit = await refitGroups(board, screens, opts);
-    const size = await resizeBoard(board, screens, false, fit.extent);
-    const reroute = await rerouteBoards([board]);
-    return { fit, size, reroute };
+    const first = await refitGroups(board, screens, opts);
+    const size = await resizeBoard(board, screens, false, first.extent);
+    const rerouted = await rerouteBoards([board]);
+    const { fit, reroute } = await settleBoard(board, screens, first, rerouted);
+    return { fit, size: await resizeBoard(board, screens, false, fit.extent), reroute };
   }
   var rerouteBrief = (r) => ({ rerouted: r.rerouted ?? 0, errors: r.errors ?? [], warnings: r.warnings ?? [] });
   var strList = (args, key) => {
@@ -2187,8 +3353,35 @@ ${logs.join(`
     if (dryRun) {
       const next = [
         ...groups.map(recOf).map((g) => g.id === plan.parentId ? { ...g, screenIds: g.screenIds.filter((id) => !plan.takeFromParent.includes(id)) } : g),
-        { id: "new", name: plan.name, ...plan.parentId ? { parentId: plan.parentId } : {}, screenIds: plan.screenIds }
+        { id: "new", name: plan.name, ...plan.parentId ? { parentId: plan.parentId } : {}, screenIds: plan.screenIds, style: styled.style }
       ];
+      if (isGrouped(board)) {
+        return ok({
+          dryRun: true,
+          boardId: board.node.id,
+          name: plan.name,
+          ...plan.parentId ? { parentId: plan.parentId } : {},
+          screens: describeScreens(screens, plan.screenIds),
+          movedFromParent: plan.takeFromParent,
+          spacing: "grouped",
+          screensShifted: 0
+        });
+      }
+      const base = { ...basePitchOf(board.meta), screenW: board.meta.screenW, screenH: board.meta.screenH };
+      if (spacingOf(board.meta) === "uniform") {
+        const pitch = pitchFromNeeds(base, groupBoundaryNeeds(next, cellsOf(screens), base));
+        return ok({
+          dryRun: true,
+          boardId: board.node.id,
+          name: plan.name,
+          ...plan.parentId ? { parentId: plan.parentId } : {},
+          screens: describeScreens(screens, plan.screenIds),
+          movedFromParent: plan.takeFromParent,
+          spacing: "uniform",
+          pitch: { colWidth: pitch.colWidth, rowHeight: pitch.rowHeight },
+          screensShifted: samePitch(pitch, { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight }) ? 0 : screens.length
+        });
+      }
       const extras = groupBoundaryExtras(next, cellsOf(screens), board.meta);
       return ok({
         dryRun: true,
@@ -2197,14 +3390,14 @@ ${logs.join(`
         ...plan.parentId ? { parentId: plan.parentId } : {},
         screens: describeScreens(screens, plan.screenIds),
         movedFromParent: plan.takeFromParent,
-        extras: { colExtra: { ...extras.colExtra }, rowExtra: { ...extras.rowExtra } },
+        extras: { colExtra: bandsJson(extras.colExtra), rowExtra: bandsJson(extras.rowExtra) },
         screensShifted: extrasMoves(cellsOf(screens), board.meta, extras).length
       });
     }
     const layer = ensureHolder(board);
     const rect = figma.createRectangle();
     layer.appendChild(rect);
-    const title = figma.createText();
+    const title = figma.createFrame();
     layer.appendChild(title);
     const meta = { boardId: board.node.id, name: plan.name, screenIds: plan.screenIds, rectId: rect.id, titleId: title.id, ...plan.parentId ? { parentId: plan.parentId } : {}, style: styled.style };
     const created = { id: rect.id, rect, title, meta };
@@ -2224,8 +3417,9 @@ ${logs.join(`
       ...plan.parentId ? { parentId: plan.parentId } : {},
       screens: describeScreens(screens, plan.screenIds),
       ...boxOf(fit, rect.id),
-      extras: { colExtra: { ...board.meta.colExtra ?? {} }, rowExtra: { ...board.meta.rowExtra ?? {} } },
+      extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
       screensShifted: fit.shifted,
+      ...fit.snapped.length ? { snapped: json(fit.snapped) } : {},
       board: size,
       issues: json(fit.issues),
       nesting: json(fit.nesting),
@@ -2283,8 +3477,9 @@ ${logs.join(`
       ...plan.parentId ? { parentId: plan.parentId } : {},
       screens: describeScreens(screens, plan.screenIds),
       ...boxOf(fit, group.id),
-      extras: { colExtra: { ...board.meta.colExtra ?? {} }, rowExtra: { ...board.meta.rowExtra ?? {} } },
+      extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
       screensShifted: fit.shifted,
+      ...fit.snapped.length ? { snapped: json(fit.snapped) } : {},
       board: size,
       issues: json(fit.issues),
       nesting: json(fit.nesting),
@@ -2325,7 +3520,7 @@ ${logs.join(`
       boardId: board.node.id,
       freedScreens: plan.screenIds,
       promoted: plan.promote,
-      extras: { colExtra: { ...board.meta.colExtra ?? {} }, rowExtra: { ...board.meta.rowExtra ?? {} } },
+      extras: { colExtra: bandsJson(board.meta.colExtra), rowExtra: bandsJson(board.meta.rowExtra) },
       screensShifted: fit.shifted,
       board: size,
       issues: json(fit.issues),
@@ -2373,21 +3568,98 @@ ${logs.join(`
     const { fit, size, reroute } = await syncBoard(board, screens);
     return { ...fit.summary, board: size, reroute: rerouteBrief(reroute) };
   }
+  async function convertToGrouped(board, screens, groups, dryRun) {
+    const plan = migrateToGrouped(board.meta, screens.map((s) => {
+      const r = rectOf(s.node);
+      return { id: s.node.id, flowGroupId: s.meta.flowGroupId ?? null, x: r.x, y: r.y };
+    }), groups.map((g) => ({ id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {} })));
+    const report = {
+      boardId: board.node.id,
+      dryRun,
+      from: spacingOf(board.meta),
+      grids: plan.grids.map((g) => ({ id: g.id, ...g.id === BOARD_GRID ? {} : { name: groups.find((x) => x.id === g.id)?.meta.name ?? g.id }, originX: g.originX, originY: g.originY })),
+      screensMoved: plan.moves.length,
+      moves: plan.moves.map((m) => ({ id: m.id, name: screens.find((s) => s.node.id === m.id)?.node.name ?? m.id, from: { ...m.from }, to: { ...m.to }, cell: { layoutId: m.layoutId, col: m.col, row: m.row } })),
+      offGrid: plan.offGrid.map((id) => ({ id, name: screens.find((s) => s.node.id === id)?.node.name ?? id }))
+    };
+    if (dryRun)
+      return report;
+    for (const g of plan.grids) {
+      if (g.id === BOARD_GRID)
+        continue;
+      const group = groups.find((x) => x.id === g.id);
+      if (!group)
+        continue;
+      group.meta = { ...group.meta, layout: { originX: g.originX, originY: g.originY } };
+      writeGroup(group);
+    }
+    const loose = plan.grids.find((g) => g.id === BOARD_GRID);
+    const { colExtra: _c, rowExtra: _r, gapExtra: _g, baseColWidth: _bc, baseRowHeight: _br, ...rest } = board.meta;
+    board.meta = { ...rest, spacing: "grouped", ...loose ? { originX: loose.originX, originY: loose.originY } : {} };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    for (const s of screens) {
+      const cell = plan.cells.get(s.node.id);
+      if (!cell)
+        continue;
+      const move = plan.moves.find((m) => m.id === s.node.id);
+      if (move) {
+        const have = rectOf(s.node);
+        await shiftScreen(s, move.to.x - have.x, move.to.y - have.y);
+      }
+      s.meta = { ...s.meta, ...cell };
+      writeScreen(s.node, s.meta);
+    }
+    return report;
+  }
   var rerouteFlowWithGroups = async (args) => {
     const boards = await boardsFor(args);
+    const mode = str(args, "spacing");
+    if (mode !== undefined && mode !== "uniform" && mode !== "banded" && mode !== "grouped")
+      return fail('spacing must be "uniform", "banded" or "grouped".');
+    const dryRun = bool(args, "dryRun", false);
+    const conversions = [];
+    if (mode === "grouped") {
+      for (const board of boards) {
+        if (isGrouped(board))
+          continue;
+        const groups = await loadGroups(board);
+        if (!groups.length)
+          return fail(`Board ${board.node.id} has no flow groups: spacing "grouped" lays each group out on its own grid. Create groups first.`);
+        const { screens } = await loadScreens(board);
+        reconcile(groups, screens, !dryRun);
+        conversions.push(await convertToGrouped(board, screens, groups, dryRun));
+      }
+      if (dryRun)
+        return ok({ dryRun: true, conversions });
+    } else if (mode) {
+      if (boards.some((b) => isGrouped(b)))
+        return fail("A grouped board cannot go back to uniform or banded spacing: its screens have group-local cells.");
+      for (const board of boards)
+        setSpacing(board, mode);
+    }
     const fits = [];
+    const first = new Map;
     for (const board of boards) {
       if (!(await loadGroups(board)).length)
         continue;
       const { screens } = await loadScreens(board);
       const fit = await refitGroups(board, screens);
       await resizeBoard(board, screens, false, fit.extent);
-      fits.push({ boardId: board.node.id, ...fit.summary });
+      first.set(board.node.id, fit);
     }
     const reply = await rerouteFlow(args);
+    for (const board of boards) {
+      const fit0 = first.get(board.node.id);
+      if (!fit0)
+        continue;
+      const { screens } = await loadScreens(board);
+      const settled = await settleBoard(board, screens, fit0, {});
+      await resizeBoard(board, screens, false, settled.fit.extent);
+      fits.push({ boardId: board.node.id, spacing: spacingOf(board.meta), pitch: { colWidth: board.meta.colWidth, rowHeight: board.meta.rowHeight }, settlePasses: settled.passes, ...settled.fit.summary });
+    }
     if (!reply.ok || !fits.length || typeof reply.result !== "object" || reply.result === null || Array.isArray(reply.result))
       return reply;
-    return ok({ ...reply.result, groups: fits });
+    return ok({ ...reply.result, groups: fits, ...conversions.length ? { conversions } : {} });
   };
   var connectWithGroups = async (args) => {
     const reply = await connect(args);
@@ -2402,12 +3674,13 @@ ${logs.join(`
     if (!(await loadGroups(board)).length)
       return reply;
     const { screens } = await loadScreens(board);
-    const fit = await refitGroups(board, screens);
+    let fit = await refitGroups(board, screens);
     let reroute = null;
     if (fit.extrasChanged) {
       await resizeBoard(board, screens, false, fit.extent);
       reroute = await rerouteBoards([board]);
     }
+    fit = (await settleBoard(board, screens, fit, {})).fit;
     return ok({ ...reply.result, groups: fit.summary, ...reroute ? { reroute: rerouteBrief(reroute) } : {} }, { logs: reply.logs });
   };
   async function createGroupsBatch(board, screens, specs) {
@@ -2431,7 +3704,7 @@ ${logs.join(`
       const layer = ensureHolder(board);
       const rect = figma.createRectangle();
       layer.appendChild(rect);
-      const title = figma.createText();
+      const title = figma.createFrame();
       layer.appendChild(title);
       const meta = { boardId: board.node.id, name: plan.name, screenIds: plan.screenIds, rectId: rect.id, titleId: title.id, ...plan.parentId ? { parentId: plan.parentId } : {}, style: defaultStyle(!!plan.parentId) };
       const made = { id: rect.id, rect, title, meta };
@@ -2471,6 +3744,20 @@ ${logs.join(`
         return `Group ${i.groupId} sticks out of its parent ${i.parentId}`;
       case "parent-missing":
         return `Group ${i.groupId} has a missing parent ${i.parentId}`;
+      case "label-overlaps-label":
+        return `Label of arrow ${i.arrowId} overlaps the label of arrow ${i.otherId}`;
+      case "lines-overlap":
+        return `Arrow ${i.arrowId} runs on top of arrow ${i.otherId} for ${i.length}px`;
+      case "shared-start":
+        return `Arrow ${i.arrowId} and arrow ${i.otherId} leave the same dot for different targets and share ${i.length}px of their first run; fork them into separate rows`;
+      case "line-crosses-title":
+        return `Arrow ${i.arrowId} crosses the title text of group ${i.groupId}`;
+      case "starts-wrong-side":
+        return `Arrow ${i.arrowId} starts on the ${i.side} edge of screen ${i.screenId}; arrows start on a screen's bottom or right edge`;
+      case "ends-wrong-side":
+        return `Arrow ${i.arrowId} ends on the ${i.side} edge of screen ${i.screenId}; arrows end on a screen's left or top edge`;
+      case "line-crosses-screen":
+        return `Arrow ${i.arrowId} runs through screen ${i.screenId}, which is neither its source nor its target`;
     }
   }
   function lintGroups(groups, contents) {
@@ -2481,165 +3768,246 @@ ${logs.join(`
       counts[i.kind] = (counts[i.kind] ?? 0) + 1;
     return { issues, counts };
   }
-
-  // plugin-src/layout-lint.ts
-  async function boardLayoutLint(board) {
-    const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
-    if (!loaded.length)
-      return null;
-    const { screens } = await loadScreens(board);
-    const contents = [];
-    for (const s of screens) {
-      const p = await footprintOf(s);
-      contents.push({ kind: "screen", id: s.node.id, rect: p.frame, ...s.meta.flowGroupId ? { ownerGroupId: s.meta.flowGroupId } : {} });
-      if (p.route && s.meta.routeId)
-        contents.push({ kind: "route", id: s.meta.routeId, rect: p.route });
-      if (p.badge && s.meta.badgeId)
-        contents.push({ kind: "badge", id: s.meta.badgeId, rect: p.badge });
+  var LINES_OVERLAP_MIN = 40;
+  var rectsIntersect = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  function segmentsOf(points) {
+    const out = [];
+    for (let i = 1;i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (a.x === b.x && a.y !== b.y)
+        out.push({ axis: "v", at: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) });
+      else if (a.y === b.y && a.x !== b.x)
+        out.push({ axis: "h", at: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) });
     }
-    for (const a of listArrows(board)) {
-      const label = await sceneById(a.meta.labelId);
-      if (label)
-        contents.push({ kind: "label", id: a.meta.labelId, rect: rectOf(label) });
-    }
-    const groups = loaded.map((g) => {
-      const box = rectOf(g.rect);
-      return { id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, box, title: g.title ? rectOf(g.title) : { x: box.x, y: box.y, width: 0, height: 0 } };
-    });
-    const r = lintGroups(groups, contents);
-    return { boardId: board.node.id, issues: r.issues, counts: r.counts };
+    return out;
   }
-
-  // plugin-src/flowlint.ts
-  var isHead = (v) => typeof v.strokeCap === "string" && v.strokeCap.startsWith("ARROW");
-  function orderPath(vertices, segments) {
-    const heads = vertices.map((v, i) => isHead(v) ? i : -1).filter((i) => i >= 0);
-    if (heads.length !== 1)
-      return null;
-    const links = vertices.map(() => []);
-    for (const s of segments) {
-      links[s.start]?.push(s.end);
-      links[s.end]?.push(s.start);
-    }
-    if (links.some((l) => l.length > 2))
-      return null;
-    const ends = links.map((l, i) => l.length === 1 ? i : -1).filter((i) => i >= 0);
-    const head = heads[0];
-    const tail = ends.find((i) => i !== head);
-    if (tail === undefined || !ends.includes(head))
-      return null;
-    const order = [tail];
-    let prev = -1;
-    let at = tail;
-    while (at !== head) {
-      const next = (links[at] ?? []).find((n) => n !== prev);
-      if (next === undefined)
-        return null;
-      prev = at;
-      at = next;
-      order.push(at);
-    }
-    return order.map((i) => {
-      const v = vertices[i];
-      return { x: v.x, y: v.y };
-    });
+  var segHitsRect = (s, r) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width;
+  var SIDE_TOLERANCE = 2;
+  var SHARED_START_MAX = 48;
+  function sharedStartLength(a, b) {
+    const [a0, a1, b0, b1] = [a.points[0], a.points[1], b.points[0], b.points[1]];
+    if (!a0 || !a1 || !b0 || !b1 || a0.x !== b0.x || a0.y !== b0.y || a.to !== undefined && a.to === b.to)
+      return 0;
+    if (a1.y !== a0.y || b1.y !== b0.y)
+      return 0;
+    return Math.max(0, Math.min(Math.max(a0.x, a1.x), Math.max(b0.x, b1.x)) - Math.max(Math.min(a0.x, a1.x), Math.min(b0.x, b1.x)));
   }
-  function classifyArrow(points, tolerance = 1) {
-    const a = points[points.length - 2];
-    const b = points[points.length - 1];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const heading = Math.abs(dx) > Math.abs(dy) ? dx > 0 ? "right" : "left" : dy > 0 ? "down" : "up";
-    const issues = [];
-    if (heading === "left" && dx < -tolerance)
-      issues.push("points-left");
-    else if (points.slice(1).some((p, i) => p.x - points[i].x < -tolerance))
-      issues.push("runs-left");
-    return { heading, issues };
+  function edgeSide(p, r, sides) {
+    const inX = p.x >= r.x - SIDE_TOLERANCE && p.x <= r.x + r.width + SIDE_TOLERANCE;
+    const inY = p.y >= r.y - SIDE_TOLERANCE && p.y <= r.y + r.height + SIDE_TOLERANCE;
+    for (const side of sides) {
+      if (side === "left" && inY && Math.abs(p.x - r.x) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "right" && inY && Math.abs(p.x - (r.x + r.width)) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "top" && inX && Math.abs(p.y - r.y) <= SIDE_TOLERANCE)
+        return side;
+      if (side === "bottom" && inX && Math.abs(p.y - (r.y + r.height)) <= SIDE_TOLERANCE)
+        return side;
+    }
+    return null;
   }
-  var lintFlowLayout = async (args) => {
-    const id = str(args, "nodeId");
-    const root = id ? await requireNode(id) : figma.currentPage;
-    const tolerance = num(args, "tolerance") ?? 1;
-    const issues = [];
-    let checked = 0;
-    for (const n of walk(root, 1e5)) {
-      if (n.type !== "VECTOR" || !isScene(n))
-        continue;
-      const net = n.vectorNetwork;
-      const local = orderPath(net.vertices, net.segments);
-      if (!local)
-        continue;
-      checked++;
-      const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
-      const abs = local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
-      const result = classifyArrow(abs, tolerance);
-      if (result.issues.length) {
-        issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0], to: abs[abs.length - 1] });
+  function mergedLines(a, b) {
+    const out = [];
+    const pa = a.points;
+    const pb = b.points;
+    if (a.to !== undefined && a.to === b.to && pa.length >= 2 && pb.length >= 2) {
+      const la = pa[pa.length - 1];
+      const lb = pb[pb.length - 1];
+      if (la.x === lb.x && la.y === lb.y) {
+        out.push({ axis: "h", at: la.y });
+        const ca = pa[pa.length - 2];
+        const cb = pb[pb.length - 2];
+        const turnA = pa.length >= 3 && pa[pa.length - 3].x === ca.x;
+        const turnB = pb.length >= 3 && pb[pb.length - 3].x === cb.x;
+        if (turnA && turnB && ca.x === cb.x)
+          out.push({ axis: "v", at: ca.x });
       }
     }
-    const layoutIssues = [];
+    const sa = pa[0];
+    const sb = pb[0];
+    if (sa && sb && sa.x === sb.x && sa.y === sb.y)
+      out.push({ axis: "h", at: sa.y });
+    return out;
+  }
+  function lintArrows(arrows, titles, screens = []) {
+    const raw = [];
+    const segs = arrows.map((a) => segmentsOf(a.points));
+    for (let i = 0;i < arrows.length; i++) {
+      const a = arrows[i];
+      for (let j = i + 1;j < arrows.length; j++) {
+        const b = arrows[j];
+        if (a.label && b.label && rectsIntersect(a.label, b.label))
+          raw.push({ kind: "label-overlaps-label", arrowId: a.id, otherId: b.id });
+        const merged = mergedLines(a, b);
+        let shared = 0;
+        for (const s of segs[i]) {
+          if (merged.some((m) => m.axis === s.axis && m.at === s.at))
+            continue;
+          for (const t of segs[j]) {
+            if (s.axis === t.axis && s.at === t.at)
+              shared += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+          }
+        }
+        if (shared > LINES_OVERLAP_MIN)
+          raw.push({ kind: "lines-overlap", arrowId: a.id, otherId: b.id, length: Math.round(shared) });
+        const together = sharedStartLength(a, b);
+        if (together > SHARED_START_MAX)
+          raw.push({ kind: "shared-start", arrowId: a.id, otherId: b.id, length: Math.round(together) });
+      }
+      for (const t of titles) {
+        if (segs[i].some((s) => segHitsRect(s, t.text)))
+          raw.push({ kind: "line-crosses-title", arrowId: a.id, groupId: t.id });
+      }
+      const first = a.points[0];
+      const last = a.points[a.points.length - 1];
+      const from = screens.find((sc) => sc.id === a.from);
+      const to = screens.find((sc) => sc.id === a.to);
+      if (first && from) {
+        const side = edgeSide(first, from.rect, ["left", "top"]);
+        if (side === "left" || side === "top")
+          raw.push({ kind: "starts-wrong-side", arrowId: a.id, screenId: from.id, side });
+      }
+      if (last && to) {
+        const side = edgeSide(last, to.rect, ["right", "bottom"]);
+        if (side === "right" || side === "bottom")
+          raw.push({ kind: "ends-wrong-side", arrowId: a.id, screenId: to.id, side });
+      }
+      for (const sc of screens) {
+        if (sc.id === a.from || sc.id === a.to)
+          continue;
+        const inner = { x: sc.rect.x + 1, y: sc.rect.y + 1, width: sc.rect.width - 2, height: sc.rect.height - 2 };
+        if (segs[i].some((s) => segHitsRect(s, inner)))
+          raw.push({ kind: "line-crosses-screen", arrowId: a.id, screenId: sc.id });
+      }
+    }
+    const issues = raw.map((i) => ({ ...i, message: describe(i) }));
     const counts = {};
-    const boardNodes = "children" in root ? [root, ...root.children].filter((n) => readMeta(n, BOARD_KEY, parseBoardMeta)) : [];
-    for (const n of boardNodes) {
-      const r = await boardLayoutLint(await loadBoard(n.id));
-      if (!r)
+    for (const i of issues)
+      counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    return { issues, counts };
+  }
+  function lintOffGrid(screens, gridFor) {
+    const out = [];
+    for (const s of screens) {
+      const grid = gridFor(s.layoutId);
+      if (onGrid(grid, s.rect))
         continue;
-      layoutIssues.push(...r.issues.map((i) => ({ boardId: r.boardId, ...i })));
-      for (const [k, v] of Object.entries(r.counts))
-        counts[k] = (counts[k] ?? 0) + v;
+      const { col, row } = cellOfIn(grid, s.rect);
+      const dx = Math.round(s.rect.x - (grid.originX + col * grid.colWidth));
+      const dy = Math.round(s.rect.y - (grid.originY + row * grid.rowHeight));
+      out.push({ kind: "off-grid", screenId: s.id, layoutId: s.layoutId, col, row, dx, dy, message: `Screen ${s.id} is ${dx}px, ${dy}px off cell (${col},${row}) of its grid ${s.layoutId}. Run move_screen to put it on the pitch.` });
     }
-    return ok({
-      checked,
-      passed: issues.length === 0 && layoutIssues.length === 0,
-      issues,
-      layoutIssues,
-      counts,
-      fix: layoutIssues.length ? "Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines." : issues.length ? "Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up." : null
-    });
-  };
-
-  // plugin-src/anatomy.ts
-  async function fitRoute(route, frameWidth, badgeWidth) {
-    if (route.characters.length)
-      for (const f of route.getRangeAllFontNames(0, route.characters.length))
-        await figma.loadFontAsync(f);
-    else if (route.fontName !== figma.mixed)
-      await figma.loadFontAsync(route.fontName);
-    route.textAutoResize = "HEIGHT";
-    route.resize(routeWidth(frameWidth, badgeWidth), route.height);
-    route.maxLines = 1;
-    route.textTruncation = "ENDING";
+    return out;
   }
 
-  // plugin-src/lift.ts
-  function lift(frame) {
-    const group = frame.parent;
-    const host = group?.parent;
-    if (group?.type !== "GROUP" || !host?.insertChild || !group.insertChild || !group.children || !host.children)
-      return null;
-    const index = group.children.indexOf(frame);
-    host.insertChild(host.children.indexOf(group) + 1, frame);
-    return () => group.insertChild?.(index, frame);
+  // plugin-src/prototype-lint.ts
+  var TAB_BAR_NAME = /tab ?bar|bottom ?nav|navigation ?bar/i;
+  var TAB_TRIGGER_NAME = /^Hotspot ·|tab/i;
+  var baseName = (screenName) => (screenName.split(" · ")[0] ?? screenName).trim();
+  function endsWithTab(nodeName, tabNames) {
+    const m = nodeName ? /·\s*([^·]+?)\s*$/.exec(nodeName) : null;
+    return !!m && tabNames.has(m[1].trim());
   }
-  async function liftOutOfGroups(frames, work) {
-    const restores = [];
-    try {
-      for (const f of new Set(frames)) {
-        const r = lift(f);
-        if (r)
-          restores.push(r);
+  var TAB_ARROW_LABEL = /^tap (home|pay|activity|account)\b/i;
+  function lintPrototype(screens, arrows, rawReactions) {
+    const name = (id) => screens.find((s) => s.id === id)?.name ?? id;
+    const isScreen = (id) => screens.some((s) => s.id === id);
+    const reactions = dedupeReactions(rawReactions);
+    const tabRoots = new Set(arrows.filter((a) => a.label !== undefined && TAB_ARROW_LABEL.test(a.label) || (a.triggerAncestorNames ?? []).some((n) => TAB_BAR_NAME.test(n)) || a.triggerName !== undefined && TAB_TRIGGER_NAME.test(a.triggerName)).map((a) => a.to));
+    const rootBases = new Set([...tabRoots].map((id) => baseName(name(id))));
+    let exemptCount = 0;
+    const out = [];
+    for (const a of arrows) {
+      if (a.trigger) {
+        const own = reactions.filter((r) => r.nodeId === a.trigger);
+        if (own.some((r) => r.destinationId === a.to))
+          continue;
+        const actual = own.find((r) => isScreen(r.destinationId)) ?? own[0];
+        const dest = actual?.destinationId ?? null;
+        out.push({
+          kind: "prototype-mismatch",
+          severity: "warning",
+          arrowId: a.id,
+          sourceName: name(a.from),
+          targetName: name(a.to),
+          reactionNodeId: a.trigger,
+          triggerName: a.triggerName ?? actual?.nodeName ?? null,
+          destinationId: dest,
+          message: dest ? `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, but its prototype goes to ${name(dest)} (${dest})` : `Arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has trigger ${a.trigger}, which has no navigate reaction`
+        });
+      } else {
+        const mine = reactions.filter((r) => r.screenId === a.from);
+        if (mine.some((r) => r.nodeId === a.from && r.trigger === "AFTER_TIMEOUT") || mine.some((r) => r.destinationId === a.to))
+          continue;
+        out.push({
+          kind: "auto-arrow-no-prototype",
+          severity: "info",
+          arrowId: a.id,
+          sourceName: name(a.from),
+          targetName: name(a.to),
+          reactionNodeId: a.from,
+          triggerName: null,
+          destinationId: a.to,
+          message: `Auto arrow ${a.id} (${name(a.from)} to ${name(a.to)}) has no matching prototype: ${name(a.from)} has no AFTER_TIMEOUT and no reaction to ${name(a.to)}`
+        });
       }
-      return await work();
-    } finally {
-      for (const r of restores.reverse())
-        r();
     }
+    for (const r of reactions) {
+      if (!isScreen(r.destinationId) || r.destinationId === r.screenId)
+        continue;
+      if (arrows.some((a) => a.from === r.screenId && a.to === r.destinationId))
+        continue;
+      if ([r.nodeName ?? "", ...r.ancestorNames ?? []].some((n) => TAB_BAR_NAME.test(n)) || tabRoots.has(r.destinationId) || rootBases.has(baseName(name(r.destinationId))) || endsWithTab(r.nodeName, rootBases)) {
+        exemptCount++;
+        continue;
+      }
+      out.push({
+        kind: "prototype-without-arrow",
+        severity: "info",
+        sourceName: name(r.screenId),
+        targetName: name(r.destinationId),
+        reactionNodeId: r.nodeId,
+        triggerName: r.nodeName ?? null,
+        destinationId: r.destinationId,
+        message: `${r.trigger} reaction on ${r.nodeId} in ${name(r.screenId)} navigates to ${name(r.destinationId)}, but no arrow connects them`
+      });
+    }
+    return { issues: out, exemptCount };
+  }
+  function dedupeReactions(reactions) {
+    const outerOf = (id) => {
+      const m = /^I([^;]+);/.exec(id);
+      return m ? m[1] : null;
+    };
+    const seen = new Set;
+    const out = [];
+    for (const r of reactions) {
+      const key = `${r.nodeId}>${r.destinationId}`;
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      const outer = outerOf(r.nodeId);
+      if (outer && reactions.some((o) => o.nodeId === outer && o.destinationId === r.destinationId))
+        continue;
+      out.push(r);
+    }
+    return out;
   }
 
   // plugin-src/route-avoid.ts
+  var TITLE_CHAR_WIDTH = 0.6;
+  var TITLE_FALLBACK_CHARS = 16;
+  function titleTextRect(g) {
+    if (g.title.height <= 0)
+      return null;
+    const size = Math.max(1, (g.title.height - 2 * TITLE_PAD_Y) / TITLE_LINE_HEIGHT);
+    const width = Math.min((g.titleChars ?? TITLE_FALLBACK_CHARS) * TITLE_CHAR_WIDTH * size, Math.max(0, g.title.width - 2 * TITLE_PAD_X));
+    return { x: g.title.x + TITLE_PAD_X, y: g.title.y, width, height: g.title.height };
+  }
   function boxEdges(box) {
-    const half = GROUP_STROKE / 2;
+    const half = (box.strokeWeight ?? GROUP_STROKE) / 2;
     return [
       { axis: "h", at: box.y + half, from: box.x, to: box.x + box.width },
       { axis: "h", at: box.y + box.height - half, from: box.x, to: box.x + box.width },
@@ -2649,7 +4017,7 @@ ${logs.join(`
   }
   function labelObstacles(groups) {
     return groups.flatMap((g) => [
-      ...strokeBands(g.box),
+      ...strokeBands(g.box, g.strokeWeight),
       { x: g.title.x - GROUP_CLEAR, y: g.title.y - GROUP_CLEAR, width: g.title.width + 2 * GROUP_CLEAR, height: g.title.height + 2 * GROUP_CLEAR }
     ]);
   }
@@ -2722,14 +4090,379 @@ ${logs.join(`
     }
     return best ? { ok: true, anchor: best, moved: true } : { ok: false, blocked: "no spot on the arrow keeps its label 48px clear of group box strokes and titles" };
   }
+  var LABEL_PAD = 8;
+  var inflate2 = (r, by) => ({ x: r.x - by, y: r.y - by, width: r.width + 2 * by, height: r.height + 2 * by });
+  function separateLabels(items, obstacles, pad = LABEL_PAD, fixed = []) {
+    const anchors = new Map;
+    const blocked = [];
+    const placed = fixed.map((r) => inflate2(r, pad));
+    for (const it of items) {
+      const res = clearLabel({ ...it.route, labelAnchor: it.anchor }, it.size, [...obstacles, ...placed]);
+      const at = res.ok ? res.anchor : it.anchor;
+      if (!res.ok)
+        blocked.push(it.id);
+      anchors.set(it.id, at);
+      placed.push(inflate2(labelRect(at, it.size), pad));
+    }
+    return { anchors, blocked };
+  }
+  function runsOf(points) {
+    const out = [];
+    for (let i = 1;i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (a.x === b.x && a.y !== b.y)
+        out.push({ axis: "v", at: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) });
+      else if (a.y === b.y && a.x !== b.x)
+        out.push({ axis: "h", at: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) });
+    }
+    return out;
+  }
+  function sharedRunLength(a, b, ignore = {}) {
+    const rb = runsOf(b);
+    let total = 0;
+    const a0 = a[0];
+    const sameStart = !!a0 && !!b[0] && a0.x === b[0].x && a0.y === b[0].y;
+    for (const s of runsOf(a)) {
+      if (s.at === (s.axis === "v" ? ignore.v : ignore.h))
+        continue;
+      if (sameStart && s.axis === "h" && s.at === a0.y)
+        continue;
+      for (const t of rb)
+        if (s.axis === t.axis && s.at === t.at)
+          total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    }
+    return total;
+  }
+  function crowdedRunLength(a, b, gap) {
+    const rb = runsOf(b);
+    let total = 0;
+    for (const s of runsOf(a))
+      for (const t of rb)
+        if (s.axis === t.axis && s.at !== t.at && Math.abs(s.at - t.at) < gap)
+          total += Math.max(0, Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo));
+    return total;
+  }
+  function titleHitCount(points, titles) {
+    const runs = runsOf(points);
+    return titles.filter((r) => runs.some((s) => s.axis === "v" ? s.at > r.x && s.at < r.x + r.width && s.hi > r.y && s.lo < r.y + r.height : s.at > r.y && s.at < r.y + r.height && s.hi > r.x && s.lo < r.x + r.width)).length;
+  }
+  function screensCrossed(points, screens, except = []) {
+    const runs = runsOf(points);
+    const same = (a, b) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    return screens.filter((r) => !except.some((e) => same(e, r)) && runs.some((s) => s.axis === "v" ? s.at > r.x + 1 && s.at < r.x + r.width - 1 && s.hi > r.y + 1 && s.lo < r.y + r.height - 1 : s.at > r.y + 1 && s.at < r.y + r.height - 1 && s.hi > r.x + 1 && s.lo < r.x + r.width - 1)).length;
+  }
+
+  // plugin-src/layout-lint.ts
+  async function pathOf(vectorId) {
+    const n = await sceneById(vectorId);
+    if (n?.type !== "VECTOR")
+      return null;
+    const local = orderPath(n.vectorNetwork.vertices, n.vectorNetwork.segments);
+    if (!local)
+      return null;
+    const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
+    return local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
+  }
+  function titleTextOf(box, bar, title) {
+    const text = title.type === "TEXT" ? title : title.type === "FRAME" ? title.children.find((k) => k.type === "TEXT") : undefined;
+    return titleTextRect({ box, title: bar, ...text ? { titleChars: text.characters.length } : {} });
+  }
+  async function arrowIssues(board, titles) {
+    const arrows = [];
+    for (const a of listArrows(board)) {
+      const points = await pathOf(a.meta.vectorId);
+      if (!points)
+        continue;
+      const label = await sceneById(a.meta.labelId);
+      arrows.push({ id: a.group.id, points, label: label ? rectOf(label) : null, from: a.meta.from, to: a.meta.to });
+    }
+    return lintArrows(arrows, titles, boardScreens(board));
+  }
+  async function prototypeIssues(board) {
+    const shown = boardScreens(board);
+    const screens = await Promise.all(shown.map(async (s) => ({ id: s.id, name: (await sceneById(s.id))?.name ?? s.id })));
+    const reactions = [];
+    const ancestry = (n, stopId) => {
+      const names = [];
+      let p = n.parent;
+      while (p && p.id !== stopId && p.type !== "PAGE" && p.type !== "DOCUMENT") {
+        names.push(p.name);
+        p = p.parent;
+      }
+      return names;
+    };
+    for (const s of shown) {
+      const root = await sceneById(s.id);
+      if (!root)
+        continue;
+      const nodes = "findAll" in root ? [root, ...root.findAll((n) => ("reactions" in n))] : [root];
+      for (const n of nodes) {
+        if (!("reactions" in n))
+          continue;
+        for (const r of n.reactions) {
+          const list = r.actions && r.actions.length ? r.actions : r.action ? [r.action] : [];
+          for (const a of list) {
+            if (a.type === "NODE" && a.navigation === "NAVIGATE" && typeof a.destinationId === "string") {
+              reactions.push({ nodeId: n.id, screenId: s.id, trigger: r.trigger?.type ?? "NONE", destinationId: a.destinationId, nodeName: n.name, ancestorNames: ancestry(n, s.id) });
+            }
+          }
+        }
+      }
+    }
+    const arrows = [];
+    for (const a of listArrows(board)) {
+      const trig = a.meta.trigger ? await sceneById(a.meta.trigger) : null;
+      arrows.push({
+        id: a.group.id,
+        from: a.meta.from,
+        to: a.meta.to,
+        trigger: a.meta.trigger,
+        label: a.meta.label,
+        ...trig ? { triggerName: trig.name, triggerAncestorNames: [trig.name, ...ancestry(trig, a.meta.from)] } : {}
+      });
+    }
+    const { issues, exemptCount } = lintPrototype(screens, arrows, reactions);
+    const counts = {};
+    for (const i of issues)
+      counts[i.kind] = (counts[i.kind] ?? 0) + 1;
+    if (exemptCount)
+      counts.exemptCount = exemptCount;
+    return { issues, counts };
+  }
+  function orphanBadgeIssues(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    const referenced = new Set;
+    for (const { frame } of collectScreens(parent.children)) {
+      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+      if (meta?.badgeId)
+        referenced.add(meta.badgeId);
+    }
+    const badges = collectBadges(parent.children).map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) }));
+    return orphanBadges(badges, referenced, rectOf(board.node)).map((id) => ({
+      kind: "orphan-badge",
+      badgeId: id,
+      message: `Badge ${badges.find((b) => b.id === id)?.name ?? id} belongs to no screen. Run badge_screens to remove it.`
+    }));
+  }
+  function labelStackOf(board) {
+    const parent = board.arrows.parent;
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    if (!parent || !("children" in parent) || !labels)
+      return null;
+    const issue = labelStackIssue(parent.children.map((k) => k.id), board.arrows.id, labels.id);
+    return issue ? { ...issue, message: "Arrow labels sit under their lines. Run reroute_flow to put the labels layer back on top." } : null;
+  }
+  async function boardLayoutLint(board) {
+    const loaded = (await loadGroups(board)).filter((g) => g.rect.visible);
+    const titles = [];
+    for (const g of loaded) {
+      if (!g.title)
+        continue;
+      const text = titleTextOf(rectOf(g.rect), rectOf(g.title), g.title);
+      if (text)
+        titles.push({ id: g.id, text });
+    }
+    const arrowPart = await arrowIssues(board, titles);
+    const proto = await prototypeIssues(board);
+    arrowPart.issues.push(...proto.issues);
+    for (const [k, v] of Object.entries(proto.counts))
+      arrowPart.counts[k] = (arrowPart.counts[k] ?? 0) + v;
+    const stack = labelStackOf(board);
+    if (stack) {
+      arrowPart.issues.push(stack);
+      arrowPart.counts["labels-under-lines"] = 1;
+    }
+    const orphans = orphanBadgeIssues(board);
+    if (orphans.length) {
+      arrowPart.issues.push(...orphans);
+      arrowPart.counts["orphan-badge"] = orphans.length;
+    }
+    if (!loaded.length)
+      return arrowPart.issues.length ? { boardId: board.node.id, issues: arrowPart.issues, counts: arrowPart.counts } : null;
+    const { screens } = await loadScreens(board);
+    if (isGrouped(board)) {
+      const offGrid = lintOffGrid(screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), rect: rectOf(s.node) })), groupGrids(board, await loadGroups(board)));
+      if (offGrid.length) {
+        arrowPart.issues.push(...offGrid);
+        arrowPart.counts["off-grid"] = offGrid.length;
+      }
+    }
+    const contents = [];
+    for (const s of screens) {
+      const p = await footprintOf(s);
+      contents.push({ kind: "screen", id: s.node.id, rect: p.frame, ...s.meta.flowGroupId ? { ownerGroupId: s.meta.flowGroupId } : {} });
+      if (p.route && s.meta.routeId)
+        contents.push({ kind: "route", id: s.meta.routeId, rect: p.route });
+      if (p.badge && s.meta.badgeId)
+        contents.push({ kind: "badge", id: s.meta.badgeId, rect: p.badge });
+    }
+    for (const a of listArrows(board)) {
+      const label = await sceneById(a.meta.labelId);
+      if (label)
+        contents.push({ kind: "label", id: a.meta.labelId, rect: rectOf(label) });
+    }
+    const groups = loaded.map((g) => {
+      const box = rectOf(g.rect);
+      return { id: g.id, ...g.meta.parentId ? { parentId: g.meta.parentId } : {}, box, title: g.title ? rectOf(g.title) : { x: box.x, y: box.y, width: 0, height: 0 } };
+    });
+    const r = lintGroups(groups, contents);
+    const counts = { ...r.counts };
+    for (const [k, v] of Object.entries(arrowPart.counts))
+      counts[k] = (counts[k] ?? 0) + v;
+    return { boardId: board.node.id, issues: [...r.issues, ...arrowPart.issues], counts };
+  }
+
+  // plugin-src/flowlint.ts
+  var isHead = (v) => typeof v.strokeCap === "string" && v.strokeCap.startsWith("ARROW");
+  function orderPath(vertices, segments) {
+    const heads = vertices.map((v, i) => isHead(v) ? i : -1).filter((i) => i >= 0);
+    if (heads.length !== 1)
+      return null;
+    const links = vertices.map(() => []);
+    for (const s of segments) {
+      links[s.start]?.push(s.end);
+      links[s.end]?.push(s.start);
+    }
+    if (links.some((l) => l.length > 2))
+      return null;
+    const ends = links.map((l, i) => l.length === 1 ? i : -1).filter((i) => i >= 0);
+    const head = heads[0];
+    const tail = ends.find((i) => i !== head);
+    if (tail === undefined || !ends.includes(head))
+      return null;
+    const order = [tail];
+    let prev = -1;
+    let at = tail;
+    while (at !== head) {
+      const next = (links[at] ?? []).find((n) => n !== prev);
+      if (next === undefined)
+        return null;
+      prev = at;
+      at = next;
+      order.push(at);
+    }
+    return order.map((i) => {
+      const v = vertices[i];
+      return { x: v.x, y: v.y };
+    });
+  }
+  function classifyArrow(points, tolerance = 1) {
+    const a = points[points.length - 2];
+    const b = points[points.length - 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const heading = Math.abs(dx) > Math.abs(dy) ? dx > 0 ? "right" : "left" : dy > 0 ? "down" : "up";
+    const issues = [];
+    const leftward = points.slice(1).flatMap((p, i) => p.x - points[i].x < -tolerance ? [i] : []);
+    const p0 = points[0];
+    const p1 = points[1];
+    const gapRun = leftward.length === 1 && leftward[0] === 1 && Math.abs(p1.x - p0.x) <= tolerance && p1.y - p0.y > tolerance && (heading === "right" || heading === "down");
+    if (heading === "left" && dx < -tolerance)
+      issues.push("points-left");
+    else if (leftward.length && !gapRun)
+      issues.push("runs-left");
+    return { heading, issues };
+  }
+  var lintFlowLayout = async (args) => {
+    const id = str(args, "nodeId");
+    const root = id ? await requireNode(id) : figma.currentPage;
+    const tolerance = num(args, "tolerance") ?? 1;
+    const issues = [];
+    let checked = 0;
+    const boardMetas = ("children" in root ? [root, ...root.children] : [root]).flatMap((n) => readMeta(n, BOARD_KEY, parseBoardMeta) ?? []);
+    const maxLeftHop = Math.max(0, ...boardMetas.map((m) => m.colWidth - m.screenW));
+    for (const n of walk(root, 1e5)) {
+      if (n.type !== "VECTOR" || !isScene(n))
+        continue;
+      const net = n.vectorNetwork;
+      const local = orderPath(net.vertices, net.segments);
+      if (!local)
+        continue;
+      checked++;
+      const [[a, b, tx], [c, d, ty]] = n.absoluteTransform;
+      const abs = local.map((p) => ({ x: Math.round(a * p.x + b * p.y + tx), y: Math.round(c * p.x + d * p.y + ty) }));
+      const result = classifyArrow(abs, tolerance);
+      if (result.issues.length) {
+        issues.push({ id: n.id, name: n.name, heading: result.heading, issues: result.issues, from: abs[0], to: abs[abs.length - 1] });
+      }
+    }
+    const layoutIssues = [];
+    const counts = {};
+    const boardNodes = "children" in root ? [root, ...root.children].filter((n) => readMeta(n, BOARD_KEY, parseBoardMeta)) : [];
+    for (const n of boardNodes) {
+      const r = await boardLayoutLint(await loadBoard(n.id));
+      if (!r)
+        continue;
+      layoutIssues.push(...r.issues.map((i) => ({ boardId: r.boardId, ...i })));
+      for (const [k, v] of Object.entries(r.counts))
+        counts[k] = (counts[k] ?? 0) + v;
+    }
+    return ok({
+      checked,
+      passed: issues.length === 0 && layoutIssues.every((i) => i.severity === "info"),
+      issues,
+      layoutIssues,
+      counts,
+      fix: layoutIssues.some((i) => i.severity !== "info") ? "Run reroute_flow or move_screen so refit redraws the boxes; never hand-move a group box. A box may only be crossed by arrow lines." : issues.length ? "Move the target screen right of (or directly below/above) its source, then redraw the arrow so every segment moves right, down or up." : null
+    });
+  };
+
+  // plugin-src/anatomy.ts
+  async function fitRoute(route, frameWidth, badgeWidth) {
+    if (route.characters.length)
+      for (const f of route.getRangeAllFontNames(0, route.characters.length))
+        await figma.loadFontAsync(f);
+    else if (route.fontName !== figma.mixed)
+      await figma.loadFontAsync(route.fontName);
+    route.textAutoResize = "HEIGHT";
+    route.resize(routeWidth(frameWidth, badgeWidth), route.height);
+    route.maxLines = 1;
+    route.textTruncation = "ENDING";
+  }
+
+  // plugin-src/lift.ts
+  function lift(frame) {
+    const group = frame.parent;
+    const host = group?.parent;
+    if (group?.type !== "GROUP" || !host?.insertChild || !group.insertChild || !group.children || !host.children)
+      return null;
+    const index = group.children.indexOf(frame);
+    host.insertChild(host.children.indexOf(group) + 1, frame);
+    return () => group.insertChild?.(index, frame);
+  }
+  async function liftOutOfGroups(frames, work) {
+    const restores = [];
+    try {
+      for (const f of new Set(frames)) {
+        const r = lift(f);
+        if (r)
+          restores.push(r);
+      }
+      return await work();
+    } finally {
+      for (const r of restores.reverse())
+        r();
+    }
+  }
 
   // plugin-src/route.ts
   var ENTRY_OFFSET = 340;
-  var DOT_GAP = 10;
+  var NARROW_TRIGGER = 0.4;
+  var DOT_INSET = 12;
+  function triggerDot(trigger, source) {
+    const narrow = trigger.width < NARROW_TRIGGER * source.width;
+    return { x: narrow ? trigger.x + trigger.width / 2 : right3(trigger) - DOT_INSET, y: midY(trigger) };
+  }
   var LANE_STEP = 24;
   var BACKWARDS_DROP = 60;
   var FAN_STEP = 16;
   var FAN_EDGE = 24;
+  var FORK_ROW = 48;
+  var FORK_X0 = 8;
+  var FORK_STEP = 8;
   function fanIndex(items) {
     const groups = new Map;
     for (const it of items)
@@ -2746,30 +4479,29 @@ ${logs.join(`
   var EDGE_MARGIN = 8;
   var ROW_TOLERANCE = 2;
   var laneOffset = (lane) => lane <= 0 ? 0 : (lane % 2 === 1 ? 1 : -1) * Math.ceil(lane / 2) * LANE_STEP;
-  var right = (r) => r.x + r.width;
-  var bottom = (r) => r.y + r.height;
+  var right3 = (r) => r.x + r.width;
+  var bottom3 = (r) => r.y + r.height;
   var midY = (r) => r.y + r.height / 2;
   function relation(source, target) {
-    const overlapX = Math.min(right(source), right(target)) - Math.max(source.x, target.x);
+    const overlapX = Math.min(right3(source), right3(target)) - Math.max(source.x, target.x);
     if (overlapX > 0) {
-      if (target.y >= bottom(source) - 0.5)
+      if (target.y >= bottom3(source) - 0.5)
         return "below";
-      if (bottom(target) <= source.y + 0.5)
+      if (bottom3(target) <= source.y + 0.5)
         return "above";
       return "overlap";
     }
-    return target.x >= right(source) - 0.5 ? "right" : "left";
+    return target.x >= right3(source) - 0.5 ? "right" : "left";
   }
   function gutterKey(source, target) {
     switch (relation(source, target)) {
       case "right":
-        return `h:${right(source)}`;
+        return `h:${right3(source)}`;
       case "below":
-        return `v:${source.x}:${bottom(source)}`;
       case "above":
-        return `v:${source.x}:${source.y}`;
+        return `v:${Math.max(source.x, target.x)}`;
       case "left":
-        return `b:${Math.max(bottom(source), bottom(target))}`;
+        return `b:${Math.max(bottom3(source), bottom3(target))}`;
       case "overlap":
         return `o:${source.x}:${source.y}`;
     }
@@ -2849,13 +4581,13 @@ ${logs.join(`
       case "right": {
         const tx = target.x;
         const ty = midY(target);
-        const sx = right(source);
+        const sx = right3(source);
         const bx = labelLimitX !== undefined && labelLimitX < tx ? Math.max(labelLimitX, sx) : tx;
-        if (exit === "bottom" && target.y >= bottom(source)) {
+        if (exit === "bottom" && target.y >= bottom3(source)) {
           const step = fan && fan.count > 1 ? -fan.index * LANE_STEP : off;
-          const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right(source) - EDGE_MARGIN);
+          const x = clamp(source.x + ENTRY_OFFSET + step, source.x + EDGE_MARGIN, right3(source) - EDGE_MARGIN);
           const y = fan && fan.count > 1 ? ty : ty + off;
-          const r = done("elbow", [{ x, y: bottom(source) }, { x, y }, { x: tx, y }]);
+          const r = done("elbow", [{ x, y: bottom3(source) }, { x, y }, { x: tx, y }]);
           return { ...r, labelAnchor: { x: (x + bx) / 2, y } };
         }
         if (!trigger && Math.abs(midY(source) - ty) <= ROW_TOLERANCE) {
@@ -2864,38 +4596,82 @@ ${logs.join(`
           return bx < tx ? { ...straight, labelAnchor: { x: (sx + bx) / 2, y } } : straight;
         }
         if (fan && fan.count > 1) {
-          const base = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) };
-          const start = { x: base.x, y: base.y + fan.index * FAN_STEP };
+          const base = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) };
+          const start = trigger ? base : { x: base.x, y: base.y + fan.index * FAN_STEP };
           const fanX = Math.min(sx + FAN_EDGE + (fan.count - 1 - fan.index) * LANE_STEP + fanShift, tx - EDGE_MARGIN);
           const r = done(trigger ? "trigger" : "gutter", [start, { x: fanX, y: start.y }, { x: fanX, y: ty }, { x: tx, y: ty }]);
           const last = r.points[r.points.length - 2];
           return { ...r, labelAnchor: { x: (last.x + bx) / 2, y: ty } };
         }
         const toward = ty >= midY(source) ? Math.abs(off) : -Math.abs(off);
-        const start = trigger ? { x: right(trigger) + DOT_GAP, y: midY(trigger) } : { x: sx, y: midY(source) + toward };
+        const start = trigger ? triggerDot(trigger, source) : { x: sx, y: midY(source) + toward };
         const midX = sx + Math.min(gutter, tx - sx) / 2 + off;
-        const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom(target) - EDGE_MARGIN);
+        const ey = clamp(ty + (start.y <= ty ? -off : off), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
         const jog = done(trigger ? "trigger" : "gutter", [start, { x: midX, y: start.y }, { x: midX, y: ey }, { x: tx, y: ey }]);
         return bx < tx && bx > midX ? { ...jog, labelAnchor: { x: (midX + bx) / 2, y: ey } } : jog;
       }
       case "below": {
-        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right(source), right(target)) - EDGE_MARGIN);
-        return done("below", [{ x, y: bottom(source) }, { x, y: target.y }]);
+        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right3(source), right3(target)) - EDGE_MARGIN);
+        return done("below", [{ x, y: bottom3(source) }, { x, y: target.y }]);
       }
-      case "above": {
-        const x = clamp(source.x + ENTRY_OFFSET + off, Math.max(source.x, target.x) + EDGE_MARGIN, Math.min(right(source), right(target)) - EDGE_MARGIN);
-        return done("above", [{ x, y: source.y }, { x, y: bottom(target) }]);
-      }
-      case "left": {
-        const sx = source.x + ENTRY_OFFSET;
-        const tx = Math.max(target.x + EDGE_MARGIN, target.x + ENTRY_OFFSET - Math.max(0, lane) * LANE_STEP * 2);
-        const dropY = Math.max(bottom(source), bottom(target)) + BACKWARDS_DROP + lane * LANE_STEP;
-        return done("backwards", [{ x: sx, y: bottom(source) }, { x: sx, y: dropY }, { x: tx, y: dropY }, { x: tx, y: bottom(target) }], true);
-      }
+      case "above":
+        return routeViaGap(source, target, trigger, gutter, lane, { kind: "around" });
+      case "left":
+        return routeViaGap(source, target, trigger, gutter, lane, { kind: "backwards", backwards: true });
     }
+  }
+  function routeViaGap(source, target, trigger, gutter, lane, opts = {}) {
+    const start = trigger ? triggerDot(trigger, source) : { x: source.x + source.width / 2, y: bottom3(source) };
+    const gapY = (opts.gapY ?? bottom3(source) + BACKWARDS_DROP) + lane * LANE_STEP;
+    const x = opts.laneX ?? Math.min(source.x, target.x) - gutter / 2 - lane * LANE_STEP + (opts.dx ?? 0);
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
+    const r = done(opts.kind ?? "around", [start, { x: start.x, y: gapY }, { x, y: gapY }, { x, y: ey }, { x: target.x, y: ey }], opts.backwards ?? false);
+    const at = opts.shared ? r.points.findIndex((p) => p.x === x && p.y === gapY) : -1;
+    const first = r.points[0];
+    const second = r.points[1];
+    return { ...r, ...at >= 0 ? { trunkFrom: at } : {}, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
+  }
+  function routeViaBand(source, target, trigger, bandY, lane) {
+    const start = trigger ? triggerDot(trigger, source) : { x: right3(source), y: midY(source) };
+    const x1 = right3(source) + FAN_EDGE + lane * LANE_STEP;
+    const x2 = target.x - FAN_EDGE - lane * LANE_STEP;
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
+    const r = done("gutter", [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: x2, y: bandY }, { x: x2, y: ey }, { x: target.x, y: ey }]);
+    return { ...r, labelAnchor: { x: (x2 + target.x) / 2, y: ey } };
+  }
+  var TRUNK_GAP = 48;
+  var LABEL_GAP = 8;
+  function routeJoin(source, target, trigger, trunkX, bandY, lane = 0) {
+    const start = trigger ? triggerDot(trigger, source) : { x: right3(source), y: midY(source) };
+    const ey = clamp(midY(target), target.y + EDGE_MARGIN, bottom3(target) - EDGE_MARGIN);
+    const joinY = bandY ?? start.y;
+    const x1 = right3(source) + FAN_EDGE + lane * LANE_STEP;
+    const pts = bandY === null ? [start, { x: trunkX, y: start.y }, { x: trunkX, y: ey }, { x: target.x, y: ey }] : [start, { x: x1, y: start.y }, { x: x1, y: bandY }, { x: trunkX, y: bandY }, { x: trunkX, y: ey }, { x: target.x, y: ey }];
+    const r = done("gutter", pts);
+    const at = r.points.findIndex((p) => p.x === trunkX && p.y === joinY);
+    const first = r.points[0];
+    const second = r.points[1];
+    return { ...r, trunkFrom: at >= 0 ? at : r.points.length - 1, labelAnchor: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 } };
+  }
+  function startLabelAnchor(route, size) {
+    const from = route.lead ?? 0;
+    const a = route.points[from];
+    const b = route.points[from + 1];
+    if (a.y === b.y)
+      return { x: Math.max(a.x, route.edge ?? a.x) + LABEL_GAP + size.width / 2, y: a.y };
+    if (b.y >= a.y)
+      return { x: a.x, y: Math.max(a.y, route.bottomEdge ?? a.y) + LABEL_GAP + size.height / 2 };
+    return { x: a.x, y: a.y - LABEL_GAP - size.height / 2 };
+  }
+  function leadRoute(route, anchor) {
+    const end = Math.max(1, route.trunkFrom ?? route.points.length - 1);
+    return { ...route, points: route.points.slice(0, end + 1), labelAnchor: anchor };
   }
 
   // plugin-src/route-plan.ts
+  var TITLE_MARGIN = 8;
+  var NEAR_LANE = 100;
+  var NEAR_EDGE = 24;
   var MAX_NUDGE = 8;
   function planRoutes(cfg, items) {
     const { gutter, limits } = cfg;
@@ -2988,6 +4764,7 @@ ${logs.join(`
         }
       });
     }
+    separateFans(routes, items, fans, fanGroupOf, shifts, edges, cfg.titles ?? [], (i, extra) => routeArrow(withLimit(i, { ...items[i].ends, gutter, lane: 0, fan: fans.get(items[i].id), fanShift: extra })));
     const edgeOf = (e) => `${e.source.x}:${e.source.y}:${gutterKey(e.source, e.target)}`;
     const fanLanes = new Map;
     items.forEach((it, i) => {
@@ -2995,13 +4772,422 @@ ${logs.join(`
       if (r.ok && fans.has(it.id))
         fanLanes.set(edgeOf(it.ends), [...fanLanes.get(edgeOf(it.ends)) ?? [], r.points[1].x]);
     });
+    const final = routes.map((r, i) => r.ok && r.kind === "straight" ? clearOfLanes(r, fanLanes.get(edgeOf(items[i].ends)) ?? [], limits[i]) : r);
+    const titles = cfg.titles ?? [];
+    const builders = items.map((it, i) => {
+      const r = final[i];
+      if (!r.ok || r.kind === "straight" || fans.has(it.id))
+        return null;
+      const around = r.kind === "around" || r.kind === "backwards";
+      const { source, target, trigger } = it.ends;
+      return (lane) => {
+        if (lane < NEAR_LANE)
+          return routeArrow(withLimit(i, { ...it.ends, gutter, lane }));
+        if (!around)
+          return { ok: false, error: "no near-column lane" };
+        return routeViaGap(source, target, trigger, gutter, 0, { laneX: target.x - NEAR_EDGE - (lane - NEAR_LANE) * LANE_STEP, kind: r.kind, backwards: r.backwards });
+      };
+    });
+    joinTargets(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders, gutter);
+    detourAroundScreens(final, items, cfg.screens ?? [], cfg.rowGap ?? 260, titles, edges, builders);
+    clearGapRuns(final, items, cfg.screens ?? [], titles, edges, builders, gutter);
+    const warnings = titles.length ? shiftOffTitles(final, items, titles, gutter, edges, builders) : new Map;
+    separateLines(final, builders, titles, edges);
+    forkStarts(final, items);
     return items.map((it, i) => {
-      const r = routes[i];
+      const r = final[i];
       if (!r.ok)
         return { id: it.id, route: null, error: r.error };
-      const route = r.kind === "straight" ? clearOfLanes(r, fanLanes.get(edgeOf(it.ends)) ?? [], limits[i]) : r;
-      return { id: it.id, route, error: null };
+      const warning = warnings.get(i);
+      return { id: it.id, route: { ...r, edge: it.ends.source.x + it.ends.source.width, bottomEdge: it.ends.source.y + it.ends.source.height }, error: null, ...warning ? { warning } : {} };
     });
+  }
+  function forkStarts(routes, items) {
+    const groups = new Map;
+    routes.forEach((r, i) => {
+      if (!r.ok)
+        return;
+      const p0 = r.points[0];
+      const key = `${p0.x}:${p0.y}`;
+      groups.set(key, [...groups.get(key) ?? [], i]);
+    });
+    for (const idx of groups.values()) {
+      const members = idx.filter((i) => {
+        const r = routes[i];
+        const t = items[i].ends.target;
+        return r.ok && idx.some((j) => j !== i && items[j].ends.target !== t);
+      });
+      if (members.length < 2)
+        continue;
+      const forkable = (i) => {
+        const r = routes[i];
+        if (!r.ok || r.points.length < 4)
+          return null;
+        const [p0, p1, p2] = r.points;
+        if (p1.y !== p0.y || p1.x <= p0.x || p2.x !== p1.x || p2.y === p1.y)
+          return null;
+        return { dir: p2.y > p1.y ? 1 : -1, laneX: p1.x };
+      };
+      const straight = members.some((i) => routes[i].ok && routes[i].points.length === 2);
+      const sides = { 1: [], "-1": [] };
+      for (const i of members) {
+        const f = forkable(i);
+        if (f)
+          sides[f.dir === 1 ? 1 : "-1"].push(i);
+      }
+      const both = sides[1].length > 0 && sides["-1"].length > 0;
+      for (const dir of [1, -1]) {
+        const list = [...sides[dir === 1 ? 1 : "-1"]].sort((a, b) => (forkable(b)?.laneX ?? 0) - (forkable(a)?.laneX ?? 0));
+        list.forEach((i, rank) => {
+          const r = routes[i];
+          const [p0, p1, p2] = r.points;
+          const row = straight ? FORK_ROW * (rank + 1) : both ? FORK_ROW / 2 + FORK_ROW * rank : FORK_ROW * rank;
+          if (row === 0)
+            return;
+          const y = p0.y + dir * row;
+          const fx = right4(items[i].ends.source) + FORK_X0 + FORK_STEP * (list.length - 1 - rank);
+          if ((p2.y - y) * dir < EDGE_MARGIN || p1.x - fx < EDGE_MARGIN)
+            return;
+          const points = [p0, { x: fx, y: p0.y }, { x: fx, y }, { x: p1.x, y }, ...r.points.slice(2)];
+          routes[i] = { ...r, points, labelAnchor: { x: (fx + p1.x) / 2, y }, lead: 2, ...r.trunkFrom !== undefined ? { trunkFrom: r.trunkFrom + 2 } : {} };
+        });
+      }
+    }
+  }
+  var right4 = (r) => r.x + r.width;
+  var overlap1d = (a0, a1, b0, b1) => Math.min(a1, b1) - Math.max(a0, b0) > 0;
+  function verticalLeg(r) {
+    if (!r.ok || r.kind !== "below" && r.kind !== "above")
+      return null;
+    const [a, b] = r.points;
+    return { x: a.x, y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) };
+  }
+  function shiftOffTitles(routes, items, titles, gutter, edges, builders) {
+    const warnings = new Map;
+    const crosses = (x, y0, y1, t) => x > t.x - TITLE_MARGIN && x < t.x + t.width + TITLE_MARGIN && overlap1d(y0, y1, t.y, t.y + t.height);
+    routes.forEach((r, i) => {
+      const leg = verticalLeg(r);
+      if (!leg || !r.ok)
+        return;
+      if (!titles.some((t) => crosses(leg.x, leg.y0, leg.y1, t)))
+        return;
+      const { source, target, trigger } = items[i].ends;
+      const lo = Math.max(source.x, target.x) + EDGE_MARGIN;
+      const hi = Math.min(source.x + source.width, target.x + target.width) - EDGE_MARGIN;
+      const free = (x) => x >= lo && x <= hi && !titles.some((t) => crosses(x, leg.y0, leg.y1, t)) && !routes.some((o, j) => {
+        const ol = j === i ? null : verticalLeg(o);
+        return !!ol && overlap1d(leg.y0, leg.y1, ol.y0, ol.y1) && Math.abs(ol.x - x) < LANE_STEP;
+      });
+      const cands = titles.flatMap((t) => [t.x - TITLE_MARGIN, t.x + t.width + TITLE_MARGIN]).filter(free);
+      if (!cands.length) {
+        for (let k = 0;k <= MAX_NUDGE; k++) {
+          const dx = k === 0 ? 0 : (k % 2 === 1 ? 1 : -1) * Math.ceil(k / 2) * LANE_STEP;
+          const side = routeViaGap(source, target, trigger, gutter, 0, { dx });
+          if (side.ok && titleHitCount(side.points, titles) === 0 && !laneConflicts(side.points, edges)) {
+            routes[i] = side;
+            builders[i] = (lane) => routeViaGap(source, target, trigger, gutter, lane, { dx });
+            return;
+          }
+        }
+        warnings.set(i, `line crosses a group title's text and no lane within both screens avoids it`);
+        return;
+      }
+      const x = cands.reduce((best, c) => Math.abs(c - leg.x) < Math.abs(best - leg.x) ? c : best);
+      routes[i] = { ...r, points: r.points.map((p) => ({ ...p, x })), dot: { ...r.dot, x }, labelAnchor: { ...r.labelAnchor, x } };
+    });
+    return warnings;
+  }
+  function separateLines(routes, builders, titles, edges) {
+    const cost = (i, pts) => {
+      let c = 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+      routes.forEach((o, j) => {
+        if (j === i || !o.ok)
+          return;
+        if (sharedRunLength(pts, o.points) > 1)
+          c += 1000;
+        else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+          c += 0.5;
+      });
+      return c;
+    };
+    for (let pass = 0;pass < 3; pass++) {
+      let moved = false;
+      routes.forEach((r, i) => {
+        const build = builders[i];
+        if (!r.ok || !build)
+          return;
+        const current = cost(i, r.points);
+        if (current < 1)
+          return;
+        let best = null;
+        for (const lane of [...Array.from({ length: MAX_NUDGE + 1 }, (_, n) => n), ...Array.from({ length: 5 }, (_, n) => NEAR_LANE + n)]) {
+          const cand = build(lane);
+          if (!cand.ok)
+            continue;
+          const c = cost(i, cand.points);
+          if (c < current && (!best || c < best.c))
+            best = { route: cand, c };
+          if (best && best.c < 1)
+            break;
+        }
+        if (best) {
+          routes[i] = best.route;
+          moved = true;
+        }
+      });
+      if (!moved)
+        break;
+    }
+  }
+  function separateFans(routes, items, fans, fanGroupOf, shifts, edges, titles, reroute) {
+    const groups = new Map;
+    items.forEach((it, i) => {
+      const g = fanGroupOf.get(it.id);
+      const r = routes[i];
+      if (g && fans.has(it.id) && r.ok && r.kind !== "elbow")
+        groups.set(g, [...groups.get(g) ?? [], i]);
+    });
+    const deepest = (idx) => Math.max(...idx.map((i) => items[i].ends.target.y));
+    const pending = new Set([...groups.values()].flat());
+    const ordered = [...groups].sort((a, b) => deepest(a[1]) - deepest(b[1]));
+    for (const [g, idx] of ordered) {
+      const members = new Set(idx);
+      for (const i of idx)
+        pending.delete(i);
+      const costOf = (rs) => rs.reduce((sum, r, n) => {
+        if (!r.ok)
+          return sum;
+        let c = 100 * titleHitCount(r.points, titles) + (edges.length && laneConflicts(r.points, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (members.has(j) || pending.has(j) || !o.ok)
+            return;
+          if (sharedRunLength(r.points, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(r.points, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return sum + c;
+      }, 0);
+      const base = shifts.get(g) ?? 0;
+      let best = null;
+      for (let k = 0;k <= MAX_NUDGE; k++) {
+        const rs = idx.map((i) => reroute(i, base + k * LANE_STEP));
+        const c = costOf(rs);
+        if (!best || c < best.c)
+          best = { rs, c };
+        if (c < 1)
+          break;
+      }
+      if (best)
+        idx.forEach((i, n) => routes[i] = best.rs[n]);
+    }
+  }
+  var SCREEN_COST = 1e4;
+  function detourAroundScreens(routes, items, screens, rowGap, titles, edges, builders) {
+    if (!screens.length)
+      return;
+    routes.forEach((r, i) => {
+      if (!r.ok)
+        return;
+      const { source, target, trigger } = items[i].ends;
+      if (target.x < source.x + source.width)
+        return;
+      if (screensCrossed(r.points, screens, [source, target]) === 0)
+        return;
+      const cost = (pts) => {
+        let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (j === i || !o.ok)
+            return;
+          if (sharedRunLength(pts, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return c;
+      };
+      const bands = [];
+      for (let k = 0;k <= 8; k++)
+        bands.push(target.y - 72 - 32 - k * LANE_STEP);
+      for (let k = 0;k <= 8; k++)
+        bands.push(target.y + target.height + 24 + k * LANE_STEP);
+      const lo = target.y - rowGap + 8;
+      const hi = target.y + target.height + rowGap - 8;
+      let best = null;
+      for (let lane = 0;lane <= 4 && (!best || best.c >= 1); lane++) {
+        for (const y of bands) {
+          if (y < lo || y > hi)
+            continue;
+          const cand = routeViaBand(source, target, trigger, y, lane);
+          const c = cost(cand.points);
+          if (!best || c < best.c)
+            best = { route: cand, c, y, lane };
+        }
+      }
+      const chosen = best;
+      if (!chosen || chosen.c >= SCREEN_COST)
+        return;
+      routes[i] = chosen.route;
+      builders[i] = (lane) => routeViaBand(source, target, trigger, chosen.y, lane);
+    });
+  }
+  var GAP_RUN_STEPS = 48;
+  function clearGapRuns(routes, items, screens, titles, edges, builders, gutter) {
+    if (!screens.length)
+      return;
+    routes.forEach((r, i) => {
+      if (!r.ok || r.kind !== "around" && r.kind !== "backwards")
+        return;
+      const { source, target, trigger } = items[i].ends;
+      if (screensCrossed(r.points, screens, [source, target]) === 0)
+        return;
+      const cost = (pts) => {
+        let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+        routes.forEach((o, j) => {
+          if (j === i || !o.ok)
+            return;
+          if (sharedRunLength(pts, o.points) > 1)
+            c += 1000;
+          else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+            c += 0.5;
+        });
+        return c;
+      };
+      let best = null;
+      const base = source.y + source.height + BACKWARDS_DROP;
+      for (let k = 0;k <= GAP_RUN_STEPS && (!best || best.c >= 1); k++) {
+        const gapY = base + k * LANE_STEP;
+        const cand = routeViaGap(source, target, trigger, gutter, 0, { gapY, kind: r.kind, backwards: r.backwards });
+        const c = cost(cand.points);
+        if (!best || c < best.c)
+          best = { route: cand, c, gapY };
+      }
+      const chosen = best;
+      if (!chosen || chosen.c >= SCREEN_COST)
+        return;
+      routes[i] = chosen.route;
+      builders[i] = (lane) => lane < NEAR_LANE ? routeViaGap(source, target, trigger, gutter, lane, { gapY: chosen.gapY, kind: r.kind, backwards: r.backwards }) : { ok: false, error: "no near-column lane" };
+    });
+  }
+  var bandsFor = (target, rowGap) => {
+    const out = [];
+    const lo = target.y - rowGap + 8;
+    const hi = target.y + target.height + rowGap - 8;
+    for (let k = 0;k <= 8; k++)
+      out.push(target.y - 72 - 32 - k * LANE_STEP);
+    for (let k = 0;k <= 8; k++)
+      out.push(target.y + target.height + 24 + k * LANE_STEP);
+    return out.filter((y) => y >= lo && y <= hi);
+  };
+  function joinPass(order, routes, items, screens, rowGap, titles, edges, builders, gutter, repair = false) {
+    const groups = new Map;
+    items.forEach((it, i) => {
+      const r = routes[i];
+      const { source, target, exit } = it.ends;
+      const rel = relation(source, target);
+      if (!r.ok || exit === "bottom" || rel !== "right" && rel !== "above" && rel !== "left")
+        return;
+      const key = `${target.x}:${target.y}`;
+      groups.set(key, [...groups.get(key) ?? [], i]);
+    });
+    const startY = (i) => {
+      const { source, trigger } = items[i].ends;
+      return trigger ? trigger.y + trigger.height / 2 : source.y + source.height / 2;
+    };
+    const joined = [...groups.values()].filter((g) => g.length >= 2);
+    const pending = new Set(repair ? [] : joined.flat());
+    const lowerFirst = (g) => items[g[0]].ends.target.y;
+    let grand = 0;
+    const done = [];
+    for (const idx of [...joined].sort((p, q) => order === "lower" ? lowerFirst(q) - lowerFirst(p) : lowerFirst(p) - lowerFirst(q))) {
+      const ordered = [...idx].sort((a, b) => startY(a) - startY(b));
+      const members = new Set(idx);
+      for (const i of idx)
+        pending.delete(i);
+      const target = items[idx[0]].ends.target;
+      const ey = target.y + target.height / 2;
+      let best = null;
+      for (let k = 0;k <= MAX_NUDGE; k++) {
+        const trunkX = target.x - TRUNK_GAP - k * LANE_STEP;
+        const trial = new Map;
+        let total = 0;
+        for (const i of ordered) {
+          const { source, trigger } = items[i].ends;
+          const cost = (pts) => {
+            let c = SCREEN_COST * screensCrossed(pts, screens, [source, target]) + 100 * titleHitCount(pts, titles) + (edges.length && laneConflicts(pts, edges) ? 50 : 0);
+            const against = (o, ignore) => {
+              if (!o.ok)
+                return;
+              if (sharedRunLength(pts, o.points, ignore) > 1)
+                c += 1000;
+              else if (crowdedRunLength(pts, o.points, LANE_STEP) > 0)
+                c += 0.5;
+            };
+            routes.forEach((o, j) => {
+              if (j !== i && !members.has(j) && !pending.has(j))
+                against(o, {});
+            });
+            for (const [j, o] of trial)
+              if (j !== i)
+                against(o, { v: trunkX, h: ey });
+            return c;
+          };
+          const around = relation(source, target) !== "right";
+          const plain = around ? routeViaGap(source, target, trigger, gutter, 0, { laneX: trunkX, shared: true, ...relation(source, target) === "left" ? { kind: "backwards", backwards: true } : {} }) : routeJoin(source, target, trigger, trunkX, null);
+          let pick = { route: plain, c: cost(plain.points) };
+          if (pick.c >= 1 && around) {
+            for (let lane = 1;lane <= 4 && pick.c >= 1; lane++) {
+              const cand = routeViaGap(source, target, trigger, gutter, lane, { laneX: trunkX, shared: true, ...relation(source, target) === "left" ? { kind: "backwards", backwards: true } : {} });
+              const c = cost(cand.points);
+              if (c < pick.c)
+                pick = { route: cand, c };
+            }
+          }
+          if (pick.c >= SCREEN_COST && !around) {
+            for (let lane = 0;lane <= 4; lane++) {
+              for (const y of bandsFor(target, rowGap)) {
+                const cand = routeJoin(source, target, trigger, trunkX, y, lane);
+                const c = cost(cand.points);
+                if (c < pick.c)
+                  pick = { route: cand, c };
+              }
+              if (pick.c < 1)
+                break;
+            }
+          }
+          trial.set(i, pick.route);
+          total += pick.c;
+        }
+        if (!best || total < best.total)
+          best = { total, chosen: ordered.map((i) => trial.get(i)) };
+        if (total < 1)
+          break;
+      }
+      const chosen = best;
+      grand += chosen.total;
+      ordered.forEach((i, n) => {
+        routes[i] = chosen.chosen[n];
+        done.push(i);
+      });
+    }
+    return { total: grand, members: done };
+  }
+  function joinTargets(routes, items, screens, rowGap, titles, edges, builders, gutter) {
+    const lower = routes.slice();
+    const upper = routes.slice();
+    const a = joinPass("lower", lower, items, screens, rowGap, titles, edges, builders, gutter);
+    const b = joinPass("upper", upper, items, screens, rowGap, titles, edges, builders, gutter);
+    const best = b.total < a.total ? { routes: upper, ...b } : { routes: lower, ...a };
+    for (const i of best.members) {
+      routes[i] = best.routes[i];
+      builders[i] = null;
+    }
+    for (let pass = 0;pass < 2; pass++) {
+      const before = routes.slice();
+      const r = joinPass("lower", routes, items, screens, rowGap, titles, edges, builders, gutter, true);
+      if (r.total === 0 || routes.every((x, i) => x === before[i]))
+        break;
+    }
   }
 
   // plugin-src/flow.ts
@@ -3035,14 +5221,96 @@ ${logs.join(`
   async function loadBoard(boardId) {
     const node = await sceneById(boardId);
     if (!node)
-      throw new Error(`No board ${boardId}.`);
+      throw new Error(boardMissingMessage(boardId));
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
     if (!meta)
       throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
-    const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
-    if (!arrows || !("children" in arrows))
-      throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone.`);
-    return { node, meta, arrows };
+    let boardMeta = meta;
+    let recovered;
+    let arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
+    if (!arrows || arrows.removed || !isArrowsContainerType(arrows.type) || !("children" in arrows)) {
+      const rebuilt = await rebuildArrowsContainer(node, meta);
+      if (!rebuilt)
+        throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone and no arrow data was found to rebuild it.`);
+      arrows = rebuilt.container;
+      boardMeta = { ...meta, arrowsGroupId: rebuilt.container.id };
+      node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+      recovered = `Arrows container ${meta.arrowsGroupId} was lost; rebuilt ${rebuilt.container.id} and moved ${rebuilt.moved} arrow groups into it.`;
+    }
+    const labelsNode = boardMeta.labelsGroupId ? await figma.getNodeByIdAsync(boardMeta.labelsGroupId) : null;
+    const labels = labelsNode && "children" in labelsNode && !labelsNode.removed ? labelsNode : null;
+    return { node, meta: boardMeta, arrows, labels, ...recovered ? { recovered } : {} };
+  }
+  async function rebuildArrowsContainer(boardNode, meta) {
+    const parent = boardNode.parent;
+    if (!parent || !("children" in parent))
+      return null;
+    const candidates = parent.children.map((c) => ({ node: c, boardId: readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId ?? null }));
+    const ids = new Set(recoverableArrowIds(candidates.map((c) => ({ id: c.node.id, boardId: c.boardId })), boardNode.id));
+    const arrows = candidates.filter((c) => ids.has(c.node.id)).map((c) => c.node);
+    if (!arrows.length)
+      return null;
+    const frame = figma.createFrame();
+    frame.name = arrowsContainerName(boardNode.name);
+    frame.fills = [];
+    frame.clipsContent = false;
+    frame.resize(1, 1);
+    frame.x = 0;
+    frame.y = 0;
+    parent.insertChild(recoveryIndex(parent.children.map((c) => c.id), meta.labelsGroupId ?? null), frame);
+    for (const n of arrows)
+      moveInto(n, frame);
+    return { container: frame, moved: arrows.length };
+  }
+  async function ensureLabels(board) {
+    if (board.labels && !board.labels.removed) {
+      const wanted = labelsContainerName(board.node.name, board.arrows.name);
+      if (board.labels.name !== wanted && isLabelsContainerName(board.labels.name))
+        board.labels.name = wanted;
+      return board.labels;
+    }
+    const parent = board.arrows.parent;
+    if (!parent || !("children" in parent))
+      throw new Error(`The arrows group of board ${board.node.id} has no parent for a labels container.`);
+    const name = labelsContainerName(board.node.name, board.arrows.name);
+    let found = parent.children.find((c) => c.type === "FRAME" && isLabelsContainerName(c.name) && c.name === name) ?? null;
+    if (!found) {
+      found = figma.createFrame();
+      found.name = name;
+      found.fills = [];
+      found.clipsContent = false;
+      found.resize(1, 1);
+      parent.insertChild(parent.children.indexOf(board.arrows) + 1, found);
+      const at = toLocal(parent, rectOf(board.arrows));
+      found.x = at.x;
+      found.y = at.y;
+    }
+    board.labels = found;
+    board.meta = { ...board.meta, labelsGroupId: found.id };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return found;
+  }
+  function moveInto(node, container) {
+    const before = rectOf(node);
+    container.appendChild(node);
+    const d = restoreDelta(before, rectOf(node));
+    if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+      node.x += d.x;
+      node.y += d.y;
+    }
+  }
+  async function migrateLabels(board, metas) {
+    const labels = await ensureLabels(board);
+    const nodes = (await Promise.all(metas.map((m) => sceneById(m.labelId)))).flatMap((n) => n ? [n] : []);
+    const ids = new Set(labelsToMigrate(nodes.map((n) => ({ labelId: n.id, labelParentId: n.parent?.id ?? null })), labels.id));
+    let moved = 0;
+    for (const n of nodes) {
+      if (!ids.has(n.id))
+        continue;
+      moveInto(n, labels);
+      moved++;
+    }
+    return moved;
   }
   function listArrows(board) {
     const out = [];
@@ -3055,13 +5323,18 @@ ${logs.join(`
     }
     return out;
   }
+  function boardScreens(board) {
+    const parent = board.node.parent;
+    if (!parent || !("children" in parent))
+      return [];
+    return collectScreens(parent.children).filter((s) => readMeta(s.frame, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id).map((s) => ({ id: s.frame.id, rect: rectOf(s.frame) }));
+  }
+  var boardScreenRects = (board) => boardScreens(board).map((s) => s.rect);
   var gutterOf = (m) => m.colWidth - m.screenW;
   function labelLimitOf(meta, ends) {
-    if (!meta.colExtra)
-      return;
-    const from = trackOf(ends.source.x - meta.originX, meta.colWidth, meta.colExtra);
-    const to = trackOf(ends.target.x - meta.originX, meta.colWidth, meta.colExtra);
-    return extraBetween(meta.colExtra, from, to) > 0 ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
+    if (meta.spacing === "grouped")
+      return labelLimitBetween(meta, ends.source, ends.target);
+    return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
   }
   async function endpointsOf(meta) {
     const [from, to] = await Promise.all([sceneById(meta.from), sceneById(meta.to)]);
@@ -3070,8 +5343,8 @@ ${logs.join(`
     const trig = meta.trigger ? await sceneById(meta.trigger) : null;
     return { source: rectOf(from), target: rectOf(to), trigger: trig ? rectOf(trig) : null, triggerMissing: !!meta.trigger && !trig, exit: meta.exit ?? "side" };
   }
-  function planRoutes2(meta, items, groups = []) {
-    return planRoutes({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => g.box) }, items);
+  function planRoutes2(meta, items, groups = [], screens = []) {
+    return planRoutes({ gutter: gutterOf(meta), screens, rowGap: meta.rowHeight - meta.screenH, limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...g.strokeWeight ? { strokeWeight: g.strokeWeight } : {} })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
   }
   var loadGroupObstacles = null;
   function setGroupObstacleLoader(loader) {
@@ -3144,8 +5417,9 @@ ${logs.join(`
     parent.appendChild(dot);
     return dot;
   }
-  async function newLabel(parent, style, label) {
-    const template = firstOf(parent, (n) => n.type === "FRAME" && n.name.startsWith("Label ·"));
+  async function newLabel(parent, style, label, alsoFrom = null) {
+    const isLabel = (n) => n.type === "FRAME" && n.name.startsWith("Label ·");
+    const template = firstOf(parent, isLabel) ?? (alsoFrom ? firstOf(alsoFrom, isLabel) : null);
     let frame;
     if (template) {
       frame = template.clone();
@@ -3189,13 +5463,30 @@ ${logs.join(`
   async function applyRoute(parts, route, style, groups = []) {
     await writeVector(parts.vector, route.points, style);
     centre(parts.dot, route.dot);
+    const size = { width: parts.label.width, height: parts.label.height };
+    const anchor = startLabelAnchor(route, size);
     if (!groups.length) {
-      centre(parts.label, route.labelAnchor);
+      centre(parts.label, anchor);
       return null;
     }
-    const placed = clearLabel(route, { width: parts.label.width, height: parts.label.height }, labelObstacles(groups));
-    centre(parts.label, placed.ok ? placed.anchor : route.labelAnchor);
+    const placed = clearLabel(leadRoute(route, anchor), size, labelObstacles(groups));
+    centre(parts.label, placed.ok ? placed.anchor : anchor);
     return placed.ok ? null : placed.blocked;
+  }
+  async function separateBoardLabels(placed, fixed, groups) {
+    const items = placed.map((p) => {
+      const r = rectOf(p.label);
+      const anchor = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      return { id: p.id, route: leadRoute(p.route, anchor), anchor, size: { width: r.width, height: r.height } };
+    });
+    const res = separateLabels(items, labelObstacles(groups), LABEL_PAD, fixed.map(rectOf));
+    for (const [i, p] of placed.entries()) {
+      const at = res.anchors.get(p.id);
+      const was = items[i].anchor;
+      if (at && (at.x !== was.x || at.y !== was.y))
+        centre(p.label, at);
+    }
+    return res.blocked;
   }
   function collectScreens(children, depth = 0) {
     const out = [];
@@ -3223,6 +5514,18 @@ ${logs.join(`
     }
     return out;
   }
+  function collectBadges(children, depth = 0) {
+    const out = [];
+    for (const c of children) {
+      if (c.type !== "GROUP" && c.type !== "SECTION")
+        continue;
+      if (c.type === "GROUP" && c.name.startsWith("Badge · "))
+        out.push(c);
+      else if (c.type === "GROUP" && isScreenGroupName(c.name) || c.type === "SECTION" && depth < 2)
+        out.push(...collectBadges(c.children, depth + 1));
+    }
+    return out;
+  }
   var groupIdOf = (n) => n.group?.id ?? null;
   function holdsScreen(node, boardId, depth = 0) {
     if (node.type === "FRAME")
@@ -3235,11 +5538,15 @@ ${logs.join(`
     const parent = board.arrows.parent;
     if (!parent || !("children" in parent))
       return;
-    const kids = parent.children;
-    const at = kids.indexOf(board.arrows);
-    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
-    if (screenAbove)
-      parent.insertChild(kids.length - 1, board.arrows);
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    const need = stackingNeeds(parent.children.map((k) => k.id), (id) => {
+      const k = parent.children.find((c) => c.id === id);
+      return !!k && k.id !== labels?.id && holdsScreen(k, board.node.id);
+    }, board.arrows.id, labels?.id ?? null);
+    if (need.raiseArrows)
+      parent.insertChild(parent.children.length - 1, board.arrows);
+    if (need.placeLabels && labels)
+      parent.insertChild(labelsInsertIndex(parent.children.map((k) => k.id), board.arrows.id), labels);
   }
   function writeArrowMeta(group, meta) {
     group.setSharedPluginData(FLOW_NAMESPACE, ARROW_KEY, JSON.stringify(meta));
@@ -3272,30 +5579,39 @@ ${logs.join(`
     if (!boardId)
       return fail(`${from.name} (${from.id}) is not on an adopted board. Run adopt_board, or pass boardId.`);
     const board = await loadBoard(boardId);
+    const labelsBox = await ensureLabels(board);
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
     const ends = { source: rectOf(from), target: rectOf(to), trigger: trigger ? rectOf(trigger) : null, triggerMissing: false, exit };
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []);
     const groups = await obstaclesOf(board);
-    const plans = planRoutes2(board.meta, [...others, { id: "new", ends }], groups);
+    const plans = planRoutes2(board.meta, [...others, { id: "new", ends }], groups, boardScreenRects(board));
     const mine = plans[plans.length - 1];
     if (!mine.route)
       return fail(mine.error ?? "Could not route the arrow.");
     const route = mine.route;
     let parts = match ? await partsOf(match.meta) : null;
-    if (match && !parts)
+    if (match && !parts) {
+      const staleLabel = await sceneById(match.meta.labelId);
+      if (staleLabel && staleLabel.parent !== match.group)
+        staleLabel.remove();
       match.group.remove();
+    }
     const style = board.meta.arrowStyle;
     if (!parts) {
       const vector = await newVector(board.arrows, style, `Arrow · ${label}`);
       const dot = await newDot(board.arrows, style);
-      const lab = await newLabel(board.arrows, style, label);
+      const lab = await newLabel(labelsBox, style, label, board.arrows);
       parts = { vector, dot, label: lab };
     } else {
+      if (parts.label.parent !== labelsBox)
+        moveInto(parts.label, labelsBox);
       await setLabelText(parts.label, label);
       parts.vector.name = `Arrow · ${label}`;
     }
     const blocked = await applyRoute(parts, route, style, groups);
+    const fixedLabels = (await Promise.all(existing.filter((a) => a !== match).map((a) => partsOf(a.meta)))).flatMap((p) => p ? [p.label] : []);
+    const crowded = (await separateBoardLabels([{ id: "new", route, label: parts.label }], fixedLabels, groups)).length > 0;
     const meta = {
       v: 1,
       kind: "arrow",
@@ -3314,7 +5630,7 @@ ${logs.join(`
     if (match && parts.vector.parent === match.group) {
       group = match.group;
     } else {
-      group = figma.group([parts.vector, parts.dot, parts.label], board.arrows);
+      group = figma.group([parts.vector, parts.dot], board.arrows);
     }
     group.name = arrowGroupName(from.name, to.name, label);
     writeArrowMeta(group, meta);
@@ -3334,7 +5650,7 @@ ${logs.join(`
       prototypeUpdated,
       backwards: route.backwards,
       updated: !!match,
-      ...blocked ? { warnings: [`label overlaps a group box: ${blocked}`] } : {}
+      ...blocked || crowded || mine.warning || board.recovered ? { warnings: [...board.recovered ? [board.recovered] : [], ...blocked ? [`label overlaps a group box: ${blocked}`] : [], ...crowded ? ["label overlaps another arrow label and no spot on its path is clear"] : [], ...mine.warning ? [mine.warning] : []] } : {}
     });
   };
   async function boardsFor(args) {
@@ -3354,19 +5670,34 @@ ${logs.join(`
     const deleted = [];
     const errors = [];
     const warnings = [];
+    let obstacleCount = 0;
     for (const board of boards) {
-      const ordered = await orderedEntries(listArrows(board));
+      board.node.locked = true;
+      if (board.recovered)
+        warnings.push({ boardId: board.node.id, warning: board.recovered });
+      const entries = listArrows(board);
+      await migrateLabels(board, entries.map((e) => e.meta));
+      const ordered = await orderedEntries(entries);
       for (const o of ordered) {
         if (!o.ends)
           deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
       }
       const live = ordered.flatMap((o) => o.ends ? [{ entry: o.entry, ends: o.ends }] : []);
       const groups = await obstaclesOf(board);
-      const plans = planRoutes2(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
+      obstacleCount += groups.length;
+      const plans = planRoutes2(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups, boardScreenRects(board));
+      const drawn = [];
+      const kept = [];
       for (const [i, l] of live.entries()) {
         const plan = plans[i];
-        if (only && !only.has(l.entry.group.id))
+        if (only && !only.has(l.entry.group.id)) {
+          const keptParts = await partsOf(l.entry.meta);
+          if (keptParts)
+            kept.push(keptParts.label);
           continue;
+        }
+        if (plan.warning)
+          warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: plan.warning });
         if (l.ends.triggerMissing)
           warnings.push({ arrowGroupId: l.entry.group.id, warning: "trigger node is gone; routed from the screen edge" });
         if (!plan.route) {
@@ -3382,12 +5713,17 @@ ${logs.join(`
         if (blocked)
           warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
         rerouted.push(l.entry.group.id);
+        drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label });
         if (plan.route.backwards)
           backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
       }
+      for (const id of await separateBoardLabels(drawn, kept, groups)) {
+        const meta = live.find((l) => l.entry.group.id === id)?.entry.meta;
+        warnings.push({ arrowGroupId: id, label: meta?.label ?? "", warning: "label overlaps another arrow label and no spot on its path is clear" });
+      }
       raiseArrows(board);
     }
-    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings };
+    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, groupObstacles: obstacleCount, reroutedIds: rerouted, backwards, deleted, errors, warnings };
   }
   var rerouteFlow = async (args) => {
     const only = Array.isArray(args.arrowIds) ? new Set(args.arrowIds.filter((x) => typeof x === "string").map(norm2)) : null;
@@ -3447,7 +5783,10 @@ ${logs.join(`
       groups.push(...pick);
     }
     const arrowsGroup = groups[0];
-    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
+    const prevBoardMeta = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const labelsHolder = (prevBoardMeta?.labelsGroupId ? parent.children.find((c) => c.id === prevBoardMeta.labelsGroupId) : null) ?? parent.children.find((c) => ("children" in c) && isLabelsContainerName(c.name) && c.name === labelsContainerName(boardNode.name, arrowsGroup.name)) ?? null;
+    const labelsKids = labelsHolder && "children" in labelsHolder ? [...labelsHolder.children] : [];
+    const siblings = parent.children.filter((c) => c.id !== boardNode.id && c.id !== labelsHolder?.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
     const found = collectScreens(siblings).filter((c) => {
       const r = rectOf(c.frame);
       return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
@@ -3466,7 +5805,9 @@ ${logs.join(`
     const extras = colWidth === grid.colWidth && rowHeight === grid.rowHeight ? { colExtra: grid.colExtra, rowExtra: grid.rowExtra } : extrasFor(screenRects.map((s) => s.rect), colWidth, rowHeight);
     const texts = collectTexts(siblings).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const style = readStyle(groups);
-    const boardMeta = {
+    const prevBoard = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const overridden = typeof args.colWidth === "number" || typeof args.rowHeight === "number";
+    const fresh = {
       v: 1,
       kind: "board",
       originX: grid.originX,
@@ -3483,6 +5824,8 @@ ${logs.join(`
       arrowsGroupId: arrowsGroup.id,
       arrowStyle: style
     };
+    const rerun = !!prevBoard && !overridden;
+    const boardMeta = prevBoard && rerun ? { ...prevBoard, arrowsGroupId: arrowsGroup.id } : fresh;
     const triggerCache = new Map;
     const triggersIn = (s) => {
       const hit = triggerCache.get(s.id);
@@ -3492,96 +5835,228 @@ ${logs.join(`
       triggerCache.set(s.id, list);
       return list;
     };
-    const allChildren = groups.flatMap((g) => [...g.children]);
-    const dots = allChildren.filter((c) => c.type === "ELLIPSE" && c.width <= 16 && c.height <= 16).map((c) => ({ id: c.id, node: c, center: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
-    const labels = allChildren.filter((c) => c.type === "FRAME" && c.name.startsWith("Label ·")).map((c) => ({ id: c.id, node: c, center: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
-    const claimed = new Set;
+    const refs = screenRects.map((s) => ({ id: s.id, name: s.node.name, rect: s.rect }));
     const unmatched = [];
     const planned = [];
     let outsideBoard = 0;
-    for (const v of allChildren) {
+    let arrowsKept = 0;
+    const absPoints = (v) => {
+      const local = orderPath(v.vectorNetwork.vertices, v.vectorNetwork.segments);
+      if (!local)
+        return null;
+      const t = v.absoluteTransform;
+      return local.map((p) => ({ x: t[0][0] * p.x + t[0][1] * p.y + t[0][2], y: t[1][0] * p.x + t[1][1] * p.y + t[1][2] }));
+    };
+    const triggerFor = (fromId, toId, tail, stale) => {
+      const src = screenRects.find((r) => r.id === fromId);
+      if (!src)
+        return null;
+      const list = triggersIn(src);
+      if (!stale)
+        return matchTrigger(tail, list, toId)?.id ?? null;
+      const toTarget = list.filter((t) => t.destinationId === toId);
+      return toTarget.length === 1 ? toTarget[0].id : null;
+    };
+    const textOf = (label, fallback) => firstOf(label, (n) => n.type === "TEXT")?.characters ?? fallback;
+    const holders = [];
+    const findHolders = (c, depth) => {
+      for (const k of c.children) {
+        if (k.type !== "GROUP" && k.type !== "FRAME")
+          continue;
+        if (k.type === "GROUP" && k.children.some((x) => x.type === "VECTOR"))
+          holders.push(k);
+        else if (depth < 3)
+          findHolders(k, depth + 1);
+      }
+    };
+    for (const g of groups)
+      findHolders(g, 0);
+    for (const h of holders) {
+      const v = h.children.find((x) => x.type === "VECTOR");
+      const dot = h.children.find((x) => x.type === "ELLIPSE");
+      const priorMeta = readMeta(h, ARROW_KEY, parseArrowMeta);
+      const lab = h.children.find((x) => x.type === "FRAME" && x.name.startsWith("Label ·")) ?? h.children.find((x) => x.type === "FRAME") ?? labelsKids.find((x) => x.type === "FRAME" && x.id === priorMeta?.labelId);
+      if (!v || !dot || !lab) {
+        unmatched.push({ id: h.id, name: h.name, reason: "incomplete-group" });
+        continue;
+      }
+      const prior = readMeta(h, ARROW_KEY, parseArrowMeta);
+      if (prior && prior.vectorId === v.id && prior.dotId === dot.id && prior.labelId === lab.id && screenRects.some((s) => s.id === prior.from) && screenRects.some((s) => s.id === prior.to) && prior.boardId === boardNode.id) {
+        arrowsKept++;
+        continue;
+      }
+      const pts0 = absPoints(v);
+      if (!pts0) {
+        unmatched.push({ id: h.id, name: h.name, reason: "no-arrowhead" });
+        continue;
+      }
+      const tail = pts0[0];
+      const head = pts0[pts0.length - 1];
+      const ends = resolveArrowEnds(tail, head, refs, { from: prior?.from, to: prior?.to, groupName: h.name });
+      if (!ends.ok) {
+        unmatched.push({ id: h.id, name: h.name, reason: ends.reason, ...ends.candidates ? { candidates: ends.candidates } : {} });
+        continue;
+      }
+      planned.push({
+        vector: v,
+        dot,
+        label: lab,
+        labelText: textOf(lab, prior?.label ?? v.name.replace(/^Arrow ·\s*/, "")),
+        from: ends.from.id,
+        to: ends.to.id,
+        trigger: triggerFor(ends.from.id, ends.to.id, tail, ends.stale),
+        points: pts0,
+        holder: h,
+        stale: ends.stale,
+        prior
+      });
+    }
+    const holderParts = new Set(holders.flatMap((h) => h.children.map((x) => x.id)));
+    const looseNodes = groups.flatMap((g) => [...g.children]).filter((c) => !holderParts.has(c.id));
+    const dots = looseNodes.filter((c) => c.type === "ELLIPSE" && c.width <= 16 && c.height <= 16).map((c) => ({ id: c.id, node: c, at: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
+    const labels = looseNodes.filter((c) => c.type === "FRAME" && c.name.startsWith("Label ·")).map((c) => ({ id: c.id, node: c, at: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
+    const looseVectors = [];
+    for (const v of looseNodes) {
       if (v.type !== "VECTOR")
         continue;
-      const net = v.vectorNetwork;
-      const local = orderPath(net.vertices, net.segments);
-      if (!local) {
+      const abs = absPoints(v);
+      if (!abs) {
         unmatched.push({ id: v.id, name: v.name, reason: "no-arrowhead" });
         continue;
       }
-      const t = v.absoluteTransform;
-      const abs = local.map((p) => ({ x: t[0][0] * p.x + t[0][1] * p.y + t[0][2], y: t[1][0] * p.x + t[1][1] * p.y + t[1][2] }));
-      const tail = abs[0];
-      const head = abs[abs.length - 1];
-      if (!inside(tail, bounds, 40)) {
+      if (!inside(abs[0], bounds, MAX_OFFSET)) {
         outsideBoard++;
         continue;
       }
-      const source = matchScreenAt(tail, screenRects);
-      if (!source) {
-        unmatched.push({ id: v.id, name: v.name, reason: "no-source-screen" });
+      looseVectors.push({ node: v, abs });
+    }
+    const paired = pairLooseParts(looseVectors.map((l) => ({ id: l.node.id, tail: l.abs[0], mid: longestSegmentMid(l.abs) })), dots, labels);
+    for (const u of paired.unpaired) {
+      const l = looseVectors.find((x) => x.node.id === u.vectorId);
+      unmatched.push({ id: l.node.id, name: l.node.name, reason: u.reason });
+    }
+    for (const pr of paired.pairs) {
+      const l = looseVectors.find((x) => x.node.id === pr.vectorId);
+      const dot = dots.find((d) => d.id === pr.dotId);
+      const lab = labels.find((x) => x.id === pr.labelId);
+      const tail = l.abs[0];
+      const head = l.abs[l.abs.length - 1];
+      const ends = resolveArrowEnds(tail, head, refs);
+      if (!ends.ok) {
+        unmatched.push({ id: l.node.id, name: l.node.name, reason: ends.reason, ...ends.candidates ? { candidates: ends.candidates } : {} });
         continue;
       }
-      const target = matchScreenAt(head, screenRects, 14, source.id);
-      if (!target) {
-        unmatched.push({ id: v.id, name: v.name, reason: "no-target-screen" });
-        continue;
-      }
-      const dot = nearestUnclaimed(tail, dots, 12, claimed);
-      if (!dot) {
-        unmatched.push({ id: v.id, name: v.name, reason: "no-start-dot" });
-        continue;
-      }
-      const lab = nearestUnclaimed(longestSegmentMid(abs), labels, 60, claimed);
-      if (!lab) {
-        unmatched.push({ id: v.id, name: v.name, reason: "no-label" });
-        continue;
-      }
-      claimed.add(dot.id);
-      claimed.add(lab.id);
-      const trig = matchTrigger(tail, triggersIn(screenRects.find((s) => s.id === source.id)), target.id);
-      const textNode = firstOf(lab.node, (n) => n.type === "TEXT");
       planned.push({
-        vector: v,
+        vector: l.node,
         dot: dot.node,
         label: lab.node,
-        labelText: textNode?.characters ?? v.name.replace(/^Arrow ·\s*/, ""),
-        from: source.id,
-        to: target.id,
-        trigger: trig?.id ?? null,
-        points: abs
+        labelText: textOf(lab.node, l.node.name.replace(/^Arrow ·\s*/, "")),
+        from: ends.from.id,
+        to: ends.to.id,
+        trigger: triggerFor(ends.from.id, ends.to.id, tail, ends.stale),
+        points: l.abs,
+        holder: null,
+        stale: ends.stale,
+        prior: null
       });
     }
+    const badgeCandidates = collectBadges(siblings).map((n) => ({ id: n.id, name: n.name, rect: rectOf(n) }));
+    const prevScreens = new Map(screenRects.map((s) => [s.id, readMeta(s.node, SCREEN_KEY, parseScreenMeta)]));
+    const own = (id) => {
+      const m = prevScreens.get(id);
+      return m && m.boardId === boardNode.id ? m : null;
+    };
+    const liveBadge = new Set(badgeCandidates.map((b) => b.id));
+    const keptBadge = new Set(screenRects.flatMap((s) => own(s.id)?.badgeId && liveBadge.has(own(s.id)?.badgeId) ? [own(s.id)?.badgeId] : []));
+    const badgeLinks = linkBadges(refs, badgeCandidates, keptBadge, new Set(screenRects.filter((s) => own(s.id)?.badgeId && liveBadge.has(own(s.id)?.badgeId)).map((s) => s.id)));
     if (!dryRun) {
       boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+      boardNode.locked = true;
       for (const s of screenRects) {
         const cell = cellOfRect(s.rect, boardMeta);
         const assigned = assignScreenTexts(s.rect, texts);
-        const meta = { v: 1, kind: "screen", boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
+        const prev = own(s.id);
+        const badgeId = badgeLinks.get(s.id) ?? (prev?.badgeId && liveBadge.has(prev.badgeId) ? prev.badgeId : null);
+        const meta = {
+          ...prev ?? {},
+          v: 1,
+          kind: "screen",
+          boardId: boardNode.id,
+          col: cell.col,
+          row: cell.row,
+          labelId: assigned.labelId ?? prev?.labelId ?? null,
+          routeId: assigned.routeId ?? prev?.routeId ?? null,
+          groupId: s.groupId,
+          ...badgeId ? { badgeId } : {}
+        };
         s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
-        const routeNode = assigned.routeId ? await sceneById(assigned.routeId) : null;
+        const routeNode = meta.routeId ? await sceneById(meta.routeId) : null;
         if (routeNode?.type === "TEXT")
           await fitRoute(routeNode, s.node.width, null);
       }
+      const adopted = { node: boardNode, meta: boardMeta, arrows: arrowsGroup, labels: labelsHolder && "children" in labelsHolder ? labelsHolder : null };
+      if (planned.length || arrowsKept || labelsHolder)
+        await ensureLabels(adopted);
+      const labelsBox = adopted.labels ?? null;
+      if (labelsBox) {
+        boardMeta.labelsGroupId = labelsBox.id;
+        boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+      }
       for (const p of planned) {
         const container = p.vector.parent && "children" in p.vector.parent ? p.vector.parent : arrowsGroup;
-        const group = figma.group([p.vector, p.dot, p.label], container);
+        const group = p.holder ?? figma.group([p.vector, p.dot], container);
+        if (labelsBox && p.label.parent !== labelsBox)
+          moveInto(p.label, labelsBox);
         const fromName = screenRects.find((s) => s.id === p.from)?.node.name ?? p.from;
         const toName = screenRects.find((s) => s.id === p.to)?.node.name ?? p.to;
         group.name = arrowGroupName(fromName, toName, p.labelText);
+        const keepTrigger = p.prior?.trigger && await sceneById(p.prior.trigger) ? p.prior.trigger : p.trigger;
         writeArrowMeta(group, {
           v: 1,
           kind: "arrow",
           boardId: boardNode.id,
           from: p.from,
           to: p.to,
-          trigger: p.trigger,
+          trigger: keepTrigger,
           label: p.labelText,
-          mode: p.trigger ? "trigger" : "auto",
+          mode: keepTrigger ? "trigger" : "auto",
+          ...p.prior?.exit ? { exit: p.prior.exit } : {},
           vectorId: p.vector.id,
           dotId: p.dot.id,
           labelId: p.label.id
         });
       }
+      if (labelsBox) {
+        for (const h of holders) {
+          const inside = h.removed ? undefined : h.children.find((x) => x.type === "FRAME" && x.name.startsWith("Label ·"));
+          if (inside && h.children.some((x) => x.type === "VECTOR"))
+            moveInto(inside, labelsBox);
+        }
+      }
+    }
+    const consolidation = planConsolidation(groups.map((g) => ({ id: g.id, childIds: g.children.map((c) => c.id) })));
+    let arrowsConsolidated = 0;
+    if (!dryRun && consolidation) {
+      for (const m of consolidation.moves) {
+        const node = await sceneById(m.nodeId);
+        if (!node || !("x" in node))
+          continue;
+        const before = rectOf(node);
+        arrowsGroup.appendChild(node);
+        const d = restoreDelta(before, rectOf(node));
+        if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+          node.x += d.x;
+          node.y += d.y;
+        }
+        arrowsConsolidated++;
+      }
+      for (const id of consolidation.emptied) {
+        const extra = await sceneById(id);
+        if (extra && "children" in extra && !extra.children.length)
+          extra.remove();
+      }
+    } else if (consolidation) {
+      arrowsConsolidated = consolidation.moves.length;
     }
     const preview = planned.map((p) => ({
       vector: p.vector.id,
@@ -3599,6 +6074,12 @@ ${logs.join(`
       arrowStyle: style,
       screens: screenRects.length,
       arrowsAdopted: planned.length,
+      arrowsConsolidated,
+      arrowsRelinked: planned.filter((p) => p.holder).length,
+      arrowsStale: planned.filter((p) => p.stale).length,
+      arrowsAlreadyAdopted: arrowsKept,
+      badgesLinked: badgeLinks.size,
+      reran: rerun,
       arrowsWithTrigger: planned.filter((p) => p.trigger).length,
       unmatched,
       outsideBoard,
@@ -3754,6 +6235,7 @@ ${logs.join(`
     const added = [];
     const refreshed = [];
     const skipped = [];
+    const removed = [];
     for (const board of boards) {
       const parent = board.node.parent;
       if (!parent || !("children" in parent))
@@ -3763,8 +6245,9 @@ ${logs.join(`
         if (!meta || meta.boardId !== board.node.id)
           continue;
         const has = partsOf2(meta.badgeId ? await sceneById(meta.badgeId) : null);
-        const build = buildStatusOf(meta.build);
-        const row = { id: frame.id, name: frame.name, status: build.status };
+        const recovered = !meta.build && has ? statusFromBadgeText(has.text.characters, new Date().toISOString()) : null;
+        const build = recovered ?? buildStatusOf(meta.build);
+        const row = { id: frame.id, name: frame.name, status: build.status, ...recovered ? { recovered: true } : {} };
         if (dryRun) {
           (has ? refreshed : added).push(row);
           continue;
@@ -3773,10 +6256,28 @@ ${logs.join(`
         writeScreen2(frame, { ...meta, build, badgeId: badge.id });
         (has ? refreshed : added).push({ ...row, badgeId: badge.id });
       }
+      const referenced = new Set;
+      for (const { frame } of collectScreens(parent.children)) {
+        const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+        if (meta?.badgeId)
+          referenced.add(meta.badgeId);
+      }
+      const badges = collectBadges(parent.children);
+      const orphans = orphanBadges(badges.map((b) => ({ id: b.id, name: b.name, rect: rectOf(b) })), referenced, rectOf(board.node));
+      for (const id of orphans) {
+        const node = badges.find((b) => b.id === id);
+        if (!node)
+          continue;
+        const found = node.findOne((n) => n.type === "TEXT");
+        const text = found?.type === "TEXT" ? found.characters : null;
+        removed.push({ id, name: node.name, text });
+        if (!dryRun)
+          node.remove();
+      }
       if (!dryRun)
         raiseArrows(board);
     }
-    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, skipped });
+    return ok({ dryRun, boards: boards.map((b) => b.node.id), added, refreshed, removed, skipped });
   };
 
   // plugin-src/flow-group-adopt.ts
@@ -3784,7 +6285,7 @@ ${logs.join(`
   var MAX_FILL = 0.3;
   var ABOVE_GAP = 400;
   var TOP_BAND = 0.25;
-  var EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Arrows)/;
+  var EXCLUDED_NAME = /^(Flow groups\s*·|Board background\s*·|Flow arrows|Flow arrow labels|Arrows)/;
   var HEADING_NAME = /^Section Heading/;
   var area = (r) => r.width * r.height;
   var contains2 = (o, i) => i.x >= o.x - TOL && i.y >= o.y - TOL && i.x + i.width <= o.x + o.width + TOL && i.y + i.height <= o.y + o.height + TOL;
@@ -3985,7 +6486,7 @@ ${logs.join(`
   async function adoptBoard2(board, dryRun, removeOld) {
     const { screens } = await loadScreens(board);
     const screenIds = new Set(screens.map((s) => s.node.id));
-    const skip = new Set([board.node.id, board.meta.arrowsGroupId, ...board.meta.headingId ? [board.meta.headingId] : [], ...screenIds]);
+    const skip = new Set([board.node.id, board.meta.arrowsGroupId, ...board.meta.labelsGroupId ? [board.meta.labelsGroupId] : [], ...board.meta.headingId ? [board.meta.headingId] : [], ...screenIds]);
     const candidates = collect(skip, rectOf(board.node));
     const plan = planAdopt({
       candidates,
@@ -4031,6 +6532,372 @@ ${logs.join(`
     for (const b of boards)
       results.push(await adoptBoard2(b, dryRun, removeOld));
     return ok({ dryRun, removeOld, boards: results });
+  };
+
+  // plugin-src/board-repair.ts
+  var DEFAULT_COL = 700;
+  var DEFAULT_ROW = 1112;
+  var modeOf2 = (xs) => {
+    const counts = new Map;
+    for (const x of xs)
+      counts.set(Math.round(x), (counts.get(Math.round(x)) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+  };
+  var stepOf = (screens, track, cross, pos) => {
+    const steps = [];
+    for (const a of screens)
+      for (const b of screens)
+        if (cross(a) === cross(b) && track(b) - track(a) === 1 && pos(b) > pos(a))
+          steps.push(pos(b) - pos(a));
+    return steps.length ? modeOf2(steps) : null;
+  };
+  function inferRepairGrid(screens) {
+    const screenW = modeOf2(screens.map((s) => s.width));
+    const screenH = modeOf2(screens.map((s) => s.height));
+    const colWidth = Math.max(screenW, stepOf(screens, (s) => s.col, (s) => s.row, (s) => s.x) ?? DEFAULT_COL);
+    const rowHeight = Math.max(screenH, stepOf(screens, (s) => s.row, (s) => s.col, (s) => s.y) ?? DEFAULT_ROW);
+    const first = (track) => [...screens].sort((a, b) => track(a) - track(b))[0];
+    const left = first((s) => s.col);
+    const top = first((s) => s.row);
+    return { originX: Math.round(left.x - left.col * colWidth), originY: Math.round(top.y - top.row * rowHeight), colWidth, rowHeight, screenW, screenH };
+  }
+
+  // plugin-src/gridtools.ts
+  var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
+  var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
+  var gridScreens = (screens) => screens.map((s) => ({ id: s.node.id, layoutId: layoutOfScreen(s.meta), col: s.meta.col, row: s.meta.row }));
+  async function finish(board, screens, stale, moves, shrink, extras, grids) {
+    if (extras)
+      applyExtras(board, extras);
+    const moved = await applyMoves(board, screens, moves, grids);
+    const fit = await refitGroups(board, screens);
+    const size = await resizeBoard(board, screens, shrink, fit.extent);
+    const reroute = await rerouteBoards([board]);
+    return ok({ boardId: board.node.id, moved, stale: stale.map((s) => ({ ...s, fixedTo: { ...s.fixedTo } })), board: size, reroute, ...fit.active ? { groups: fit.summary } : {} });
+  }
+  var wholeNumber = (v, fallback, min) => {
+    const n = v ?? fallback;
+    return Number.isInteger(n) && n >= min ? n : null;
+  };
+  var moveScreen = async (args) => {
+    const id = str(args, "id");
+    const col = num(args, "col");
+    const row = num(args, "row");
+    if (!id || col === undefined || row === undefined)
+      return fail("move_screen needs id, col and row.");
+    const node = await sceneById(id);
+    if (!node)
+      return fail(`No node ${id}.`);
+    const stored = readMeta(node, SCREEN_KEY, parseScreenMeta);
+    if (!stored)
+      return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
+    const board = await loadBoard(stored.boardId);
+    const { screens, stale } = await loadScreens(board);
+    const swap = bool(args, "swap", false);
+    const groupArg = str(args, "group");
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok)
+      return fail(target.error);
+    if (!isGrouped(board)) {
+      const plan = planMove(cellsOf(screens), node.id, col, row, swap);
+      if (!plan.ok)
+        return fail(plan.error);
+      if (target) {
+        const set = await setScreenGroup(board, screens, node.id, target.groupId);
+        if (!set.ok)
+          return fail(set.error);
+      }
+      return finish(board, screens, stale, plan.moves, false);
+    }
+    const groups = await loadGroups(board);
+    const toLayout = target ? target.groupId ?? BOARD_GRID : undefined;
+    const plan = planGridMove(gridScreens(screens), node.id, col, row, swap, toLayout);
+    if (!plan.ok)
+      return fail(plan.error);
+    if (plan.moves.some((m) => m.id !== node.id && m.from.layoutId !== m.to.layoutId))
+      return fail("A swap across two groups would change both screens' groups. Move them one at a time.");
+    const grids = groupGrids(board, groups);
+    const into = toLayout ? groups.find((g) => g.id === toLayout) : undefined;
+    if (into && !into.meta.layout) {
+      const at = rectOf(node);
+      const pitch = grids(BOARD_GRID);
+      setGroupLayout(into, { originX: at.x - col * pitch.colWidth, originY: at.y - row * pitch.rowHeight });
+    }
+    if (target) {
+      const set = await setScreenGroup(board, screens, node.id, target.groupId);
+      if (!set.ok)
+        return fail(set.error);
+    }
+    return finish(board, screens, stale, plan.moves, false, undefined, groupGrids(board, groups));
+  };
+  async function insertAlong(args, axis) {
+    const tool = axis === "col" ? "insert_columns" : "insert_rows";
+    const boardId = str(args, "boardId");
+    const after = num(args, "after");
+    if (!boardId || after === undefined)
+      return fail(`${tool} needs boardId and after.`);
+    const count = wholeNumber(num(args, "count"), 1, 1);
+    if (count === null || count > 50)
+      return fail("count must be a whole number from 1 to 50.");
+    if (!Number.isInteger(after) || after < -1)
+      return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    const groupArg = str(args, "groupId");
+    if (!isGrouped(board)) {
+      if (groupArg !== undefined)
+        return fail(`${tool}: groupId only applies to a board with spacing "grouped".`);
+      return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
+    }
+    const target = groupArg !== undefined ? await checkGroupArg(board.node.id, groupArg) : null;
+    if (target && !target.ok)
+      return fail(target.error);
+    const layoutId = target?.ok ? target.groupId ?? BOARD_GRID : BOARD_GRID;
+    const grids = groupGrids(board, await loadGroups(board));
+    return finish(board, screens, stale, shiftGridPlan(gridScreens(screens), layoutId, axis, after, count), false, undefined, grids);
+  }
+  var insertColumns = (args) => insertAlong(args, "col");
+  var insertRows = (args) => insertAlong(args, "row");
+  var compactBoard = async (args) => {
+    const boardId = str(args, "boardId");
+    if (!boardId)
+      return fail("compact_board needs boardId.");
+    const board = await loadBoard(boardId);
+    const { screens, stale } = await loadScreens(board);
+    if (isGrouped(board))
+      return finish(board, screens, stale, compactGridPlan(gridScreens(screens)), true, undefined, groupGrids(board, await loadGroups(board)));
+    return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
+  };
+  async function fontFor2(text) {
+    const current = text.fontName;
+    const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
+    for (const font of candidates) {
+      try {
+        await figma.loadFontAsync(font);
+        return font;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("Could not load a font for the board heading.");
+  }
+  async function findStyleBoard() {
+    for (const n of figma.currentPage.children) {
+      if (!readMeta(n, BOARD_KEY, parseBoardMeta))
+        continue;
+      try {
+        return await loadBoard(n.id);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+  var createBoard = async (args) => {
+    const name = str(args, "name");
+    if (!name)
+      return fail("create_board needs name.");
+    const colWidth = num(args, "colWidth") ?? 700;
+    const rowHeight = num(args, "rowHeight") ?? 1112;
+    const screenW = num(args, "screenW") ?? 393;
+    const screenH = num(args, "screenH") ?? 852;
+    const cols = wholeNumber(num(args, "cols"), 4, 1);
+    const rows = wholeNumber(num(args, "rows"), 2, 1);
+    if (cols === null || rows === null || cols > 50 || rows > 50)
+      return fail("cols and rows must be whole numbers from 1 to 50.");
+    if (![colWidth, rowHeight, screenW, screenH].every((n) => n > 0))
+      return fail("colWidth, rowHeight, screenW and screenH must be positive.");
+    if (colWidth < screenW || rowHeight < screenH)
+      return fail("colWidth and rowHeight must be at least the screen size, or the screens overlap.");
+    const page = figma.currentPage;
+    const styleBoard = await findStyleBoard();
+    const margin = styleBoard?.meta.margin ?? 80;
+    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
+    const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
+    const rects = page.children.map(rectOf);
+    const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
+    const y = num(args, "y") ?? (rects.length ? Math.min(...rects.map((r) => r.y)) : 0);
+    const grid = { originX: x + margin, originY: y + margin + labelOffset, colWidth, rowHeight, screenW, screenH, labelOffset, margin };
+    const bounds = boardBounds(grid, [{ col: cols - 1, row: rows - 1 }]);
+    const styleBg = styleBoard?.node;
+    let bg;
+    if (styleBg?.type === "RECTANGLE") {
+      bg = styleBg.clone();
+      bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
+    } else {
+      bg = figma.createRectangle();
+      const fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
+      bg.fills = fills;
+      if (styleBg && "cornerRadius" in styleBg && typeof styleBg.cornerRadius === "number")
+        bg.cornerRadius = styleBg.cornerRadius;
+    }
+    page.appendChild(bg);
+    bg.name = `Board background · ${name}`;
+    bg.x = bounds.x;
+    bg.y = bounds.y;
+    bg.resize(bounds.width, bounds.height);
+    const headingNode = styleBoard?.meta.headingId ? await sceneById(styleBoard.meta.headingId) : null;
+    const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
+    const heading = headingStyle ? headingStyle.clone() : figma.createText();
+    page.appendChild(heading);
+    await figma.loadFontAsync(await fontFor2(heading));
+    heading.fontName = await fontFor2(heading);
+    if (!headingStyle) {
+      heading.fontSize = 48;
+      heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
+    }
+    heading.characters = `Board · ${name}`;
+    heading.name = `Board · ${name}`;
+    heading.x = bounds.x;
+    heading.y = bounds.y - heading.height - 24;
+    const arrows = figma.createFrame();
+    page.appendChild(arrows);
+    arrows.name = `Flow arrows · ${name}`;
+    arrows.fills = [];
+    arrows.clipsContent = false;
+    arrows.resize(1, 1);
+    arrows.x = bounds.x;
+    arrows.y = bounds.y;
+    const meta = { v: 1, kind: "board", ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
+    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    bg.locked = true;
+    return ok({
+      boardId: bg.id,
+      headingId: heading.id,
+      arrowsGroupId: arrows.id,
+      bounds,
+      grid: { originX: grid.originX, originY: grid.originY, colWidth, rowHeight, screenW, screenH, cols, rows },
+      styledFrom: styleBoard ? styleBoard.node.id : null
+    });
+  };
+
+  // plugin-src/board-repair-handler.ts
+  var norm3 = (id) => id.replace("-", ":");
+  function arrowGroupsIn(container, boardId, depth = 0) {
+    const out = [];
+    for (const c of container.children) {
+      if (readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId === boardId)
+        out.push(c);
+      else if ("children" in c && depth < 2)
+        out.push(...arrowGroupsIn(c, boardId, depth + 1));
+    }
+    return out;
+  }
+  function findOrphanParts(boardId) {
+    const page = figma.currentPage;
+    const screens = collectScreens(page.children).map((s) => s.frame).filter((f) => readMeta(f, SCREEN_KEY, parseScreenMeta)?.boardId === boardId);
+    const holder = page.children.find((c) => c.type === "FRAME" && c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) === boardId) ?? null;
+    const groupRects = holder ? holder.children.filter((c) => readMeta(c, GROUP_KEY, parseGroupMeta)?.boardId === boardId) : [];
+    let arrowsContainer = null;
+    let arrowGroups = [];
+    for (const c of page.children) {
+      if (!("children" in c) || !c.name.startsWith("Flow arrows"))
+        continue;
+      const found = arrowGroupsIn(c, boardId);
+      if (found.length > arrowGroups.length)
+        [arrowsContainer, arrowGroups] = [c, found];
+    }
+    return { screens, holder, groupRects, arrowGroups, arrowsContainer };
+  }
+  async function missingBoardIds() {
+    const ids = collectScreens(figma.currentPage.children).flatMap((s) => {
+      const m = readMeta(s.frame, SCREEN_KEY, parseScreenMeta);
+      return m ? [m.boardId] : [];
+    });
+    const existing = new Set;
+    for (const id of new Set(ids))
+      if (await sceneById(id))
+        existing.add(id);
+    return findOrphans(ids, [], existing).map((o) => o.boardId);
+  }
+  function rewrite(node, key, parse, boardId) {
+    const meta = readMeta(node, key, parse);
+    if (meta)
+      node.setSharedPluginData(FLOW_NAMESPACE, key, JSON.stringify({ ...meta, boardId }));
+  }
+  var repairBoard = async (args) => {
+    const asked = str(args, "boardId");
+    const dryRun = bool(args, "dryRun", false);
+    const missing = await missingBoardIds();
+    const oldId = asked ? norm3(asked) : missing.length === 1 ? missing[0] : null;
+    if (!oldId)
+      return fail(missing.length ? `Several boards are missing (${missing.join(", ")}). Pass boardId.` : "No board on this page is missing its background.");
+    if (await sceneById(oldId))
+      return fail(`Board ${oldId} still exists; nothing to repair.`);
+    const parts = findOrphanParts(oldId);
+    if (!parts.screens.length)
+      return fail(`No screens on this page point at board ${oldId}.`);
+    if (!parts.arrowsContainer)
+      return fail(`No "Flow arrows" container holds arrows of board ${oldId}.`);
+    const backupRaw = parts.holder?.getSharedPluginData(FLOW_NAMESPACE, "board-backup") ?? "";
+    const backup = backupRaw ? JSON.parse(backupRaw) : null;
+    const backupMeta = backup?.meta ? parseBoardMeta(JSON.stringify(backup.meta)) : null;
+    const grid = inferRepairGrid(parts.screens.flatMap((f) => {
+      const m = readMeta(f, SCREEN_KEY, parseScreenMeta);
+      const r = rectOf(f);
+      return m ? [{ col: m.col, row: m.row, x: r.x, y: r.y, width: f.width, height: f.height }] : [];
+    }));
+    const style = await findStyleBoard();
+    const meta = backupMeta ? { ...backupMeta, arrowsGroupId: parts.arrowsContainer.id } : {
+      v: 1,
+      kind: "board",
+      ...grid,
+      spacing: "uniform",
+      baseColWidth: grid.colWidth,
+      baseRowHeight: grid.rowHeight,
+      labelOffset: style?.meta.labelOffset ?? 80,
+      margin: style?.meta.margin ?? 80,
+      headingId: null,
+      arrowsGroupId: parts.arrowsContainer.id,
+      arrowStyle: style?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE
+    };
+    const name = backup?.name ?? (parts.holder ? `Board background · ${parts.holder.name.replace(/^Flow groups\s*·\s*/, "")}` : "Board background · repaired");
+    const summary = {
+      missingBoardId: oldId,
+      name,
+      fromBackup: !!backupMeta,
+      grid: { originX: meta.originX, originY: meta.originY, colWidth: meta.colWidth, rowHeight: meta.rowHeight, screenW: meta.screenW, screenH: meta.screenH },
+      screens: parts.screens.length,
+      arrows: parts.arrowGroups.length,
+      groups: parts.groupRects.length,
+      holder: parts.holder?.id ?? null,
+      arrowsContainer: parts.arrowsContainer.id
+    };
+    if (dryRun)
+      return ok({ dryRun, ...summary });
+    const page = figma.currentPage;
+    const bg = figma.createRectangle();
+    const styleBg = style?.node;
+    bg.fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
+    const lowest = Math.min(...[...parts.screens, parts.arrowsContainer, ...parts.holder ? [parts.holder] : []].map((n) => {
+      let top = n;
+      while (top.parent && top.parent.type !== "PAGE")
+        top = top.parent;
+      return page.children.indexOf(top);
+    }).filter((i) => i >= 0));
+    page.insertChild(Number.isFinite(lowest) ? lowest : 0, bg);
+    bg.name = name;
+    const cells = parts.screens.flatMap((f) => {
+      const m = readMeta(f, SCREEN_KEY, parseScreenMeta);
+      return m ? [{ col: m.col, row: m.row }] : [];
+    });
+    const b = boardBounds(meta, cells);
+    bg.x = b.x;
+    bg.y = b.y;
+    bg.resize(b.width, b.height);
+    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
+    bg.locked = true;
+    for (const f of parts.screens)
+      rewrite(f, SCREEN_KEY, parseScreenMeta, bg.id);
+    for (const a of parts.arrowGroups)
+      rewrite(a, ARROW_KEY, parseArrowMeta, bg.id);
+    for (const g of parts.groupRects)
+      rewrite(g, GROUP_KEY, parseGroupMeta, bg.id);
+    if (parts.holder)
+      parts.holder.setSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY, bg.id);
+    const board = { node: bg, meta, arrows: parts.arrowsContainer };
+    const settled = await rerouteBoards([board]);
+    return ok({ boardId: bg.id, ...summary, settled });
   };
 
   // plugin-src/util.ts
@@ -4533,13 +7400,30 @@ ${body}
   function renderBoard(input, width = 16) {
     const { screens, arrows, meta } = input;
     const byId = new Map(screens.map((s) => [s.id, s]));
+    const layouts = input.layouts;
+    const layoutOf = (s) => s.layoutId ?? BOARD_GRID;
+    const gridOf = (id) => {
+      const l = layouts?.find((x) => x.id === id);
+      return l ? { id: l.id, originX: l.originX, originY: l.originY, colWidth: meta.colWidth, rowHeight: meta.rowHeight } : null;
+    };
     const cols = screens.length ? Math.max(...screens.map((s) => s.col)) + 1 : 0;
     const rows = screens.length ? Math.max(...screens.map((s) => s.row)) + 1 : 0;
     const issues = [];
     for (const s of screens) {
-      const actual = cellOfRect(s, meta);
-      if (actual.col !== s.col || actual.row !== s.row)
-        issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+      const grid = layouts ? gridOf(layoutOf(s)) : null;
+      if (layouts && !grid)
+        issues.push(`${s.name}: layout ${layoutOf(s)} has no grid`);
+      else if (grid) {
+        const actual = cellOfIn(grid, s);
+        if (!onGrid(grid, s))
+          issues.push(`${s.name}: ${Math.round(s.x - (grid.originX + actual.col * grid.colWidth))}px, ${Math.round(s.y - (grid.originY + actual.row * grid.rowHeight))}px off cell ${cell(actual.col, actual.row)} of its grid`);
+        else if (actual.col !== s.col || actual.row !== s.row)
+          issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+      } else {
+        const actual = cellOfRect(s, meta);
+        if (actual.col !== s.col || actual.row !== s.row)
+          issues.push(`${s.name}: meta says ${cell(s.col, s.row)} but it sits at ${cell(actual.col, actual.row)}`);
+      }
       if (s.labelX !== null && Math.abs(s.labelX - s.x) > LABEL_TOLERANCE2)
         issues.push(`${s.name}: label is at x=${s.labelX} but the frame is at x=${s.x}`);
       if (s.hasBadge === false)
@@ -4548,8 +7432,9 @@ ${body}
         issues.push(`${s.name}: marked built but has no route text`);
     }
     const cellKeys = new Map;
+    const keyOf = (s) => `${layoutOf(s)}:${s.col},${s.row}`;
     for (const s of screens)
-      cellKeys.set(`${s.col},${s.row}`, [...cellKeys.get(`${s.col},${s.row}`) ?? [], s]);
+      cellKeys.set(keyOf(s), [...cellKeys.get(keyOf(s)) ?? [], s]);
     for (const group of cellKeys.values()) {
       const first = group[0];
       if (group.length > 1 && first)
@@ -4573,12 +7458,22 @@ ${body}
         issues.push(`Arrow "${a.label}": source ${a.from} is missing`);
       if (!to)
         issues.push(`Arrow "${a.label}": target ${a.to} is missing`);
-      if (from && to && to.col < from.col)
+      if (from && to && (layouts ? to.x < from.x : to.col < from.col))
         issues.push(`Arrow "${a.label}" points left: ${from.name} (c${from.col}) to ${to.name} (c${to.col})`);
     }
     const g = renderGroups(input.groups ?? [], screens);
     issues.push(...g.issues);
-    return { boardId: input.boardId, name: input.name, cols, rows, grid: renderGrid(screens, cols, rows, width), screens: statusRows(screens), arrows: lines, groups: g.rows, groupTree: g.tree, issues };
+    const views = layouts?.map((l) => {
+      const own = screens.filter((s) => layoutOf(s) === l.id);
+      const c = own.length ? Math.max(...own.map((s) => s.col)) + 1 : 0;
+      const r = own.length ? Math.max(...own.map((s) => s.row)) + 1 : 0;
+      return { id: l.id, name: l.name, originX: l.originX, originY: l.originY, cols: c, rows: r, grid: renderGrid(own, c, r, width) };
+    });
+    const grid = views ? views.filter((v) => v.cols).map((v) => `${v.name} (origin ${v.originX},${v.originY})
+${v.grid}`).join(`
+
+`) : renderGrid(screens, cols, rows, width);
+    return { boardId: input.boardId, name: input.name, cols, rows, grid, ...views ? { grids: views } : {}, screens: statusRows(screens), arrows: lines, groups: g.rows, groupTree: g.tree, issues };
   }
 
   // plugin-src/describe.ts
@@ -4611,7 +7506,8 @@ ${body}
         route: route?.type === "TEXT" ? route.characters.trim() || null : null,
         verifiedAt: build.status === "not-built" ? null : build.verifiedAt,
         hasBadge: !!badge,
-        flowGroupId: meta.flowGroupId ?? null
+        flowGroupId: meta.flowGroupId ?? null,
+        ...board.meta.spacing === "grouped" ? { layoutId: meta.flowGroupId ?? "board" } : {}
       });
     }
     return out;
@@ -4641,7 +7537,30 @@ ${body}
   }
   async function describeOne(board, width) {
     const [screens, arrows, groups] = await Promise.all([screensOf(board), arrowsOf(board), groupsOf(board)]);
-    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups }, width);
+    const layouts = board.meta.spacing === "grouped" ? [
+      { id: "board", name: "Board", originX: board.meta.originX, originY: board.meta.originY },
+      ...(await loadGroups(board)).flatMap((g) => g.meta.layout ? [{ id: g.id, name: g.meta.name, originX: g.meta.layout.originX, originY: g.meta.layout.originY }] : [])
+    ] : undefined;
+    return renderBoard({ boardId: board.node.id, name: board.node.name, meta: board.meta, screens, arrows, groups, ...layouts ? { layouts } : {} }, width);
+  }
+  async function missingBoards() {
+    const screenBoards = [];
+    for (const { frame } of collectScreens(figma.currentPage.children)) {
+      const meta = readMeta(frame, SCREEN_KEY, parseScreenMeta);
+      if (meta)
+        screenBoards.push(meta.boardId);
+    }
+    const groupBoards = [];
+    for (const n of figma.currentPage.children) {
+      const board = n.type === "FRAME" ? n.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY) : "";
+      if (board && n.type === "FRAME")
+        groupBoards.push(...n.children.filter((c) => c.type === "RECTANGLE").map(() => board));
+    }
+    const existing = new Set;
+    for (const bid of new Set([...screenBoards, ...groupBoards]))
+      if (await sceneById(bid))
+        existing.add(bid);
+    return findOrphans(screenBoards, groupBoards, existing);
   }
   var describeBoard = async (args) => {
     const width = num(args, "width") ?? DEFAULT_WIDTH;
@@ -4655,16 +7574,20 @@ ${body}
           boards.push(await loadBoard(n.id));
       }
     }
-    if (!boards.length)
+    const issues = id ? [] : await missingBoards();
+    if (!boards.length) {
+      if (issues.length)
+        return ok({ boards: [], issues });
       return fail("No adopted boards on this page. Run adopt_board first, or pass boardId.");
+    }
     const described = await Promise.all(boards.map((b) => describeOne(b, width)));
-    return ok({ boards: described });
+    return ok({ boards: described, ...issues.length ? { issues } : {} });
   };
 
   // plugin-src/duplicate.ts
-  var norm3 = (id) => id.replace("-", ":");
+  var norm4 = (id) => id.replace("-", ":");
   async function sceneById2(id) {
-    const n = await figma.getNodeByIdAsync(norm3(id));
+    const n = await figma.getNodeByIdAsync(norm4(id));
     return n && "visible" in n && !n.removed ? n : null;
   }
   function rectOf2(n) {
@@ -4721,7 +7644,7 @@ ${body}
     return copy;
   }
   async function componentFor(id) {
-    const n = await figma.getNodeByIdAsync(norm3(id));
+    const n = await figma.getNodeByIdAsync(norm4(id));
     if (!n)
       throw new Error(`No node ${id}.`);
     if (n.type === "COMPONENT")
@@ -4797,7 +7720,18 @@ ${body}
     if (!wanted.ok)
       return fail(wanted.error);
     const flowGroupId = wanted.groupId;
-    const target = cellRect(board, col, row);
+    const groupedBoard = board.spacing === "grouped";
+    const layoutId = flowGroupId ?? BOARD_GRID;
+    let target;
+    if (groupedBoard) {
+      const loaded = await loadBoard(meta.boardId);
+      const groups = await loadGroups(loaded);
+      if (flowGroupId && !groups.find((g) => g.id === flowGroupId)?.meta.layout)
+        return fail(`The group ${flowGroupId} has no grid yet (it has no screens of its own). Add a screen to it first.`);
+      target = cellRectIn(groupGrids(loaded, groups)(layoutId), col, row, { width: board.screenW, height: board.screenH });
+    } else {
+      target = cellRect(board, col, row);
+    }
     const grouped = src.parent?.type === "GROUP" && isScreenGroupName(src.parent.name) ? src.parent : null;
     const container = grouped ? grouped.parent : src.parent;
     const siblings = container && "children" in container ? container.children : [];
@@ -4879,7 +7813,8 @@ ${body}
       groupId: groupCopy?.id ?? null,
       build: { status: "not-built" },
       badgeId: badgeCopy?.id ?? null,
-      flowGroupId
+      flowGroupId,
+      ...groupedBoard ? { layoutId } : {}
     };
     copy.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(fresh));
     if (badgeCopy && fresh.build)
@@ -5484,7 +8419,7 @@ ${body}
         return null;
     }
   }
-  async function fontFor2(family, style, s) {
+  async function fontFor3(family, style, s) {
     s.fonts ??= await figma.listAvailableFontsAsync();
     if (!fontAvailable(s.fonts, family, style))
       throw new Error(`font ${family} ${style} is not available in Figma`);
@@ -5493,7 +8428,7 @@ ${body}
     return font;
   }
   async function writeStyle(style, spec, s) {
-    style.fontName = await fontFor2(spec.fontFamily, spec.fontStyle, s);
+    style.fontName = await fontFor3(spec.fontFamily, spec.fontStyle, s);
     if (spec.fontSize !== undefined)
       style.fontSize = spec.fontSize;
     if (spec.lineHeight)
@@ -5941,178 +8876,8 @@ ${body}
     });
   };
 
-  // plugin-src/gridtools.ts
-  var DEFAULT_ARROW_STYLE = { strokeVariableId: null, color: { r: 0.576, g: 0.839, b: 0.933 }, weight: 2, cornerRadius: 20 };
-  var DARK_FILL = { type: "SOLID", color: { r: 0.067, g: 0.067, b: 0.067 } };
-  async function finish(board, screens, stale, moves, shrink, extras) {
-    if (extras)
-      applyExtras(board, extras);
-    const moved = await applyMoves(board, screens, moves);
-    const fit = await refitGroups(board, screens);
-    const size = await resizeBoard(board, screens, shrink, fit.extent);
-    const reroute = await rerouteBoards([board]);
-    return ok({ boardId: board.node.id, moved, stale: stale.map((s) => ({ ...s, fixedTo: { ...s.fixedTo } })), board: size, reroute, ...fit.active ? { groups: fit.summary } : {} });
-  }
-  var wholeNumber = (v, fallback, min) => {
-    const n = v ?? fallback;
-    return Number.isInteger(n) && n >= min ? n : null;
-  };
-  var moveScreen = async (args) => {
-    const id = str(args, "id");
-    const col = num(args, "col");
-    const row = num(args, "row");
-    if (!id || col === undefined || row === undefined)
-      return fail("move_screen needs id, col and row.");
-    const node = await sceneById(id);
-    if (!node)
-      return fail(`No node ${id}.`);
-    const stored = readMeta(node, SCREEN_KEY, parseScreenMeta);
-    if (!stored)
-      return fail(`${node.name} (${node.id}) is not an adopted screen. Run adopt_board first.`);
-    const board = await loadBoard(stored.boardId);
-    const { screens, stale } = await loadScreens(board);
-    const plan = planMove(cellsOf(screens), node.id, col, row, bool(args, "swap", false));
-    if (!plan.ok)
-      return fail(plan.error);
-    const groupArg = str(args, "group");
-    if (groupArg !== undefined) {
-      const target = await checkGroupArg(board.node.id, groupArg);
-      if (!target.ok)
-        return fail(target.error);
-      const set = await setScreenGroup(board, screens, node.id, target.groupId);
-      if (!set.ok)
-        return fail(set.error);
-    }
-    return finish(board, screens, stale, plan.moves, false);
-  };
-  async function insertAlong(args, axis) {
-    const tool = axis === "col" ? "insert_columns" : "insert_rows";
-    const boardId = str(args, "boardId");
-    const after = num(args, "after");
-    if (!boardId || after === undefined)
-      return fail(`${tool} needs boardId and after.`);
-    const count = wholeNumber(num(args, "count"), 1, 1);
-    if (count === null || count > 50)
-      return fail("count must be a whole number from 1 to 50.");
-    if (!Number.isInteger(after) || after < -1)
-      return fail("after must be a whole number, -1 or more (-1 inserts before the first).");
-    const board = await loadBoard(boardId);
-    const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, shiftPlan(cellsOf(screens), axis, after, count), false, shiftedExtras(board.meta, axis, after, count));
-  }
-  var insertColumns = (args) => insertAlong(args, "col");
-  var insertRows = (args) => insertAlong(args, "row");
-  var compactBoard = async (args) => {
-    const boardId = str(args, "boardId");
-    if (!boardId)
-      return fail("compact_board needs boardId.");
-    const board = await loadBoard(boardId);
-    const { screens, stale } = await loadScreens(board);
-    return finish(board, screens, stale, compactPlan(cellsOf(screens)), true, compactedExtras(board.meta, cellsOf(screens)));
-  };
-  async function fontFor3(text) {
-    const current = text.fontName;
-    const candidates = [...current === figma.mixed ? [] : [current], { family: "Inter", style: "Bold" }, { family: "Inter", style: "Regular" }];
-    for (const font of candidates) {
-      try {
-        await figma.loadFontAsync(font);
-        return font;
-      } catch {
-        continue;
-      }
-    }
-    throw new Error("Could not load a font for the board heading.");
-  }
-  async function findStyleBoard() {
-    for (const n of figma.currentPage.children) {
-      if (!readMeta(n, BOARD_KEY, parseBoardMeta))
-        continue;
-      try {
-        return await loadBoard(n.id);
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  }
-  var createBoard = async (args) => {
-    const name = str(args, "name");
-    if (!name)
-      return fail("create_board needs name.");
-    const colWidth = num(args, "colWidth") ?? 700;
-    const rowHeight = num(args, "rowHeight") ?? 1112;
-    const screenW = num(args, "screenW") ?? 393;
-    const screenH = num(args, "screenH") ?? 852;
-    const cols = wholeNumber(num(args, "cols"), 4, 1);
-    const rows = wholeNumber(num(args, "rows"), 2, 1);
-    if (cols === null || rows === null || cols > 50 || rows > 50)
-      return fail("cols and rows must be whole numbers from 1 to 50.");
-    if (![colWidth, rowHeight, screenW, screenH].every((n) => n > 0))
-      return fail("colWidth, rowHeight, screenW and screenH must be positive.");
-    if (colWidth < screenW || rowHeight < screenH)
-      return fail("colWidth and rowHeight must be at least the screen size, or the screens overlap.");
-    const page = figma.currentPage;
-    const styleBoard = await findStyleBoard();
-    const margin = styleBoard?.meta.margin ?? 80;
-    const labelOffset = styleBoard?.meta.labelOffset ?? 80;
-    const arrowStyle = styleBoard?.meta.arrowStyle ?? DEFAULT_ARROW_STYLE;
-    const rects = page.children.map(rectOf);
-    const x = num(args, "x") ?? (rects.length ? Math.max(...rects.map((r) => r.x + r.width)) + 200 : 0);
-    const y = num(args, "y") ?? (rects.length ? Math.min(...rects.map((r) => r.y)) : 0);
-    const grid = { originX: x + margin, originY: y + margin + labelOffset, colWidth, rowHeight, screenW, screenH, labelOffset, margin };
-    const bounds = boardBounds(grid, [{ col: cols - 1, row: rows - 1 }]);
-    const styleBg = styleBoard?.node;
-    let bg;
-    if (styleBg?.type === "RECTANGLE") {
-      bg = styleBg.clone();
-      bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, "");
-    } else {
-      bg = figma.createRectangle();
-      const fills = styleBg && "fills" in styleBg && styleBg.fills !== figma.mixed ? styleBg.fills : [DARK_FILL];
-      bg.fills = fills;
-      if (styleBg && "cornerRadius" in styleBg && typeof styleBg.cornerRadius === "number")
-        bg.cornerRadius = styleBg.cornerRadius;
-    }
-    page.appendChild(bg);
-    bg.name = `Board background · ${name}`;
-    bg.x = bounds.x;
-    bg.y = bounds.y;
-    bg.resize(bounds.width, bounds.height);
-    const headingNode = styleBoard?.meta.headingId ? await sceneById(styleBoard.meta.headingId) : null;
-    const headingStyle = headingNode?.type === "TEXT" ? headingNode : page.children.find((c) => c.type === "TEXT" && c.name.startsWith("Board ·")) ?? null;
-    const heading = headingStyle ? headingStyle.clone() : figma.createText();
-    page.appendChild(heading);
-    await figma.loadFontAsync(await fontFor3(heading));
-    heading.fontName = await fontFor3(heading);
-    if (!headingStyle) {
-      heading.fontSize = 48;
-      heading.fills = [{ type: "SOLID", color: { r: 0.949, g: 0.949, b: 0.949 } }];
-    }
-    heading.characters = `Board · ${name}`;
-    heading.name = `Board · ${name}`;
-    heading.x = bounds.x;
-    heading.y = bounds.y - heading.height - 24;
-    const arrows = figma.createFrame();
-    page.appendChild(arrows);
-    arrows.name = `Flow arrows · ${name}`;
-    arrows.fills = [];
-    arrows.clipsContent = false;
-    arrows.resize(1, 1);
-    arrows.x = bounds.x;
-    arrows.y = bounds.y;
-    const meta = { v: 1, kind: "board", ...grid, headingId: heading.id, arrowsGroupId: arrows.id, arrowStyle };
-    bg.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(meta));
-    return ok({
-      boardId: bg.id,
-      headingId: heading.id,
-      arrowsGroupId: arrows.id,
-      bounds,
-      grid: { originX: grid.originX, originY: grid.originY, colWidth, rowHeight, screenW, screenH, cols, rows },
-      styledFrom: styleBoard ? styleBoard.node.id : null
-    });
-  };
-
   // plugin-src/main.ts
+  setGroupObstacleLoader(groupObstacles);
   var handlers = {
     figma_status: status,
     whoami,
@@ -6138,6 +8903,7 @@ ${body}
     update_flow_group: updateFlowGroup,
     delete_flow_group: deleteFlowGroup,
     adopt_flow_groups: adoptFlowGroups,
+    repair_board: repairBoard,
     adopt_board: adoptBoard,
     describe_board: describeBoard,
     create_board: createBoard,
@@ -6180,7 +8946,7 @@ ${body}
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "3b09ebf2", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "dafd06d5", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -6188,7 +8954,7 @@ ${body}
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"3b09ebf2"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"dafd06d5"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }

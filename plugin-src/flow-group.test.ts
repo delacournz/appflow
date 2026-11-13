@@ -11,7 +11,9 @@ import {
     memberContentRect,
     ROUTE_TOP,
     strokeBands,
-    TITLE_GAP,
+    defaultMetrics,
+    titleLineOf,
+    TITLE_PAD_Y,
     titleHeightOf,
     TITLE_SIZE,
     validateNesting,
@@ -21,6 +23,7 @@ import {
     type ConflictGroup,
 } from './flow-group';
 import type { Rect } from './rect';
+import { trackStart, type Band } from './tracks';
 
 const W = 393;
 const H = 852;
@@ -30,12 +33,15 @@ const LANE = 160;
 const BASE = { colWidth: COL, rowHeight: ROW, screenW: W, screenH: H };
 const EDGE = GROUP_PAD + GROUP_STROKE;
 
-type Extras = { colExtra: Record<number, number>; rowExtra: Record<number, number> };
-const sumBefore = (extra: Record<number, number>, i: number): number =>
-    Object.entries(extra).reduce((s, [k, v]) => (Number(k) <= i ? s + v : s), 0);
+type Extras = { colExtra: Band[]; rowExtra: Band[] };
+/** The extra before track `at` (the largest band there), or undefined when none. */
+const at = (bands: Band[], track: number): number | undefined => {
+    const px = bands.filter((b) => b.at === track).map((b) => b.px);
+    return px.length ? Math.max(...px) : undefined;
+};
 const frameAt = (col: number, row: number, e: Extras): Rect => ({
-    x: 1000 + col * COL + sumBefore(e.colExtra, col),
-    y: 2000 + row * ROW + sumBefore(e.rowExtra, row),
+    x: 1000 + trackStart(col, COL, e.colExtra, row),
+    y: 2000 + trackStart(row, ROW, e.rowExtra, col),
     width: W,
     height: H,
 });
@@ -62,7 +68,7 @@ function simulate(groups: SimGroup[], ungrouped: Cell[], e: Extras) {
     const fitted = new Map<string, ConflictGroup>();
     const rectsOf = (g: SimGroup) => (ids.get(g.id) ?? []).map((i) => contentOf.get(i) as Rect);
     for (const g of groups.filter((x) => x.parentId)) {
-        const { box, title } = fitBox(rectsOf(g), [], titleHeightOf(TITLE_SIZE * CHILD_TITLE_SCALE));
+        const { box, title } = fitBox(rectsOf(g), [], defaultMetrics(true));
         fitted.set(g.id, { id: g.id, parentId: g.parentId, box, title });
     }
     for (const g of groups.filter((x) => !x.parentId)) {
@@ -76,7 +82,7 @@ function simulate(groups: SimGroup[], ungrouped: Cell[], e: Extras) {
 const toBoundary = (g: SimGroup): BoundaryGroup => ({ id: g.id, parentId: g.parentId, cells: g.cells });
 const extrasFor = (groups: SimGroup[], ungrouped: Cell[]): Extras =>
     boundaryExtras({ groups: groups.map(toBoundary), ungrouped, base: BASE, laneBand: LANE });
-const none: Extras = { colExtra: {}, rowExtra: {} };
+const none: Extras = { colExtra: [], rowExtra: [] };
 
 describe('memberContentRect', () => {
     test('covers frame plus route line and frame title clearance above', () => {
@@ -96,22 +102,69 @@ describe('memberContentRect', () => {
 });
 
 describe('fitBox', () => {
-    test('pads members by PAD+STROKE and centres the title above', () => {
+    test('pads members by PAD+STROKE and sits the title bar flush on the box top, same x and width', () => {
         const m: Rect = { x: 1000, y: 2000, width: W, height: H };
         const { box, title } = fitBox([m]);
         expect(box).toEqual({ x: 1000 - EDGE, y: 2000 - EDGE, width: W + 2 * EDGE, height: H + 2 * EDGE });
         const th = titleHeightOf(TITLE_SIZE);
         expect(title.height).toBe(th);
-        expect(title.y + title.height + TITLE_GAP).toBe(box.y);
-        expect(title.x + title.width / 2).toBe(box.x + box.width / 2);
+        expect(title.y + title.height).toBe(box.y);
+        expect(title.x).toBe(box.x);
+        expect(title.width).toBe(box.width);
+        expect(th).toBe(titleLineOf(TITLE_SIZE) + 2 * TITLE_PAD_Y);
     });
     test('parent grows over child box and child title', () => {
         const a: Rect = { x: 0, y: 0, width: W, height: H };
         const b: Rect = { x: 700, y: 0, width: W, height: H };
-        const kid = fitBox([b], [], titleHeightOf(TITLE_SIZE * CHILD_TITLE_SCALE));
+        const kid = fitBox([b], [], defaultMetrics(true));
         const parent = fitBox([a], [{ id: 'k', ...kid }]);
         expect(parent.box.x + parent.box.width).toBeGreaterThanOrEqual(kid.box.x + kid.box.width + EDGE);
         expect(parent.box.y).toBeLessThanOrEqual(kid.title.y - EDGE);
+    });
+});
+
+describe('style-aware geometry', () => {
+    const m: Rect = { x: 1000, y: 2000, width: W, height: H };
+    const style = { padding: 100, strokeWeight: 20, titleSize: 40 };
+
+    test('fitBox uses the group padding, stroke and title size', () => {
+        const { box, title } = fitBox([m], [], style);
+        expect(box).toEqual({ x: 880, y: 1880, width: W + 240, height: H + 240 });
+        expect(title.height).toBe(titleHeightOf(40));
+    });
+    test('strokeBands follow the stroke weight', () => {
+        const box: Rect = { x: 0, y: 0, width: 1000, height: 800 };
+        const [top, bottom] = strokeBands(box, 20);
+        expect(top.height).toBe(20 + 2 * GROUP_CLEAR);
+        expect(bottom.y).toBe(800 - 20 - GROUP_CLEAR);
+    });
+    test('boundaryExtras uses each group metrics, wider padding means wider gaps', () => {
+        const groups = (metrics?: typeof style): BoundaryGroup[] => [
+            { id: 'A', cells: cellsOf([0, 0]), ...(metrics ? { metrics } : {}) },
+            { id: 'B', cells: cellsOf([1, 0]), ...(metrics ? { metrics } : {}) },
+        ];
+        const base = boundaryExtras({ groups: groups(), ungrouped: [], base: BASE, laneBand: LANE });
+        const wide = boundaryExtras({ groups: groups({ ...style, padding: 300 }), ungrouped: [], base: BASE, laneBand: LANE });
+        expect(at(wide.colExtra, 1) ?? 0).toBeGreaterThan(at(base.colExtra, 1) ?? 0);
+        const edge = 300 + 20;
+        expect(at(wide.colExtra, 1)).toBe(2 * edge + 2 * GROUP_CLEAR + LANE - (COL - W));
+    });
+    test('groupConflicts flags content within CLEAR of a thick stroke', () => {
+        const { box, title } = fitBox([m], [], style);
+        const inner = box.x + 20 + GROUP_CLEAR - 5;
+        const g: ConflictGroup = { id: 'g', box, title, strokeWeight: 20 };
+        const near: ConflictContent = { kind: 'route', id: 'r', rect: { x: inner, y: box.y + 400, width: 10, height: 10 } };
+        expect(groupConflicts([g], [near]).length).toBeGreaterThan(0);
+        const thin = { ...g, strokeWeight: 4 };
+        expect(groupConflicts([thin], [near])).toEqual([]);
+    });
+    test('content within CLEAR above the title bar is a conflict', () => {
+        const { box, title } = fitBox([m], [], style);
+        const g: ConflictGroup = { id: 'g', box, title, strokeWeight: 20 };
+        const above: ConflictContent = { kind: 'route', id: 'r', rect: { x: box.x + 50, y: title.y - GROUP_CLEAR + 10 - 10, width: 20, height: 10 } };
+        expect(groupConflicts([g], [above]).length).toBeGreaterThan(0);
+        const far: ConflictContent = { ...above, rect: { ...above.rect, y: title.y - GROUP_CLEAR - 20 } };
+        expect(groupConflicts([g], [far])).toEqual([]);
     });
 });
 
@@ -142,9 +195,9 @@ describe('boundaryExtras', () => {
         expect(groupConflicts(bad.groups, bad.contents).length).toBeGreaterThan(0);
 
         const e = extrasFor(groups, []);
-        const needed = 2 * EDGE + 2 * GROUP_CLEAR + titleHeightOf(TITLE_SIZE) + TITLE_GAP + ROUTE_TOP;
-        expect(e.rowExtra[1]).toBe(Math.max(0, needed + LANE - (ROW - H)));
-        expect(e.colExtra).toEqual({});
+        const needed = 2 * EDGE + 2 * GROUP_CLEAR + titleHeightOf(TITLE_SIZE) + ROUTE_TOP;
+        expect(at(e.rowExtra, 1)).toBe(Math.max(0, needed + LANE - (ROW - H)));
+        expect(e.colExtra).toEqual([]);
         const ok = simulate(groups, [], e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
     });
@@ -154,8 +207,8 @@ describe('boundaryExtras', () => {
             { id: 'B', cells: cellsOf([1, 0], [1, 1]) },
         ];
         const e = extrasFor(groups, []);
-        expect(e.rowExtra).toEqual({});
-        expect(e.colExtra[1]).toBe(2 * EDGE + 2 * GROUP_CLEAR + LANE - (COL - W));
+        expect(e.rowExtra).toEqual([]);
+        expect(at(e.colExtra, 1)).toBe(2 * EDGE + 2 * GROUP_CLEAR + LANE - (COL - W));
         const ok = simulate(groups, [], e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
     });
@@ -163,9 +216,9 @@ describe('boundaryExtras', () => {
         const groups: SimGroup[] = [{ id: 'A', cells: cellsOf([0, 0]) }];
         const ungrouped = cellsOf([1, 0]);
         const e = extrasFor(groups, ungrouped);
-        expect(e.colExtra[1]).toBeUndefined();
+        expect(at(e.colExtra, 1)).toBe(EDGE + GROUP_CLEAR + LANE - (COL - W));
         const tight = boundaryExtras({ groups: groups.map(toBoundary), ungrouped, base: BASE, laneBand: 300 });
-        expect(tight.colExtra[1]).toBe(EDGE + GROUP_CLEAR + 300 - (COL - W));
+        expect(at(tight.colExtra, 1)).toBe(EDGE + GROUP_CLEAR + 300 - (COL - W));
         const ok = simulate(groups, ungrouped, e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
     });
@@ -173,7 +226,7 @@ describe('boundaryExtras', () => {
         const groups: SimGroup[] = [{ id: 'B', cells: cellsOf([0, 1]) }];
         const ungrouped = cellsOf([0, 0]);
         const e = extrasFor(groups, ungrouped);
-        expect(e.rowExtra[1]).toBeGreaterThan(0);
+        expect(at(e.rowExtra, 1)).toBeGreaterThan(0);
         const ok = simulate(groups, ungrouped, e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
     });
@@ -185,9 +238,9 @@ describe('boundaryExtras', () => {
             { id: 'D', cells: cellsOf([0, 2], [1, 2]) },
         ];
         const e = extrasFor(groups, []);
-        expect(e.rowExtra[2]).toBeGreaterThan(0);
-        expect(e.rowExtra[1]).toBeUndefined();
-        expect(e.colExtra).toEqual({});
+        expect(at(e.rowExtra, 2)).toBeGreaterThan(0);
+        expect(at(e.rowExtra, 1)).toBeUndefined();
+        expect(e.colExtra).toEqual([]);
         const ok = simulate(groups, [], e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
     });
@@ -199,11 +252,11 @@ describe('boundaryExtras', () => {
             { id: 'Other', cells: cellsOf([0, 2]) },
         ];
         const e = extrasFor(groups, []);
-        const childTitle = titleHeightOf(TITLE_SIZE * CHILD_TITLE_SCALE);
-        const childNeeded = 2 * EDGE + 2 * GROUP_CLEAR + childTitle + TITLE_GAP + ROUTE_TOP;
-        expect(e.rowExtra[1]).toBe(Math.max(0, childNeeded + LANE - (ROW - H)));
-        const parentNeeded = 2 * EDGE + 2 * GROUP_CLEAR + titleHeightOf(TITLE_SIZE) + TITLE_GAP + ROUTE_TOP;
-        expect(e.rowExtra[2]).toBeGreaterThanOrEqual(Math.max(0, parentNeeded + LANE - (ROW - H)));
+        const childTitle = titleHeightOf(defaultMetrics(true).titleSize);
+        const childNeeded = 2 * EDGE + 2 * GROUP_CLEAR + childTitle + ROUTE_TOP;
+        expect(at(e.rowExtra, 1)).toBe(Math.max(0, childNeeded + LANE - (ROW - H)));
+        const parentNeeded = 2 * EDGE + 2 * GROUP_CLEAR + titleHeightOf(TITLE_SIZE) + ROUTE_TOP;
+        expect(at(e.rowExtra, 2)).toBeGreaterThanOrEqual(Math.max(0, parentNeeded + LANE - (ROW - H)));
         const ok = simulate(groups, [], e);
         expect(groupConflicts(ok.groups, ok.contents)).toEqual([]);
         expect(validateNesting(ok.groups)).toEqual([]);

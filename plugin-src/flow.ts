@@ -1,5 +1,10 @@
 import type { JsonObject, JsonValue } from '../shared/protocol';
-import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchScreenAt, matchTrigger, modeOf, nearestUnclaimed, type TriggerCandidate } from './adopt';
+import { assignScreenTexts, extrasFor, inferGrid, longestSegmentMid, matchTrigger, modeOf, type TriggerCandidate } from './adopt';
+import { boardMissingMessage } from './board-missing';
+import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restoreDelta, type ScreenRef } from './arrow-adopt';
+import { arrowsContainerName, isArrowsContainerType, recoverableArrowIds, recoveryIndex } from './arrow-recovery';
+import { isLabelsContainerName, labelsContainerName, labelsInsertIndex, labelsToMigrate, stackingNeeds } from './arrow-labels';
+import { linkBadges } from './badge-link';
 import { classifyArrow, orderPath } from './flowlint';
 import {
     ARROW_KEY,
@@ -24,16 +29,18 @@ import { fitRoute } from './anatomy';
 import { liftOutOfGroups } from './lift';
 import { isScreenGroupName } from './screen-group';
 import { fail, ok, str, bool, type Handler } from './types';
-import { extraBetween, trackOf } from './tracks';
-import { type Exit, type Pt, type Rect, type Route } from './route';
-import { clearLabel, labelObstacles, type GroupObstacle } from './route-avoid';
+import { leadRoute, startLabelAnchor, type Exit, type Pt, type Rect, type Route } from './route';
+import { clearLabel, labelObstacles, LABEL_PAD, separateLabels, titleTextRect, type GroupObstacle } from './route-avoid';
+import { widenedBetween } from './grid';
+import { labelLimitBetween } from './grid-plan';
 import { planRoutes as planRoutesPure, type Endpoints, type Plan } from './route-plan';
 
 const norm = (id: string) => id.replace('-', ':');
 const DOT_SIZE = 10;
 
 type Style = BoardMeta['arrowStyle'];
-export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin };
+/** `labels` is the container holding every arrow label above all arrow lines; absent until `ensureLabels` runs on a board. */
+export type Board = { node: SceneNode; meta: BoardMeta; arrows: SceneNode & ChildrenMixin; labels?: (SceneNode & ChildrenMixin) | null; recovered?: string };
 type ArrowEntry = { group: GroupNode; meta: ArrowMeta };
 
 export async function sceneById(id: string): Promise<SceneNode | null> {
@@ -68,12 +75,103 @@ export function readMeta<T>(node: BaseNode, key: string, parse: (raw: string) =>
 
 export async function loadBoard(boardId: string): Promise<Board> {
     const node = await sceneById(boardId);
-    if (!node) throw new Error(`No board ${boardId}.`);
+    if (!node) throw new Error(boardMissingMessage(boardId));
     const meta = readMeta(node, BOARD_KEY, parseBoardMeta);
     if (!meta) throw new Error(`${boardId} has no flowbridge board data. Run adopt_board first.`);
-    const arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
-    if (!arrows || !('children' in arrows)) throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone.`);
-    return { node, meta, arrows: arrows as SceneNode & ChildrenMixin };
+    let boardMeta = meta;
+    let recovered: string | undefined;
+    let arrows = await figma.getNodeByIdAsync(meta.arrowsGroupId);
+    if (!arrows || arrows.removed || !isArrowsContainerType(arrows.type) || !('children' in arrows)) {
+        const rebuilt = await rebuildArrowsContainer(node, meta);
+        if (!rebuilt) throw new Error(`The arrows group ${meta.arrowsGroupId} of board ${boardId} is gone and no arrow data was found to rebuild it.`);
+        arrows = rebuilt.container;
+        boardMeta = { ...meta, arrowsGroupId: rebuilt.container.id };
+        node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+        recovered = `Arrows container ${meta.arrowsGroupId} was lost; rebuilt ${rebuilt.container.id} and moved ${rebuilt.moved} arrow groups into it.`;
+    }
+    const labelsNode = boardMeta.labelsGroupId ? await figma.getNodeByIdAsync(boardMeta.labelsGroupId) : null;
+    const labels = labelsNode && 'children' in labelsNode && !labelsNode.removed ? (labelsNode as SceneNode & ChildrenMixin) : null;
+    return { node, meta: boardMeta, arrows: arrows as SceneNode & ChildrenMixin, labels, ...(recovered ? { recovered } : {}) };
+}
+
+/**
+ * Rebuilds a lost arrows container: a FRAME (never a group, which dissolves when emptied) with no fill, no clipping, at
+ * 0,0 and 1x1 so children keep their absolute coordinates, directly below the labels container (else on top). Moves in
+ * every node beside the board that carries arrow data for it. Null when there is none.
+ */
+async function rebuildArrowsContainer(boardNode: SceneNode, meta: BoardMeta): Promise<{ container: FrameNode; moved: number } | null> {
+    const parent = boardNode.parent;
+    if (!parent || !('children' in parent)) return null;
+    const candidates = parent.children.map((c) => ({ node: c, boardId: readMeta(c, ARROW_KEY, parseArrowMeta)?.boardId ?? null }));
+    const ids = new Set(recoverableArrowIds(candidates.map((c) => ({ id: c.node.id, boardId: c.boardId })), boardNode.id));
+    const arrows = candidates.filter((c) => ids.has(c.node.id)).map((c) => c.node);
+    if (!arrows.length) return null;
+    const frame = figma.createFrame();
+    frame.name = arrowsContainerName(boardNode.name);
+    frame.fills = [];
+    frame.clipsContent = false;
+    frame.resize(1, 1);
+    frame.x = 0;
+    frame.y = 0;
+    parent.insertChild(recoveryIndex(parent.children.map((c) => c.id), meta.labelsGroupId ?? null), frame);
+    for (const n of arrows) moveInto(n, frame);
+    return { container: frame, moved: arrows.length };
+}
+
+/**
+ * The board's `Flow arrow labels · {board}` container, found by id, then by name beside the arrows container, else
+ * created directly above the arrows container. Records its id on the board data, so every later run reuses it.
+ */
+export async function ensureLabels(board: Board): Promise<SceneNode & ChildrenMixin> {
+    if (board.labels && !board.labels.removed) {
+        const wanted = labelsContainerName(board.node.name, board.arrows.name);
+        if (board.labels.name !== wanted && isLabelsContainerName(board.labels.name)) board.labels.name = wanted;
+        return board.labels;
+    }
+    const parent = board.arrows.parent;
+    if (!parent || !('children' in parent)) throw new Error(`The arrows group of board ${board.node.id} has no parent for a labels container.`);
+    const name = labelsContainerName(board.node.name, board.arrows.name);
+    let found = parent.children.find((c): c is FrameNode => c.type === 'FRAME' && isLabelsContainerName(c.name) && c.name === name) ?? null;
+    if (!found) {
+        found = figma.createFrame();
+        found.name = name;
+        found.fills = [];
+        found.clipsContent = false;
+        found.resize(1, 1);
+        parent.insertChild(parent.children.indexOf(board.arrows as SceneNode) + 1, found);
+        const at = toLocal(parent, rectOf(board.arrows));
+        found.x = at.x;
+        found.y = at.y;
+    }
+    board.labels = found;
+    board.meta = { ...board.meta, labelsGroupId: found.id };
+    board.node.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(board.meta));
+    return found;
+}
+
+/** Moves `node` into `container` keeping its absolute position, whatever either container's own offset. */
+export function moveInto(node: SceneNode, container: SceneNode & ChildrenMixin): void {
+    const before = rectOf(node);
+    container.appendChild(node);
+    const d = restoreDelta(before, rectOf(node));
+    if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+        node.x += d.x;
+        node.y += d.y;
+    }
+}
+
+/** Moves the labels of these arrows out of their arrow groups into the labels container. Idempotent; returns how many moved. */
+export async function migrateLabels(board: Board, metas: readonly ArrowMeta[]): Promise<number> {
+    const labels = await ensureLabels(board);
+    const nodes = (await Promise.all(metas.map((m) => sceneById(m.labelId)))).flatMap((n) => (n ? [n] : []));
+    const ids = new Set(labelsToMigrate(nodes.map((n) => ({ labelId: n.id, labelParentId: n.parent?.id ?? null })), labels.id));
+    let moved = 0;
+    for (const n of nodes) {
+        if (!ids.has(n.id)) continue;
+        moveInto(n, labels);
+        moved++;
+    }
+    return moved;
 }
 
 export function listArrows(board: Board): ArrowEntry[] {
@@ -86,18 +184,30 @@ export function listArrows(board: Board): ArrowEntry[] {
     return out;
 }
 
+/** Every screen frame that belongs to the board, with its rect. */
+export function boardScreens(board: Board): { id: string; rect: Rect }[] {
+    const parent = board.node.parent;
+    if (!parent || !('children' in parent)) return [];
+    return collectScreens(parent.children)
+        .filter((s) => readMeta(s.frame, SCREEN_KEY, parseScreenMeta)?.boardId === board.node.id)
+        .map((s) => ({ id: s.frame.id, rect: rectOf(s.frame) }));
+}
+
+/** Rects only, for keeping lines out of screens that are not their ends. */
+export const boardScreenRects = (board: Board): Rect[] => boardScreens(board).map((s) => s.rect);
+
 /** The base gap between screen columns. Widened boundaries (extras) do not change it: lanes stay in the base gap. */
 const gutterOf = (m: BoardMeta) => m.colWidth - m.screenW;
 
 /**
  * Where labels must stop for an arrow whose source-to-target span crosses a widened column boundary: the end of the
- * base gutter beside the source. Undefined when no extra lies in the span, so uniform boards behave as before.
+ * base gutter beside the source. Undefined when the cells the two screens sit in are no further apart than the plain
+ * grid makes them, so uniform boards behave as before. Bands make this depend on the rows of both screens, so it is
+ * read off their cell rects (`widenedBetween`).
  */
 function labelLimitOf(meta: BoardMeta, ends: { source: Rect; target: Rect }): number | undefined {
-    if (!meta.colExtra) return undefined;
-    const from = trackOf(ends.source.x - meta.originX, meta.colWidth, meta.colExtra);
-    const to = trackOf(ends.target.x - meta.originX, meta.colWidth, meta.colExtra);
-    return extraBetween(meta.colExtra, from, to) > 0 ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
+    if (meta.spacing === 'grouped') return labelLimitBetween(meta, ends.source, ends.target);
+    return widenedBetween(meta, ends.source, ends.target) ? ends.source.x + ends.source.width + gutterOf(meta) : undefined;
 }
 
 async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
@@ -108,8 +218,8 @@ async function endpointsOf(meta: ArrowMeta): Promise<Endpoints | null> {
 }
 
 /** Plans the board's arrows. `groups` are the board's group boxes and titles; without them the plan is the plain one. */
-function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = []): Plan[] {
-    return planRoutesPure({ gutter: gutterOf(meta), limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => g.box) }, items);
+function planRoutes(meta: BoardMeta, items: { id: string; ends: Endpoints }[], groups: readonly GroupObstacle[] = [], screens: readonly Rect[] = []): Plan[] {
+    return planRoutesPure({ gutter: gutterOf(meta), screens, rowGap: meta.rowHeight - meta.screenH, limits: items.map((it) => labelLimitOf(meta, it.ends)), boxes: groups.map((g) => ({ ...g.box, ...(g.strokeWeight ? { strokeWeight: g.strokeWeight } : {}) })), titles: groups.flatMap((g) => titleTextRect(g) ?? []) }, items);
 }
 
 type GroupObstacleLoader = (board: Board) => Promise<GroupObstacle[]>;
@@ -192,8 +302,9 @@ async function newDot(parent: SceneNode & ChildrenMixin, style: Style): Promise<
     return dot;
 }
 
-async function newLabel(parent: SceneNode & ChildrenMixin, style: Style, label: string): Promise<FrameNode> {
-    const template = firstOf(parent, (n): n is FrameNode => n.type === 'FRAME' && n.name.startsWith('Label ·'));
+async function newLabel(parent: SceneNode & ChildrenMixin, style: Style, label: string, alsoFrom: (SceneNode & ChildrenMixin) | null = null): Promise<FrameNode> {
+    const isLabel = (n: SceneNode): n is FrameNode => n.type === 'FRAME' && n.name.startsWith('Label ·');
+    const template = firstOf(parent, isLabel) ?? (alsoFrom ? firstOf(alsoFrom, isLabel) : null);
     let frame: FrameNode;
     if (template) {
         frame = template.clone();
@@ -240,13 +351,35 @@ async function partsOf(meta: ArrowMeta): Promise<{ vector: VectorNode; dot: Elli
 async function applyRoute(parts: { vector: VectorNode; dot: EllipseNode; label: FrameNode }, route: Route, style: Style, groups: readonly GroupObstacle[] = []): Promise<string | null> {
     await writeVector(parts.vector, route.points, style);
     centre(parts.dot, route.dot);
+    const size = { width: parts.label.width, height: parts.label.height };
+    const anchor = startLabelAnchor(route, size);
     if (!groups.length) {
-        centre(parts.label, route.labelAnchor);
+        centre(parts.label, anchor);
         return null;
     }
-    const placed = clearLabel(route, { width: parts.label.width, height: parts.label.height }, labelObstacles(groups));
-    centre(parts.label, placed.ok ? placed.anchor : route.labelAnchor);
+    const placed = clearLabel(leadRoute(route, anchor), size, labelObstacles(groups));
+    centre(parts.label, placed.ok ? placed.anchor : anchor);
     return placed.ok ? null : placed.blocked;
+}
+
+/**
+ * Board-wide label pass, run after the arrows are drawn so every label has its real size. Slides each label in
+ * `placed` (already in `stableArrowOrder`) along its own path until it clears the other labels, `fixed` ones
+ * included, and the group strokes and titles. Returns the ids it could not clear.
+ */
+async function separateBoardLabels(placed: { id: string; route: Route; label: FrameNode }[], fixed: readonly FrameNode[], groups: readonly GroupObstacle[]): Promise<string[]> {
+    const items = placed.map((p) => {
+        const r = rectOf(p.label);
+        const anchor = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        return { id: p.id, route: leadRoute(p.route, anchor), anchor, size: { width: r.width, height: r.height } };
+    });
+    const res = separateLabels(items, labelObstacles(groups), LABEL_PAD, fixed.map(rectOf));
+    for (const [i, p] of placed.entries()) {
+        const at = res.anchors.get(p.id);
+        const was = (items[i] as (typeof items)[number]).anchor;
+        if (at && (at.x !== was.x || at.y !== was.y)) centre(p.label, at);
+    }
+    return res.blocked;
 }
 
 export type ScreenNode = { frame: FrameNode; group: GroupNode | null };
@@ -277,6 +410,17 @@ export function collectTexts(children: readonly SceneNode[], depth = 0): TextNod
     return out;
 }
 
+/** `Badge · {name}` pills: loose at the top level, inside `Screen · …` groups and inside sections. */
+export function collectBadges(children: readonly SceneNode[], depth = 0): GroupNode[] {
+    const out: GroupNode[] = [];
+    for (const c of children) {
+        if (c.type !== 'GROUP' && c.type !== 'SECTION') continue;
+        if (c.type === 'GROUP' && c.name.startsWith('Badge · ')) out.push(c);
+        else if ((c.type === 'GROUP' && isScreenGroupName(c.name)) || (c.type === 'SECTION' && depth < 2)) out.push(...collectBadges(c.children, depth + 1));
+    }
+    return out;
+}
+
 export const groupIdOf = (n: ScreenNode): string | null => n.group?.id ?? null;
 
 function holdsScreen(node: SceneNode, boardId: string, depth = 0): boolean {
@@ -285,14 +429,20 @@ function holdsScreen(node: SceneNode, boardId: string, depth = 0): boolean {
     return false;
 }
 
-/** Keeps the arrows group above every screen of the board (frames and `Screen · …` groups), so start dots stay visible. */
+/**
+ * Keeps the arrows container above every screen of the board (frames and `Screen · …` groups), so start dots stay
+ * visible, and the labels container directly above it, so every label paints over every line.
+ */
 export function raiseArrows(board: Board): void {
     const parent = board.arrows.parent;
     if (!parent || !('children' in parent)) return;
-    const kids = parent.children;
-    const at = kids.indexOf(board.arrows as SceneNode);
-    const screenAbove = kids.some((k, i) => i > at && holdsScreen(k, board.node.id));
-    if (screenAbove) parent.insertChild(kids.length - 1, board.arrows as SceneNode);
+    const labels = board.labels && !board.labels.removed && board.labels.parent === parent ? board.labels : null;
+    const need = stackingNeeds(parent.children.map((k) => k.id), (id) => {
+        const k = parent.children.find((c) => c.id === id);
+        return !!k && k.id !== labels?.id && holdsScreen(k, board.node.id);
+    }, board.arrows.id, labels?.id ?? null);
+    if (need.raiseArrows) parent.insertChild(parent.children.length - 1, board.arrows as SceneNode);
+    if (need.placeLabels && labels) parent.insertChild(labelsInsertIndex(parent.children.map((k) => k.id), board.arrows.id), labels as SceneNode);
 }
 
 function writeArrowMeta(group: GroupNode, meta: ArrowMeta): void {
@@ -325,6 +475,7 @@ export const connect: Handler = async (args) => {
     const boardId = str(args, 'boardId') ?? readMeta(from, SCREEN_KEY, parseScreenMeta)?.boardId;
     if (!boardId) return fail(`${from.name} (${from.id}) is not on an adopted board. Run adopt_board, or pass boardId.`);
     const board = await loadBoard(boardId);
+    const labelsBox = await ensureLabels(board);
 
     const existing = listArrows(board);
     const match = existing.find((a) => a.meta.from === from.id && a.meta.to === to.id && a.meta.trigger === (trigger?.id ?? null));
@@ -332,24 +483,31 @@ export const connect: Handler = async (args) => {
 
     const others = (await orderedEntries(existing.filter((a) => a !== match))).flatMap((o) => (o.ends ? [{ id: o.entry.group.id, ends: o.ends }] : []));
     const groups = await obstaclesOf(board);
-    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }], groups);
+    const plans = planRoutes(board.meta, [...others, { id: 'new', ends }], groups, boardScreenRects(board));
     const mine = plans[plans.length - 1] as Plan;
     if (!mine.route) return fail(mine.error ?? 'Could not route the arrow.');
     const route = mine.route;
 
     let parts = match ? await partsOf(match.meta) : null;
-    if (match && !parts) match.group.remove();
+    if (match && !parts) {
+        const staleLabel = await sceneById(match.meta.labelId);
+        if (staleLabel && staleLabel.parent !== match.group) staleLabel.remove();
+        match.group.remove();
+    }
     const style = board.meta.arrowStyle;
     if (!parts) {
         const vector = await newVector(board.arrows, style, `Arrow · ${label}`);
         const dot = await newDot(board.arrows, style);
-        const lab = await newLabel(board.arrows, style, label);
+        const lab = await newLabel(labelsBox, style, label, board.arrows);
         parts = { vector, dot, label: lab };
     } else {
+        if (parts.label.parent !== labelsBox) moveInto(parts.label, labelsBox);
         await setLabelText(parts.label, label);
         parts.vector.name = `Arrow · ${label}`;
     }
     const blocked = await applyRoute(parts, route, style, groups);
+    const fixedLabels = (await Promise.all(existing.filter((a) => a !== match).map((a) => partsOf(a.meta)))).flatMap((p) => (p ? [p.label] : []));
+    const crowded = (await separateBoardLabels([{ id: 'new', route, label: parts.label }], fixedLabels, groups)).length > 0;
 
     const meta: ArrowMeta = {
         v: 1,
@@ -369,7 +527,7 @@ export const connect: Handler = async (args) => {
     if (match && parts.vector.parent === match.group) {
         group = match.group;
     } else {
-        group = figma.group([parts.vector, parts.dot, parts.label], board.arrows);
+        group = figma.group([parts.vector, parts.dot], board.arrows);
     }
     group.name = arrowGroupName(from.name, to.name, label);
     writeArrowMeta(group, meta);
@@ -390,7 +548,9 @@ export const connect: Handler = async (args) => {
         prototypeUpdated,
         backwards: route.backwards,
         updated: !!match,
-        ...(blocked ? { warnings: [`label overlaps a group box: ${blocked}`] } : {}),
+        ...(blocked || crowded || mine.warning || board.recovered
+            ? { warnings: [...(board.recovered ? [board.recovered] : []), ...(blocked ? [`label overlaps a group box: ${blocked}`] : []), ...(crowded ? ['label overlaps another arrow label and no spot on its path is clear'] : []), ...(mine.warning ? [mine.warning] : [])] }
+            : {}),
     });
 };
 
@@ -411,17 +571,30 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
     const deleted: JsonObject[] = [];
     const errors: JsonObject[] = [];
     const warnings: JsonObject[] = [];
+    let obstacleCount = 0;
     for (const board of boards) {
-        const ordered = await orderedEntries(listArrows(board));
+        board.node.locked = true;
+        if (board.recovered) warnings.push({ boardId: board.node.id, warning: board.recovered });
+        const entries = listArrows(board);
+        await migrateLabels(board, entries.map((e) => e.meta));
+        const ordered = await orderedEntries(entries);
         for (const o of ordered) {
             if (!o.ends) deleted.push({ arrowGroupId: o.entry.group.id, name: o.entry.group.name, from: o.entry.meta.from, to: o.entry.meta.to });
         }
         const live = ordered.flatMap((o) => (o.ends ? [{ entry: o.entry, ends: o.ends }] : []));
         const groups = await obstaclesOf(board);
-        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups);
+        obstacleCount += groups.length;
+        const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups, boardScreenRects(board));
+        const drawn: { id: string; route: Route; label: FrameNode }[] = [];
+        const kept: FrameNode[] = [];
         for (const [i, l] of live.entries()) {
             const plan = plans[i] as Plan;
-            if (only && !only.has(l.entry.group.id)) continue;
+            if (only && !only.has(l.entry.group.id)) {
+                const keptParts = await partsOf(l.entry.meta);
+                if (keptParts) kept.push(keptParts.label);
+                continue;
+            }
+            if (plan.warning) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: plan.warning });
             if (l.ends.triggerMissing) warnings.push({ arrowGroupId: l.entry.group.id, warning: 'trigger node is gone; routed from the screen edge' });
             if (!plan.route) {
                 errors.push({ arrowGroupId: l.entry.group.id, error: plan.error });
@@ -435,11 +608,16 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
             const blocked = await applyRoute(parts, plan.route, board.meta.arrowStyle, groups);
             if (blocked) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
             rerouted.push(l.entry.group.id);
+            drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label });
             if (plan.route.backwards) backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
+        }
+        for (const id of await separateBoardLabels(drawn, kept, groups)) {
+            const meta = live.find((l) => l.entry.group.id === id)?.entry.meta;
+            warnings.push({ arrowGroupId: id, label: meta?.label ?? '', warning: 'label overlaps another arrow label and no spot on its path is clear' });
         }
         raiseArrows(board);
     }
-    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, reroutedIds: rerouted, backwards, deleted, errors, warnings };
+    return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, groupObstacles: obstacleCount, reroutedIds: rerouted, backwards, deleted, errors, warnings };
 }
 
 export const rerouteFlow: Handler = async (args) => {
@@ -449,7 +627,7 @@ export const rerouteFlow: Handler = async (args) => {
     return ok(await rerouteBoards(boards, only));
 };
 
-type Reason = 'no-arrowhead' | 'tail-outside-board' | 'no-source-screen' | 'no-target-screen' | 'no-start-dot' | 'no-label';
+type Reason = 'no-arrowhead' | 'tail-outside-board' | 'no-source-screen' | 'no-target-screen' | 'ambiguous-source' | 'ambiguous-target' | 'same-screen' | 'incomplete-group' | 'no-start-dot' | 'no-label';
 
 const inside = (p: Pt, r: Rect, pad = 0) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
 
@@ -498,7 +676,13 @@ export const adoptBoard: Handler = async (args) => {
     }
     const arrowsGroup = groups[0] as SceneNode & ChildrenMixin;
 
-    const siblings = parent.children.filter((c) => c.id !== boardNode.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
+    const prevBoardMeta = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const labelsHolder =
+        (prevBoardMeta?.labelsGroupId ? parent.children.find((c) => c.id === prevBoardMeta.labelsGroupId) : null) ??
+        parent.children.find((c) => 'children' in c && isLabelsContainerName(c.name) && c.name === labelsContainerName(boardNode.name, arrowsGroup.name)) ??
+        null;
+    const labelsKids = labelsHolder && 'children' in labelsHolder ? [...labelsHolder.children] : [];
+    const siblings = parent.children.filter((c) => c.id !== boardNode.id && c.id !== labelsHolder?.id && !groups.some((g) => g.id === c.id) && !c.getSharedPluginData(FLOW_NAMESPACE, GROUP_LAYER_KEY));
     const found = collectScreens(siblings).filter((c) => {
         const r = rectOf(c.frame);
         return inside({ x: r.x, y: r.y }, bounds, 1) && r.x + c.frame.width <= bounds.x + bounds.width + 1 && r.y + c.frame.height <= bounds.y + bounds.height + 1;
@@ -518,7 +702,9 @@ export const adoptBoard: Handler = async (args) => {
 
     const texts = collectTexts(siblings).map((t) => ({ id: t.id, name: t.name, rect: rectOf(t) }));
     const style = readStyle(groups);
-    const boardMeta: BoardMeta = {
+    const prevBoard = readMeta(boardNode, BOARD_KEY, parseBoardMeta);
+    const overridden = typeof args.colWidth === 'number' || typeof args.rowHeight === 'number';
+    const fresh: BoardMeta = {
         v: 1,
         kind: 'board',
         originX: grid.originX,
@@ -535,6 +721,8 @@ export const adoptBoard: Handler = async (args) => {
         arrowsGroupId: arrowsGroup.id,
         arrowStyle: style,
     };
+    const rerun = !!prevBoard && !overridden;
+    const boardMeta: BoardMeta = prevBoard && rerun ? { ...prevBoard, arrowsGroupId: arrowsGroup.id } : fresh;
 
     const triggerCache = new Map<string, TriggerCandidate[]>();
     const triggersIn = (s: { id: string; node: FrameNode }): TriggerCandidate[] => {
@@ -547,101 +735,239 @@ export const adoptBoard: Handler = async (args) => {
         return list;
     };
 
-    const allChildren = groups.flatMap((g) => [...g.children]);
-    const dots = allChildren
-        .filter((c): c is EllipseNode => c.type === 'ELLIPSE' && c.width <= 16 && c.height <= 16)
-        .map((c) => ({ id: c.id, node: c, center: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
-    const labels = allChildren
-        .filter((c): c is FrameNode => c.type === 'FRAME' && c.name.startsWith('Label ·'))
-        .map((c) => ({ id: c.id, node: c, center: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
-    const claimed = new Set<string>();
-
-    const unmatched: { id: string; name: string; reason: Reason }[] = [];
-    const planned: { vector: VectorNode; dot: EllipseNode; label: FrameNode; labelText: string; from: string; to: string; trigger: string | null; points: Pt[] }[] = [];
+    const refs: ScreenRef[] = screenRects.map((s) => ({ id: s.id, name: s.node.name, rect: s.rect }));
+    const unmatched: { id: string; name: string; reason: Reason; candidates?: string[] }[] = [];
+    type Plan1 = { vector: VectorNode; dot: EllipseNode; label: FrameNode; labelText: string; from: string; to: string; trigger: string | null; points: Pt[]; holder: GroupNode | null; stale: boolean; prior: ArrowMeta | null };
+    const planned: Plan1[] = [];
     let outsideBoard = 0;
+    let arrowsKept = 0;
 
-    for (const v of allChildren) {
-        if (v.type !== 'VECTOR') continue;
-        const net = v.vectorNetwork;
-        const local = orderPath(net.vertices, net.segments);
-        if (!local) {
-            unmatched.push({ id: v.id, name: v.name, reason: 'no-arrowhead' });
-            continue;
-        }
+    const absPoints = (v: VectorNode): Pt[] | null => {
+        const local = orderPath(v.vectorNetwork.vertices, v.vectorNetwork.segments);
+        if (!local) return null;
         const t = v.absoluteTransform;
-        const abs = local.map((p) => ({ x: t[0][0] * p.x + t[0][1] * p.y + t[0][2], y: t[1][0] * p.x + t[1][1] * p.y + t[1][2] }));
-        const tail = abs[0] as Pt;
-        const head = abs[abs.length - 1] as Pt;
-        if (!inside(tail, bounds, 40)) {
-            outsideBoard++;
+        return local.map((p) => ({ x: t[0][0] * p.x + t[0][1] * p.y + t[0][2], y: t[1][0] * p.x + t[1][1] * p.y + t[1][2] }));
+    };
+    const triggerFor = (fromId: string, toId: string, tail: Pt, stale: boolean): string | null => {
+        const src = screenRects.find((r) => r.id === fromId);
+        if (!src) return null;
+        const list = triggersIn(src);
+        if (!stale) return matchTrigger(tail, list, toId)?.id ?? null;
+        const toTarget = list.filter((t) => t.destinationId === toId);
+        return toTarget.length === 1 ? (toTarget[0] as TriggerCandidate).id : null;
+    };
+    const textOf = (label: FrameNode, fallback: string): string => firstOf(label, (n): n is TextNode => n.type === 'TEXT')?.characters ?? fallback;
+
+    /** Arrow groups that already exist (loose or stale-linked): a group holding a vector, a start dot and a label. */
+    const holders: GroupNode[] = [];
+    const findHolders = (c: SceneNode & ChildrenMixin, depth: number): void => {
+        for (const k of c.children) {
+            if (k.type !== 'GROUP' && k.type !== 'FRAME') continue;
+            if (k.type === 'GROUP' && k.children.some((x) => x.type === 'VECTOR')) holders.push(k);
+            else if (depth < 3) findHolders(k, depth + 1);
+        }
+    };
+    for (const g of groups) findHolders(g, 0);
+
+    for (const h of holders) {
+        const v = h.children.find((x): x is VectorNode => x.type === 'VECTOR');
+        const dot = h.children.find((x): x is EllipseNode => x.type === 'ELLIPSE');
+        const priorMeta = readMeta(h, ARROW_KEY, parseArrowMeta);
+        const lab =
+            h.children.find((x): x is FrameNode => x.type === 'FRAME' && x.name.startsWith('Label ·')) ??
+            h.children.find((x): x is FrameNode => x.type === 'FRAME') ??
+            labelsKids.find((x): x is FrameNode => x.type === 'FRAME' && x.id === priorMeta?.labelId);
+        if (!v || !dot || !lab) {
+            unmatched.push({ id: h.id, name: h.name, reason: 'incomplete-group' });
             continue;
         }
-        const source = matchScreenAt(tail, screenRects);
-        if (!source) {
-            unmatched.push({ id: v.id, name: v.name, reason: 'no-source-screen' });
+        const prior = readMeta(h, ARROW_KEY, parseArrowMeta);
+        if (prior && prior.vectorId === v.id && prior.dotId === dot.id && prior.labelId === lab.id && screenRects.some((s) => s.id === prior.from) && screenRects.some((s) => s.id === prior.to) && prior.boardId === boardNode.id) {
+            arrowsKept++;
             continue;
         }
-        const target = matchScreenAt(head, screenRects, 14, source.id);
-        if (!target) {
-            unmatched.push({ id: v.id, name: v.name, reason: 'no-target-screen' });
+        const pts0 = absPoints(v);
+        if (!pts0) {
+            unmatched.push({ id: h.id, name: h.name, reason: 'no-arrowhead' });
             continue;
         }
-        const dot = nearestUnclaimed(tail, dots, 12, claimed);
-        if (!dot) {
-            unmatched.push({ id: v.id, name: v.name, reason: 'no-start-dot' });
+        const tail = pts0[0] as Pt;
+        const head = pts0[pts0.length - 1] as Pt;
+        const ends = resolveArrowEnds(tail, head, refs, { from: prior?.from, to: prior?.to, groupName: h.name });
+        if (!ends.ok) {
+            unmatched.push({ id: h.id, name: h.name, reason: ends.reason, ...(ends.candidates ? { candidates: ends.candidates } : {}) });
             continue;
         }
-        const lab = nearestUnclaimed(longestSegmentMid(abs), labels, 60, claimed);
-        if (!lab) {
-            unmatched.push({ id: v.id, name: v.name, reason: 'no-label' });
-            continue;
-        }
-        claimed.add(dot.id);
-        claimed.add(lab.id);
-        const trig = matchTrigger(tail, triggersIn(screenRects.find((s) => s.id === source.id) as (typeof screenRects)[number]), target.id);
-        const textNode = firstOf(lab.node, (n): n is TextNode => n.type === 'TEXT');
         planned.push({
             vector: v,
-            dot: dot.node,
-            label: lab.node,
-            labelText: textNode?.characters ?? v.name.replace(/^Arrow ·\s*/, ''),
-            from: source.id,
-            to: target.id,
-            trigger: trig?.id ?? null,
-            points: abs,
+            dot,
+            label: lab,
+            labelText: textOf(lab, prior?.label ?? v.name.replace(/^Arrow ·\s*/, '')),
+            from: ends.from.id,
+            to: ends.to.id,
+            trigger: triggerFor(ends.from.id, ends.to.id, tail, ends.stale),
+            points: pts0,
+            holder: h,
+            stale: ends.stale,
+            prior,
         });
     }
 
+    const holderParts = new Set(holders.flatMap((h) => h.children.map((x) => x.id)));
+    const looseNodes = groups.flatMap((g) => [...g.children]).filter((c) => !holderParts.has(c.id));
+    const dots = looseNodes
+        .filter((c): c is EllipseNode => c.type === 'ELLIPSE' && c.width <= 16 && c.height <= 16)
+        .map((c) => ({ id: c.id, node: c, at: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
+    const labels = looseNodes
+        .filter((c): c is FrameNode => c.type === 'FRAME' && c.name.startsWith('Label ·'))
+        .map((c) => ({ id: c.id, node: c, at: { x: rectOf(c).x + c.width / 2, y: rectOf(c).y + c.height / 2 } }));
+    const looseVectors: { node: VectorNode; abs: Pt[] }[] = [];
+    for (const v of looseNodes) {
+        if (v.type !== 'VECTOR') continue;
+        const abs = absPoints(v);
+        if (!abs) {
+            unmatched.push({ id: v.id, name: v.name, reason: 'no-arrowhead' });
+            continue;
+        }
+        if (!inside(abs[0] as Pt, bounds, MAX_OFFSET)) {
+            outsideBoard++;
+            continue;
+        }
+        looseVectors.push({ node: v, abs });
+    }
+    const paired = pairLooseParts(
+        looseVectors.map((l) => ({ id: l.node.id, tail: l.abs[0] as Pt, mid: longestSegmentMid(l.abs) })),
+        dots,
+        labels,
+    );
+    for (const u of paired.unpaired) {
+        const l = looseVectors.find((x) => x.node.id === u.vectorId) as (typeof looseVectors)[number];
+        unmatched.push({ id: l.node.id, name: l.node.name, reason: u.reason });
+    }
+    for (const pr of paired.pairs) {
+        const l = looseVectors.find((x) => x.node.id === pr.vectorId) as (typeof looseVectors)[number];
+        const dot = dots.find((d) => d.id === pr.dotId) as (typeof dots)[number];
+        const lab = labels.find((x) => x.id === pr.labelId) as (typeof labels)[number];
+        const tail = l.abs[0] as Pt;
+        const head = l.abs[l.abs.length - 1] as Pt;
+        const ends = resolveArrowEnds(tail, head, refs);
+        if (!ends.ok) {
+            unmatched.push({ id: l.node.id, name: l.node.name, reason: ends.reason, ...(ends.candidates ? { candidates: ends.candidates } : {}) });
+            continue;
+        }
+        planned.push({
+            vector: l.node,
+            dot: dot.node,
+            label: lab.node,
+            labelText: textOf(lab.node, l.node.name.replace(/^Arrow ·\s*/, '')),
+            from: ends.from.id,
+            to: ends.to.id,
+            trigger: triggerFor(ends.from.id, ends.to.id, tail, ends.stale),
+            points: l.abs,
+            holder: null,
+            stale: ends.stale,
+            prior: null,
+        });
+    }
+
+    const badgeCandidates = collectBadges(siblings).map((n) => ({ id: n.id, name: n.name, rect: rectOf(n) }));
+    const prevScreens = new Map(screenRects.map((s) => [s.id, readMeta(s.node, SCREEN_KEY, parseScreenMeta)]));
+    const own = (id: string) => {
+        const m = prevScreens.get(id);
+        return m && m.boardId === boardNode.id ? m : null;
+    };
+    const liveBadge = new Set(badgeCandidates.map((b) => b.id));
+    const keptBadge = new Set(screenRects.flatMap((s) => (own(s.id)?.badgeId && liveBadge.has(own(s.id)?.badgeId as string) ? [own(s.id)?.badgeId as string] : [])));
+    const badgeLinks = linkBadges(
+        refs,
+        badgeCandidates,
+        keptBadge,
+        new Set(screenRects.filter((s) => own(s.id)?.badgeId && liveBadge.has(own(s.id)?.badgeId as string)).map((s) => s.id)),
+    );
+
     if (!dryRun) {
         boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
+        boardNode.locked = true;
         for (const s of screenRects) {
             const cell = cellOfRect(s.rect, boardMeta);
             const assigned = assignScreenTexts(s.rect, texts);
-            const meta: ScreenMeta = { v: 1, kind: 'screen', boardId: boardNode.id, col: cell.col, row: cell.row, ...assigned, groupId: s.groupId };
+            const prev = own(s.id);
+            const badgeId = badgeLinks.get(s.id) ?? (prev?.badgeId && liveBadge.has(prev.badgeId) ? prev.badgeId : null);
+            const meta: ScreenMeta = {
+                ...(prev ?? {}),
+                v: 1,
+                kind: 'screen',
+                boardId: boardNode.id,
+                col: cell.col,
+                row: cell.row,
+                labelId: assigned.labelId ?? prev?.labelId ?? null,
+                routeId: assigned.routeId ?? prev?.routeId ?? null,
+                groupId: s.groupId,
+                ...(badgeId ? { badgeId } : {}),
+            };
             s.node.setSharedPluginData(FLOW_NAMESPACE, SCREEN_KEY, JSON.stringify(meta));
-            const routeNode = assigned.routeId ? await sceneById(assigned.routeId) : null;
+            const routeNode = meta.routeId ? await sceneById(meta.routeId) : null;
             if (routeNode?.type === 'TEXT') await fitRoute(routeNode, s.node.width, null);
+        }
+        const adopted: Board = { node: boardNode, meta: boardMeta, arrows: arrowsGroup, labels: labelsHolder && 'children' in labelsHolder ? (labelsHolder as SceneNode & ChildrenMixin) : null };
+        if (planned.length || arrowsKept || labelsHolder) await ensureLabels(adopted);
+        const labelsBox = adopted.labels ?? null;
+        if (labelsBox) {
+            boardMeta.labelsGroupId = labelsBox.id;
+            boardNode.setSharedPluginData(FLOW_NAMESPACE, BOARD_KEY, JSON.stringify(boardMeta));
         }
         for (const p of planned) {
             const container = p.vector.parent && 'children' in p.vector.parent ? p.vector.parent : arrowsGroup;
-            const group = figma.group([p.vector, p.dot, p.label], container as BaseNode & ChildrenMixin);
+            const group = p.holder ?? figma.group([p.vector, p.dot], container as BaseNode & ChildrenMixin);
+            if (labelsBox && p.label.parent !== labelsBox) moveInto(p.label, labelsBox);
             const fromName = screenRects.find((s) => s.id === p.from)?.node.name ?? p.from;
             const toName = screenRects.find((s) => s.id === p.to)?.node.name ?? p.to;
             group.name = arrowGroupName(fromName, toName, p.labelText);
+            const keepTrigger = p.prior?.trigger && (await sceneById(p.prior.trigger)) ? p.prior.trigger : p.trigger;
             writeArrowMeta(group, {
                 v: 1,
                 kind: 'arrow',
                 boardId: boardNode.id,
                 from: p.from,
                 to: p.to,
-                trigger: p.trigger,
+                trigger: keepTrigger,
                 label: p.labelText,
-                mode: p.trigger ? 'trigger' : 'auto',
+                mode: keepTrigger ? 'trigger' : 'auto',
+                ...(p.prior?.exit ? { exit: p.prior.exit } : {}),
                 vectorId: p.vector.id,
                 dotId: p.dot.id,
                 labelId: p.label.id,
             });
         }
+        if (labelsBox) {
+            for (const h of holders) {
+                const inside = h.removed ? undefined : h.children.find((x): x is FrameNode => x.type === 'FRAME' && x.name.startsWith('Label ·'));
+                if (inside && h.children.some((x) => x.type === 'VECTOR')) moveInto(inside, labelsBox);
+            }
+        }
+    }
+
+    const consolidation = planConsolidation(groups.map((g) => ({ id: g.id, childIds: g.children.map((c) => c.id) })));
+    let arrowsConsolidated = 0;
+    if (!dryRun && consolidation) {
+        for (const m of consolidation.moves) {
+            const node = await sceneById(m.nodeId);
+            if (!node || !('x' in node)) continue;
+            const before = rectOf(node);
+            arrowsGroup.appendChild(node);
+            const d = restoreDelta(before, rectOf(node));
+            if (Math.abs(d.x) > 0.01 || Math.abs(d.y) > 0.01) {
+                node.x += d.x;
+                node.y += d.y;
+            }
+            arrowsConsolidated++;
+        }
+        for (const id of consolidation.emptied) {
+            const extra = await sceneById(id);
+            if (extra && 'children' in extra && !extra.children.length) extra.remove();
+        }
+    } else if (consolidation) {
+        arrowsConsolidated = consolidation.moves.length;
     }
 
     const preview: JsonObject[] = planned.map((p) => ({
@@ -660,6 +986,12 @@ export const adoptBoard: Handler = async (args) => {
         arrowStyle: style as unknown as JsonObject,
         screens: screenRects.length,
         arrowsAdopted: planned.length,
+        arrowsConsolidated,
+        arrowsRelinked: planned.filter((p) => p.holder).length,
+        arrowsStale: planned.filter((p) => p.stale).length,
+        arrowsAlreadyAdopted: arrowsKept,
+        badgesLinked: badgeLinks.size,
+        reran: rerun,
         arrowsWithTrigger: planned.filter((p) => p.trigger).length,
         unmatched,
         outsideBoard,

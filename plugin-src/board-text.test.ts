@@ -171,3 +171,45 @@ describe('flow groups', () => {
         expect(out.issues.join('\n')).toContain('Welcome: flow group gone no longer exists');
     });
 });
+
+describe('grouped layout grids', () => {
+    const pitch = { colWidth: 400, rowHeight: 900 };
+    const layouts = [
+        { id: 'board', name: 'Board', originX: 100, originY: 200 },
+        { id: 'G', name: 'Passkeys', originX: 5000, originY: 3000 },
+    ];
+    const local = (id: string, name: string, layoutId: string, col: number, row: number, extra: Partial<BoardScreen> = {}): BoardScreen => {
+        const l = layouts.find((x) => x.id === layoutId) as (typeof layouts)[number];
+        const x = l.originX + col * pitch.colWidth;
+        const y = l.originY + row * pitch.rowHeight;
+        return { id, name, col, row, x, y, labelX: x, layoutId, ...extra };
+    };
+    const input: BoardInput = {
+        boardId: '1:1',
+        name: 'Board · KYC',
+        meta: { originX: 100, originY: 200, ...pitch },
+        layouts,
+        screens: [local('a', 'Welcome', 'board', 0, 0), local('b', 'Create passkey', 'G', 0, 0), local('c', 'Confirm', 'G', 1, 0)],
+        arrows: [{ from: 'a', to: 'b', label: 'Continue', mode: 'auto', triggerName: null, exit: undefined }],
+    };
+
+    test('one grid per layout, titled with its group name and origin, cells local to each', () => {
+        const out = renderBoard(input, 16);
+        expect(out.grids?.map((g) => [g.id, g.name, g.cols, g.rows])).toEqual([['board', 'Board', 1, 1], ['G', 'Passkeys', 2, 1]]);
+        expect(out.grid).toContain('Passkeys (origin 5000,3000)');
+        expect(out.grid).toContain('Create passkey');
+        expect(out.issues).toEqual([]);
+    });
+
+    test('screens in different groups may share a local cell without colliding', () => {
+        const out = renderBoard(input, 10);
+        expect(out.issues.some((i) => i.includes('holds'))).toBe(false);
+    });
+
+    test('an arrow into another group is not "pointing left" by local column, and a screen off its grid is reported', () => {
+        const back = { ...input, arrows: [{ from: 'c', to: 'a', label: 'Back', mode: 'auto' as const, triggerName: null, exit: undefined }] };
+        expect(renderBoard(back, 10).issues.some((i) => i.includes('points left'))).toBe(true);
+        const off = { ...input, screens: [local('a', 'Welcome', 'board', 0, 0), local('b', 'Create passkey', 'G', 0, 0, { x: 5000 + 140 })] };
+        expect(renderBoard(off, 10).issues.some((i) => i.includes('Create passkey') && i.includes('off'))).toBe(true);
+    });
+});

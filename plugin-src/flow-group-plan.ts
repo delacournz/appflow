@@ -1,12 +1,13 @@
 /** Pure planning for flow group tools: membership and nesting rules, extras moves, z-order. No `figma` global. */
-import { boundaryExtras, type BoundaryExtras } from './flow-group';
-import { ROUTE_TOP } from './flow-group';
+import { boundaryExtras, boundaryNeeds, type BoundaryExtras, type BoundaryInput } from './flow-group';
+import { GROUP_CLEAR, ROUTE_TOP } from './flow-group';
 import type { Move } from './grid';
 import type { GroupStyle } from './flowmeta';
-import { cleanExtras, trackStart, type Extras } from './tracks';
+import type { Rect } from './rect';
+import { cleanExtras, trackStart, type Extras, type ExtrasInput } from './tracks';
 
 /** The group fields the rules need. A group's `screenIds` are its own screens only; a child's screens are not repeated on its parent. */
-export type GroupRec = { id: string; name: string; parentId?: string; screenIds: string[] };
+export type GroupRec = { id: string; name: string; parentId?: string; screenIds: string[]; style?: GroupStyle };
 
 type Fail = { ok: false; error: string };
 
@@ -114,6 +115,8 @@ export function planAssign(existing: readonly GroupRec[], screenId: string, targ
     return { ok: true, changes };
 }
 
+const STYLE_KEYS: readonly string[] = ['color', 'strokeWeight', 'titleSize', 'padding', 'titleFill', 'titleColor'];
+
 export type StyleResult = { ok: true; style: GroupStyle } | Fail;
 
 /** `base` with the fields of a user-supplied style object laid over it. Unknown or ill-typed fields are errors. */
@@ -121,19 +124,22 @@ export function mergeStyle(base: GroupStyle, raw: unknown): StyleResult {
     if (raw === undefined) return { ok: true, style: base };
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ok: false, error: 'style must be an object.' };
     const o = raw as Record<string, unknown>;
-    const unknown = Object.keys(o).filter((k) => k !== 'color' && k !== 'strokeWeight' && k !== 'titleSize');
+    const unknown = Object.keys(o).filter((k) => !STYLE_KEYS.includes(k));
     if (unknown.length) return { ok: false, error: `Unknown style fields: ${unknown.join(', ')}.` };
     const style = { ...base };
-    if (o.color !== undefined) {
-        if (typeof o.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(o.color)) return { ok: false, error: 'style.color must be #RRGGBB.' };
-        style.color = o.color;
+    for (const k of ['color', 'titleFill', 'titleColor'] as const) {
+        const v = o[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(v)) return { ok: false, error: `style.${k} must be #RRGGBB.` };
+        style[k] = v;
     }
-    for (const k of ['strokeWeight', 'titleSize'] as const) {
+    for (const k of ['strokeWeight', 'titleSize', 'padding'] as const) {
         const v = o[k];
         if (v === undefined) continue;
         if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return { ok: false, error: `style.${k} must be a positive number.` };
         style[k] = v;
     }
+    if (style.padding < GROUP_CLEAR) return { ok: false, error: `style.padding must be at least ${GROUP_CLEAR} (the clearance kept between a box line and content).` };
     return { ok: true, style };
 }
 
@@ -161,7 +167,7 @@ export function reconcileMembership(groups: readonly GroupRec[], screens: readon
         const parent = g.parentId ? byId.get(g.parentId) : undefined;
         const parentId = parent && !parent.parentId && parent.id !== g.id ? g.parentId : undefined;
         if (screenIds.length !== g.screenIds.length || parentId !== g.parentId) changed.add(g.id);
-        return { id: g.id, name: g.name, screenIds, ...(parentId ? { parentId } : {}) };
+        return { id: g.id, name: g.name, screenIds, ...(parentId ? { parentId } : {}), ...(g.style ? { style: g.style } : {}) };
     });
     const screenFixes = screens.flatMap((s) => {
         const want = owner.get(s.id) ?? null;
@@ -178,41 +184,61 @@ export type CellScreen = { id: string; col: number; row: number };
  * and labels (the router never leaves it). Rows keep the base gap less `ROUTE_TOP`, because the lower screen's route
  * text already sits in that gap and `boundaryExtras` counts it separately.
  */
-export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): BoundaryExtras {
+export function groupBoundaryExtras(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid, bonus?: BoundaryExtras): BoundaryExtras {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs) return { colExtra: [], rowExtra: [] };
+    const cols = boundaryExtras({ ...inputs.cols, ...(bonus ? { bonus } : {}) });
+    const rows = boundaryExtras({ ...inputs.rows, ...(bonus ? { bonus } : {}) });
+    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+}
+
+/** What a uniform grid must add to the base pitch so every boundary fits: the largest column and row need. */
+export function groupBoundaryNeeds(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): { col: number; row: number } {
+    const inputs = boundaryInputs(groups, screens, base);
+    if (!inputs) return { col: 0, row: 0 };
+    return { col: boundaryNeeds(inputs.cols).col, row: boundaryNeeds(inputs.rows).row };
+}
+
+function boundaryInputs(groups: readonly GroupRec[], screens: readonly CellScreen[], base: BaseGrid): { cols: BoundaryInput; rows: BoundaryInput } | null {
     const owner = new Map<string, string>();
     for (const g of groups) for (const id of g.screenIds) if (!owner.has(id)) owner.set(id, g.id);
     const cellOf = new Map(screens.map((s) => [s.id, { col: s.col, row: s.row }]));
     const cellsOf = (id: string) => screens.filter((s) => owner.get(s.id) === id).map((s) => ({ col: s.col, row: s.row }));
-    const boundary = groups.map((g) => ({ id: g.id, ...(g.parentId ? { parentId: g.parentId } : {}), cells: cellsOf(g.id) }));
+    const boundary = groups.map((g) => ({
+        id: g.id,
+        ...(g.parentId ? { parentId: g.parentId } : {}),
+        cells: cellsOf(g.id),
+        ...(g.style ? { metrics: { padding: g.style.padding, strokeWeight: g.style.strokeWeight, titleSize: g.style.titleSize } } : {}),
+    }));
     const ungrouped = screens.filter((s) => !owner.has(s.id)).map((s) => cellOf.get(s.id) as { col: number; row: number });
-    if (!boundary.some((b) => b.cells.length)) return { colExtra: {}, rowExtra: {} };
+    if (!boundary.some((b) => b.cells.length)) return null;
     const colGap = base.colWidth - base.screenW;
     const rowGap = base.rowHeight - base.screenH;
-    const cols = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: colGap });
-    const rows = boundaryExtras({ groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) });
-    return { colExtra: cols.colExtra, rowExtra: rows.rowExtra };
+    return {
+        cols: { groups: boundary, ungrouped, base, laneBand: colGap },
+        rows: { groups: boundary, ungrouped, base, laneBand: Math.max(0, rowGap - ROUTE_TOP) },
+    };
 }
 
-export const sameExtras = (a: Extras | undefined, b: Extras | undefined): boolean => {
+export const sameExtras = (a: ExtrasInput | undefined, b: ExtrasInput | undefined): boolean => {
     const [x, y] = [cleanExtras(a), cleanExtras(b)];
-    const keys = Object.keys(x);
-    return keys.length === Object.keys(y).length && keys.every((k) => x[Number(k)] === y[Number(k)]);
+    return x.length === y.length && x.every((b, i) => b.at === y[i]?.at && b.from === y[i]?.from && b.to === y[i]?.to && b.px === y[i]?.px);
 };
 
 /**
- * One move (cell to the same cell) for every screen whose position changes when the board's extras change: every screen
- * at or after a changed boundary. `applyMoves` shifts it by the difference between its new cell rect and where it is.
+ * One move (cell to the same cell) for every screen whose position changes when the board's extras change: only screens
+ * at or after a changed boundary AND inside its band. `applyMoves` shifts it by the difference between its new cell rect and where it is.
  */
 export function extrasMoves(
     screens: readonly CellScreen[],
-    meta: BaseGrid & { colExtra?: Extras; rowExtra?: Extras },
-    next: { colExtra: Extras; rowExtra: Extras },
+    meta: BaseGrid & { colExtra?: ExtrasInput; rowExtra?: ExtrasInput },
+    next: { colExtra: ExtrasInput; rowExtra: ExtrasInput },
 ): Move[] {
     return screens
         .filter(
             (s) =>
-                trackStart(s.col, meta.colWidth, meta.colExtra) !== trackStart(s.col, meta.colWidth, next.colExtra) ||
-                trackStart(s.row, meta.rowHeight, meta.rowExtra) !== trackStart(s.row, meta.rowHeight, next.rowExtra),
+                trackStart(s.col, meta.colWidth, meta.colExtra, s.row) !== trackStart(s.col, meta.colWidth, next.colExtra, s.row) ||
+                trackStart(s.row, meta.rowHeight, meta.rowExtra, s.col) !== trackStart(s.row, meta.rowHeight, next.rowExtra, s.col),
         )
         .map((s) => ({ id: s.id, from: { col: s.col, row: s.row }, to: { col: s.col, row: s.row } }));
 }
@@ -238,3 +264,29 @@ export function hexToRgb(hex: string): { r: number; g: number; b: number } {
 export const holderName = (boardName: string): string => `Flow groups · ${boardName}`;
 export const rectName = (name: string): string => `Group · ${name}`;
 export const titleName = (name: string): string => `Group title · ${name}`;
+
+export type InternalArrow = { from: string; to: string; rects: readonly Rect[] };
+
+/**
+ * Rects (arrow labels and lines) a group's box must wrap: those of arrows whose BOTH ends are screens of the group or of
+ * its children. Arrows that cross a box edge are not included; their labels belong in the gap between boxes.
+ */
+export function internalArrowRects(groups: readonly GroupRec[], arrows: readonly InternalArrow[]): Map<string, Rect[]> {
+    const out = new Map<string, Rect[]>();
+    for (const g of groups) {
+        const family = new Set([...g.screenIds, ...groups.filter((k) => k.parentId === g.id).flatMap((k) => k.screenIds)]);
+        const rects = arrows.filter((a) => family.has(a.from) && family.has(a.to)).flatMap((a) => [...a.rects]);
+        if (rects.length) out.set(g.id, rects);
+    }
+    return out;
+}
+
+const sameRect = (a: Rect, b: Rect): boolean => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
+
+/** Whether two fits drew the same boxes and title bars (so rerouting again cannot move any label's obstacles). */
+export function sameBoxes(a: readonly { id: string; box: Rect; title: Rect }[], b: readonly { id: string; box: Rect; title: Rect }[]): boolean {
+    return a.length === b.length && a.every((x) => {
+        const y = b.find((k) => k.id === x.id);
+        return !!y && sameRect(x.box, y.box) && sameRect(x.title, y.title);
+    });
+}
