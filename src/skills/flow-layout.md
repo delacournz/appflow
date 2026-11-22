@@ -55,6 +55,8 @@ Boards made while screens were grouped have `Screen · {name}` groups and `Label
 
 Arrows are a vector, a 10 px start dot and a label frame, grouped. The arrows group always sits above the screens.
 
+Long runs carry direction chevrons: small V marks in the arrow's own vector, pointing the way it flows, one near the start and one near the end of each run (more every 1200 px on very long runs, none on runs under 400 px, none under a label). The tools redraw them with the line; never draw or move them by hand.
+
 ## Rules
 
 1. **The main path runs left to right.** Each next screen goes in the column to the right of the screen before it, on the same row.

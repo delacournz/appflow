@@ -1577,6 +1577,58 @@ ${logs.join(`
     return badges.filter((b) => !referenced.has(b.id) && inside(b.rect)).map((b) => b.id);
   }
 
+  // plugin-src/chevrons.ts
+  var CHEVRON = { minRun: 400, inset: 160, spacing: 1200, minGap: 400, size: 9 };
+  function chevronOffsets(length, opts = {}) {
+    const { minRun, inset, spacing, minGap } = CHEVRON;
+    if (length < minRun)
+      return [];
+    let offsets;
+    if (length - 2 * inset < minGap) {
+      offsets = [length / 2];
+    } else {
+      const fromEnd = [];
+      for (let at = length - inset;at >= inset + minGap; at -= spacing)
+        fromEnd.push(at);
+      offsets = [inset, ...fromEnd.reverse()];
+    }
+    return opts.last ? offsets.filter((o) => o <= length - 2 * inset) : offsets;
+  }
+  var overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  function boundsOf(c, pad) {
+    const xs = c.map((p) => p.x);
+    const ys = c.map((p) => p.y);
+    const x = Math.min(...xs) - pad;
+    const y = Math.min(...ys) - pad;
+    return { x, y, width: Math.max(...xs) + pad - x, height: Math.max(...ys) + pad - y };
+  }
+  function chevronMarks(points, avoid = [], pad = 6) {
+    const { size } = CHEVRON;
+    const marks = [];
+    const last = points.length - 2;
+    for (let i = 0;i <= last; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const length = Math.hypot(b.x - a.x, b.y - a.y);
+      if (length === 0)
+        continue;
+      const d = { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
+      const n = { x: -d.y, y: d.x };
+      for (const off of chevronOffsets(length, { last: i === last })) {
+        const p = { x: a.x + d.x * off, y: a.y + d.y * off };
+        const back = { x: p.x - d.x * size / 2, y: p.y - d.y * size / 2 };
+        const mark = [
+          { x: back.x - n.x * size, y: back.y - n.y * size },
+          { x: p.x + d.x * size / 2, y: p.y + d.y * size / 2 },
+          { x: back.x + n.x * size, y: back.y + n.y * size }
+        ];
+        if (!avoid.some((r) => overlaps(boundsOf(mark, pad), r)))
+          marks.push(mark);
+      }
+    }
+    return marks;
+  }
+
   // plugin-src/duplicate-plan.ts
   function cellRect(board, col, row) {
     return { x: board.originX + trackStart(col, board.colWidth, board.colExtra, row), y: board.originY + trackStart(row, board.rowHeight, board.rowExtra, col), width: board.screenW, height: board.screenH };
@@ -2258,7 +2310,7 @@ ${logs.join(`
   var titleHeightOf = (size) => titleLineOf(size) + 2 * TITLE_PAD_Y;
   var edgeOf = (m) => m.padding + m.strokeWeight;
   var inflate = (r, by) => ({ x: r.x - by, y: r.y - by, width: r.width + 2 * by, height: r.height + 2 * by });
-  var overlaps = (a, b) => overlapsAny(a, [b]) === 0;
+  var overlaps2 = (a, b) => overlapsAny(a, [b]) === 0;
   var contains = (outer, inner) => inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
   function memberContentRect(frame, route, badge) {
     const topLine = Math.min(frame.y - ROUTE_ABOVE, route?.y ?? Infinity, badge?.y ?? Infinity);
@@ -2450,10 +2502,10 @@ ${logs.join(`
         if (overlapsAny(c.rect, bands) >= 0) {
           issues.push(c.kind === "label" ? { kind: "group-crosses-label", groupId: g.id, labelId: c.id } : { kind: "group-crosses-content", groupId: g.id, contentId: c.id, contentKind: c.kind });
         }
-        if (c.kind === "screen" && overlaps(c.rect, g.box) && !(c.ownerGroupId && family.has(c.ownerGroupId))) {
+        if (c.kind === "screen" && overlaps2(c.rect, g.box) && !(c.ownerGroupId && family.has(c.ownerGroupId))) {
           issues.push({ kind: "group-encloses-foreign", groupId: g.id, screenId: c.id });
         }
-        if (overlaps(titleZone, c.rect))
+        if (overlaps2(titleZone, c.rect))
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: c.kind, withId: c.id });
       }
       for (const o of groups) {
@@ -2461,7 +2513,7 @@ ${logs.join(`
           continue;
         if (overlapsAny(g.title, strokeBands(o.box, o.strokeWeight)) >= 0)
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: "box", withId: o.id });
-        if (g.id < o.id && overlaps(g.title, o.title))
+        if (g.id < o.id && overlaps2(g.title, o.title))
           issues.push({ kind: "title-overlaps", groupId: g.id, withKind: "title", withId: o.id });
       }
     }
@@ -2470,7 +2522,7 @@ ${logs.join(`
         const [a, b] = [groups[i], groups[j]];
         const child = a.parentId === b.id ? a : b.parentId === a.id ? b : null;
         const parent = child === a ? b : a;
-        const bad = child ? overlaps(child.box, parent.box) && !contains(parent.box, child.box) : overlaps(inflate(a.box, GROUP_CLEAR), b.box);
+        const bad = child ? overlaps2(child.box, parent.box) && !contains(parent.box, child.box) : overlaps2(inflate(a.box, GROUP_CLEAR), b.box);
         if (bad)
           issues.push({ kind: "group-overlaps-group", groupId: a.id, otherId: b.id });
       }
@@ -4328,23 +4380,23 @@ ${logs.join(`
     }
     if (links.some((l) => l.length > 2))
       return null;
-    const ends = links.map((l, i) => l.length === 1 ? i : -1).filter((i) => i >= 0);
     const head = heads[0];
-    const tail = ends.find((i) => i !== head);
-    if (tail === undefined || !ends.includes(head))
+    if (links[head]?.length !== 1)
       return null;
-    const order = [tail];
+    const order = [head];
     let prev = -1;
-    let at = tail;
-    while (at !== head) {
+    let at = head;
+    for (;; ) {
       const next = (links[at] ?? []).find((n) => n !== prev);
       if (next === undefined)
+        break;
+      if (order.length > vertices.length)
         return null;
       prev = at;
       at = next;
       order.push(at);
     }
-    return order.map((i) => {
+    return order.reverse().map((i) => {
       const v = vertices[i];
       return { x: v.x, y: v.y };
     });
@@ -5358,9 +5410,11 @@ ${logs.join(`
     const variable = await figma.variables.getVariableByIdAsync(style.strokeVariableId);
     return variable ? figma.variables.setBoundVariableForPaint(paint, "color", variable) : paint;
   }
-  async function writeVector(v, points, style) {
-    const minX = Math.min(...points.map((p) => p.x));
-    const minY = Math.min(...points.map((p) => p.y));
+  async function writeVector(v, points, style, avoid = []) {
+    const marks = chevronMarks(points, avoid);
+    const all = [...points, ...marks.flat()];
+    const minX = Math.min(...all.map((p) => p.x));
+    const minY = Math.min(...all.map((p) => p.y));
     const last = points.length - 1;
     const vertices = points.map((p, i) => ({
       x: p.x - minX,
@@ -5370,6 +5424,12 @@ ${logs.join(`
       cornerRadius: style.cornerRadius
     }));
     const segments = points.slice(1).map((_, i) => ({ start: i, end: i + 1 }));
+    for (const mark of marks) {
+      const at = vertices.length;
+      for (const p of mark)
+        vertices.push({ x: p.x - minX, y: p.y - minY, strokeCap: "ROUND", strokeJoin: "ROUND", cornerRadius: 0 });
+      segments.push({ start: at, end: at + 1 }, { start: at + 1, end: at + 2 });
+    }
     await v.setVectorNetworkAsync({ vertices, segments, regions: [] });
     const at = toLocal(v.parent ?? figma.currentPage, { x: minX, y: minY });
     v.x = at.x;
@@ -5487,6 +5547,11 @@ ${logs.join(`
         centre(p.label, at);
     }
     return res.blocked;
+  }
+  async function drawChevrons(lines, labels, style) {
+    const avoid = labels.map(rectOf);
+    for (const l of lines)
+      await writeVector(l.vector, l.route.points, style, avoid);
   }
   function collectScreens(children, depth = 0) {
     const out = [];
@@ -5612,6 +5677,7 @@ ${logs.join(`
     const blocked = await applyRoute(parts, route, style, groups);
     const fixedLabels = (await Promise.all(existing.filter((a) => a !== match).map((a) => partsOf(a.meta)))).flatMap((p) => p ? [p.label] : []);
     const crowded = (await separateBoardLabels([{ id: "new", route, label: parts.label }], fixedLabels, groups)).length > 0;
+    await drawChevrons([{ vector: parts.vector, route }], [...fixedLabels, parts.label], style);
     const meta = {
       v: 1,
       kind: "arrow",
@@ -5713,7 +5779,7 @@ ${logs.join(`
         if (blocked)
           warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
         rerouted.push(l.entry.group.id);
-        drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label });
+        drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label, vector: parts.vector });
         if (plan.route.backwards)
           backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
       }
@@ -5721,6 +5787,7 @@ ${logs.join(`
         const meta = live.find((l) => l.entry.group.id === id)?.entry.meta;
         warnings.push({ arrowGroupId: id, label: meta?.label ?? "", warning: "label overlaps another arrow label and no spot on its path is clear" });
       }
+      await drawChevrons(drawn, [...drawn.map((d) => d.label), ...kept], board.meta.arrowStyle);
       raiseArrows(board);
     }
     return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, groupObstacles: obstacleCount, reroutedIds: rerouted, backwards, deleted, errors, warnings };
@@ -6409,7 +6476,7 @@ ${logs.join(`
   // plugin-src/flow-group-adopt-handler.ts
   var MAX_DEPTH = 4;
   var MAX_NODES = 5000;
-  var overlaps2 = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  var overlaps3 = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
   function strokeVisible(n) {
     if (!("strokes" in n))
       return false;
@@ -6448,7 +6515,7 @@ ${logs.join(`
       if (out.length >= MAX_NODES || skip.has(n.id) || !n.visible || n.name.startsWith("Flow groups ·"))
         return;
       const rect = rectOf(n);
-      if (!overlaps2(rect, area))
+      if (!overlaps3(rect, area))
         return;
       if (n.type === "RECTANGLE" || n.type === "FRAME" || n.type === "TEXT" || n.type === "INSTANCE") {
         const text = textOf(n);
@@ -8946,7 +9013,7 @@ ${v.grid}`).join(`
   figma.on("currentpagechange", activity);
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "hello") {
-      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "dafd06d5", fileKey: figma.fileKey ?? null, docId: DOC_ID });
+      figma.ui.postMessage({ type: "hello", fileName: figma.root.name, editorType: figma.editorType, build: "cb3fcbc4", fileKey: figma.fileKey ?? null, docId: DOC_ID });
       return;
     }
     if (msg.type !== "command")
@@ -8954,7 +9021,7 @@ ${v.grid}`).join(`
     const handler = handlers[msg.cmd.tool];
     let reply;
     try {
-      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"dafd06d5"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
+      reply = handler ? await handler(msg.cmd.args ?? {}) : fail(`The plugin has no tool "${msg.cmd.tool}": the running plugin build (${"cb3fcbc4"}) is stale. Re-run Plugins → Development → AppFlow to load the latest build.`);
     } catch (error) {
       reply = fail(errorText(error));
     }
