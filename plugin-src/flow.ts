@@ -5,6 +5,7 @@ import { MAX_OFFSET, pairLooseParts, planConsolidation, resolveArrowEnds, restor
 import { arrowsContainerName, isArrowsContainerType, recoverableArrowIds, recoveryIndex } from './arrow-recovery';
 import { isLabelsContainerName, labelsContainerName, labelsInsertIndex, labelsToMigrate, stackingNeeds } from './arrow-labels';
 import { linkBadges } from './badge-link';
+import { chevronMarks } from './chevrons';
 import { classifyArrow, orderPath } from './flowlint';
 import {
     ARROW_KEY,
@@ -238,9 +239,15 @@ async function paintFor(style: Style): Promise<SolidPaint> {
     return variable ? figma.variables.setBoundVariableForPaint(paint, 'color', variable) : paint;
 }
 
-async function writeVector(v: VectorNode, points: readonly Pt[], style: Style): Promise<void> {
-    const minX = Math.min(...points.map((p) => p.x));
-    const minY = Math.min(...points.map((p) => p.y));
+/**
+ * Draws the arrow line, then a chevron on each long run pointing the way it flows (`chevronMarks`), as separate
+ * sub-paths of the same vector. Chevrons under a rect in `avoid` (arrow labels) are left out.
+ */
+async function writeVector(v: VectorNode, points: readonly Pt[], style: Style, avoid: readonly Rect[] = []): Promise<void> {
+    const marks = chevronMarks(points, avoid);
+    const all = [...points, ...marks.flat()];
+    const minX = Math.min(...all.map((p) => p.x));
+    const minY = Math.min(...all.map((p) => p.y));
     const last = points.length - 1;
     const vertices: VectorVertex[] = points.map((p, i) => ({
         x: p.x - minX,
@@ -250,6 +257,11 @@ async function writeVector(v: VectorNode, points: readonly Pt[], style: Style): 
         cornerRadius: style.cornerRadius,
     }));
     const segments: VectorSegment[] = points.slice(1).map((_, i) => ({ start: i, end: i + 1 }));
+    for (const mark of marks) {
+        const at = vertices.length;
+        for (const p of mark) vertices.push({ x: p.x - minX, y: p.y - minY, strokeCap: 'ROUND', strokeJoin: 'ROUND', cornerRadius: 0 });
+        segments.push({ start: at, end: at + 1 }, { start: at + 1, end: at + 2 });
+    }
     await v.setVectorNetworkAsync({ vertices, segments, regions: [] });
     const at = toLocal(v.parent ?? figma.currentPage, { x: minX, y: minY });
     v.x = at.x;
@@ -382,6 +394,12 @@ async function separateBoardLabels(placed: { id: string; route: Route; label: Fr
     return res.blocked;
 }
 
+/** Redraws each line once the labels have settled, so its chevrons skip every label on the board. */
+async function drawChevrons(lines: readonly { vector: VectorNode; route: Route }[], labels: readonly FrameNode[], style: Style): Promise<void> {
+    const avoid = labels.map(rectOf);
+    for (const l of lines) await writeVector(l.vector, l.route.points, style, avoid);
+}
+
 export type ScreenNode = { frame: FrameNode; group: GroupNode | null };
 
 /**
@@ -508,6 +526,7 @@ export const connect: Handler = async (args) => {
     const blocked = await applyRoute(parts, route, style, groups);
     const fixedLabels = (await Promise.all(existing.filter((a) => a !== match).map((a) => partsOf(a.meta)))).flatMap((p) => (p ? [p.label] : []));
     const crowded = (await separateBoardLabels([{ id: 'new', route, label: parts.label }], fixedLabels, groups)).length > 0;
+    await drawChevrons([{ vector: parts.vector, route }], [...fixedLabels, parts.label], style);
 
     const meta: ArrowMeta = {
         v: 1,
@@ -585,7 +604,7 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
         const groups = await obstaclesOf(board);
         obstacleCount += groups.length;
         const plans = planRoutes(board.meta, live.map((l) => ({ id: l.entry.group.id, ends: l.ends })), groups, boardScreenRects(board));
-        const drawn: { id: string; route: Route; label: FrameNode }[] = [];
+        const drawn: { id: string; route: Route; label: FrameNode; vector: VectorNode }[] = [];
         const kept: FrameNode[] = [];
         for (const [i, l] of live.entries()) {
             const plan = plans[i] as Plan;
@@ -608,13 +627,14 @@ export async function rerouteBoards(boards: Board[], only: Set<string> | null = 
             const blocked = await applyRoute(parts, plan.route, board.meta.arrowStyle, groups);
             if (blocked) warnings.push({ arrowGroupId: l.entry.group.id, label: l.entry.meta.label, warning: `label overlaps a group box: ${blocked}` });
             rerouted.push(l.entry.group.id);
-            drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label });
+            drawn.push({ id: l.entry.group.id, route: plan.route, label: parts.label, vector: parts.vector });
             if (plan.route.backwards) backwards.push({ arrowGroupId: l.entry.group.id, from: l.entry.meta.from, to: l.entry.meta.to, label: l.entry.meta.label });
         }
         for (const id of await separateBoardLabels(drawn, kept, groups)) {
             const meta = live.find((l) => l.entry.group.id === id)?.entry.meta;
             warnings.push({ arrowGroupId: id, label: meta?.label ?? '', warning: 'label overlaps another arrow label and no spot on its path is clear' });
         }
+        await drawChevrons(drawn, [...drawn.map((d) => d.label), ...kept], board.meta.arrowStyle);
         raiseArrows(board);
     }
     return { boards: boards.map((b) => b.node.id), rerouted: rerouted.length, groupObstacles: obstacleCount, reroutedIds: rerouted, backwards, deleted, errors, warnings };

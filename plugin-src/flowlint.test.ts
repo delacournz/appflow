@@ -22,6 +22,28 @@ describe('orderPath', () => {
         ]);
     });
 
+    test('ignores direction chevrons drawn in the same vector', () => {
+        const vertices = [
+            { x: 0, y: 0, strokeCap: 'NONE' },
+            { x: 500, y: 0, strokeCap: 'NONE' },
+            { x: 500, y: 300, strokeCap: 'ARROW_LINES' },
+            { x: 240, y: -10, strokeCap: 'ROUND' },
+            { x: 250, y: 0, strokeCap: 'ROUND' },
+            { x: 240, y: 10, strokeCap: 'ROUND' },
+        ];
+        const segments = [
+            { start: 0, end: 1 },
+            { start: 1, end: 2 },
+            { start: 3, end: 4 },
+            { start: 4, end: 5 },
+        ];
+        expect(orderPath(vertices, segments)).toEqual([
+            { x: 0, y: 0 },
+            { x: 500, y: 0 },
+            { x: 500, y: 300 },
+        ]);
+    });
+
     test('returns null when there is no single arrowhead or the path branches', () => {
         const pts = [
             { x: 0, y: 0 },

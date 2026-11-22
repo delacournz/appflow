@@ -30,6 +30,7 @@ A flow board is a grid of screens. It reads like a sentence:
 - Overlays and entry points sit straight above the screen they open over.
 - Arrows point right, down or up, never left. A return to an earlier step becomes a state copy of that screen, not a loop back.
 - Each arrow starts at the button, row, tab or link that triggers it, and `connect` points that control's prototype at the target, so Play works.
+- Long runs carry small chevrons near where they start and end, pointing the way the arrow flows, so a line that crosses the board still reads at a glance.
 
 Screens stay top-level frames so prototype Play and flow starting points work. Above each one sit its route text (the code path) and its build badge. The board tools move a screen, its route and badge together and redraw the arrows, so the board never drifts out of shape.
 

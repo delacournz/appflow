@@ -16,8 +16,8 @@ export type ArrowIssue = 'points-left' | 'runs-left';
 const isHead = (v: Vertex) => typeof v.strokeCap === 'string' && v.strokeCap.startsWith('ARROW');
 
 /**
- * The vertices of a single-line arrow, ordered from the tail to the
- * arrowhead. `null` when the vector has no single arrowhead or branches.
+ * The vertices of a single-line arrow, ordered from the tail to the arrowhead. Walks back from the arrowhead, so
+ * parts not joined to the line (direction chevrons) are ignored. `null` when the vector has no single arrowhead or branches.
  */
 export function orderPath(vertices: readonly Vertex[], segments: readonly Segment[]): Pt[] | null {
     const heads = vertices.map((v, i) => (isHead(v) ? i : -1)).filter((i) => i >= 0);
@@ -28,21 +28,20 @@ export function orderPath(vertices: readonly Vertex[], segments: readonly Segmen
         links[s.end]?.push(s.start);
     }
     if (links.some((l) => l.length > 2)) return null;
-    const ends = links.map((l, i) => (l.length === 1 ? i : -1)).filter((i) => i >= 0);
     const head = heads[0] as number;
-    const tail = ends.find((i) => i !== head);
-    if (tail === undefined || !ends.includes(head)) return null;
-    const order = [tail];
+    if (links[head]?.length !== 1) return null;
+    const order = [head];
     let prev = -1;
-    let at = tail;
-    while (at !== head) {
+    let at = head;
+    for (;;) {
         const next = (links[at] ?? []).find((n) => n !== prev);
-        if (next === undefined) return null;
+        if (next === undefined) break;
+        if (order.length > vertices.length) return null;
         prev = at;
         at = next;
         order.push(at);
     }
-    return order.map((i) => {
+    return order.reverse().map((i) => {
         const v = vertices[i] as Vertex;
         return { x: v.x, y: v.y };
     });
